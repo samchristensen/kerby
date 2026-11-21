@@ -35,4 +35,6 @@ export {
   isConversationId,
   listMessageRows,
   type MessageRowRecord,
+  recordToolExecution,
+  setLastError,
 } from "./repo.ts";

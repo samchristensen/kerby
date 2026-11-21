@@ -82,6 +82,7 @@ describe("conversation response", () => {
       },
       messages: [{ seq: 1, message: assistant, createdAt: "2026-11-21T10:00:01.000Z" }],
       busy: false,
+      lastError: null,
     });
     expect(JSON.stringify(parsed)).not.toContain("chain of thought");
     expect(parsed.messages[0]?.message).not.toHaveProperty("native");

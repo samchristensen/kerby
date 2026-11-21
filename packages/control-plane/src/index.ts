@@ -32,3 +32,4 @@ export {
   tenantDbPassword,
   tenantDbUrl,
 } from "./tenants.ts";
+export { recordUsage, type UsageEntry } from "./usage.ts";

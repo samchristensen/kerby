@@ -239,6 +239,42 @@ importers:
         specifier: 'catalog:'
         version: 4.6.7
 
+  services/worker:
+    dependencies:
+      '@kerby/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
+      '@kerby/blobs':
+        specifier: workspace:*
+        version: link:../../packages/blobs
+      '@kerby/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kerby/control-plane':
+        specifier: workspace:*
+        version: link:../../packages/control-plane
+      '@kerby/conversations':
+        specifier: workspace:*
+        version: link:../../packages/conversations
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@kerby/durable':
+        specifier: workspace:*
+        version: link:../../packages/durable
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@kerby/runtime-pi-durable':
+        specifier: workspace:*
+        version: link:../../packages/runtime-pi-durable
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+
 packages:
 
   '@anthropic-ai/sdk@0.129.0':

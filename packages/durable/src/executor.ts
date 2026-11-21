@@ -17,6 +17,8 @@ export type RunContext = {
   /** This attempt. A write that must not outlive it is fenced with `holdsRun`. */
   runId: string;
   attempt: number;
+  /** Attempts the task may have in all (null: unbounded). The last one failing fails the task for good. */
+  maxAttempts: number | null;
   queue: Queue;
   /** Aborted when the lease is lost: stop at once, the task belongs to another run now. */
   signal: AbortSignal;
@@ -91,6 +93,7 @@ export function createTenantExecutor(
           taskId: claim.task.task_id,
           runId: claim.task.run_id,
           attempt: claim.task.attempt,
+          maxAttempts: claim.task.max_attempts,
           queue: TASKS[name].queue,
           signal: claim.signal,
           step: (stepName, fn) => ctx.step(stepName, fn),

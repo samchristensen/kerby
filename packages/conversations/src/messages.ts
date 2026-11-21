@@ -79,6 +79,7 @@ export async function postUserMessage(
       );
       const seq = next.rows[0]?.next ?? 1;
       if (seq !== predicted) return undefined; // another writer got in between: retry with the new position
+      await tx.query("update conversations set last_error = null where id = $1", [conversationId]);
       await tx.query(
         "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
         [conversationId, seq, blobId],

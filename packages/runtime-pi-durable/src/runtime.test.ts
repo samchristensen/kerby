@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import type { AgentEvent, AgentMessage, AgentRun, ToolCall, ToolResult } from "@kerby/agent";
 import { describe, expect, it } from "vitest";
-import { createPiDurableRuntime, unresolvedCalls } from "./index.ts";
+import { createFakeModels, createPiDurableRuntime, FAKE_MODEL, unresolvedCalls } from "./index.ts";
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
 const user = (value: string): AgentMessage => ({ role: "user", content: [...text(value)] });
@@ -404,5 +404,50 @@ describe("unresolvedCalls", () => {
 
   it("ignores calls abandoned by a later user message", () => {
     expect(unresolvedCalls([user("a"), call("1"), user("never mind")])).toEqual([]);
+  });
+});
+
+describe("fake model", () => {
+  const fake = () => ({
+    runtime: createPiDurableRuntime({ models: createFakeModels() }),
+    model: FAKE_MODEL,
+  });
+
+  it("echoes a plain message", async () => {
+    const { runtime, model } = fake();
+    const events = await collect(runtime.run(makeRun({ model, history: [user("hello")] })));
+    expect(messages(events)[0]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "Echo: hello" }],
+    });
+  });
+
+  it("calls the echo tool for `echo ...` and reports what the tool said, from any rehydrated point", async () => {
+    const { runtime, model } = fake();
+    const executed: string[] = [];
+    const run = (history: AgentMessage[]) =>
+      makeRun({
+        model,
+        history,
+        tools: [echoSpec],
+        executeTool: async (call) => {
+          executed.push(call.id);
+          return {
+            content: [{ type: "text", text: String((call.input as { text: string }).text) }],
+            isError: false,
+          };
+        },
+      });
+    const first = messages(await collect(runtime.run(run([user("echo ping")]))));
+    expect(first.map((m) => m.role)).toEqual(["assistant", "tool", "assistant"]);
+    expect(first[2]).toMatchObject({ content: [{ text: "Tool said: ping" }] });
+
+    // The same answer when a new process resumes after the tool result was persisted.
+    const resumed = messages(
+      await collect(runtime.run(run([user("echo ping"), ...first.slice(0, 2)]))),
+    );
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0]).toMatchObject({ content: [{ text: "Tool said: ping" }] });
+    expect(executed).toEqual(["call_1"]);
   });
 });

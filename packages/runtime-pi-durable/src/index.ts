@@ -40,6 +40,9 @@ import { AsyncQueue } from "./queue.ts";
 import { seedHistory } from "./seed.ts";
 import { TextForwarder } from "./text.ts";
 
+export { createFakeModels, FAKE_MODEL } from "./fake.ts";
+export { createProviderModels, type ProviderKeys } from "./providers.ts";
+
 export type PiDurableOptions = {
   /** The model catalog and credentials. The composition root builds it; tests pass a faux provider. */
   models: Models;

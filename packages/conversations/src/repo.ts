@@ -5,6 +5,7 @@ export type ConversationRecord = {
   externalUserId: string | null;
   model: string;
   system: string;
+  lastError: string | null;
   createdAt: Date;
 };
 
@@ -13,16 +14,18 @@ type ConversationRow = {
   external_user_id: string | null;
   model: string;
   system: string;
+  last_error: string | null;
   created_at: Date;
 };
 
-const COLUMNS = "id, external_user_id, model, system, created_at";
+const COLUMNS = "id, external_user_id, model, system, last_error, created_at";
 
 const fromRow = (row: ConversationRow): ConversationRecord => ({
   id: row.id,
   externalUserId: row.external_user_id,
   model: row.model,
   system: row.system,
+  lastError: row.last_error,
   createdAt: row.created_at,
 });
 
@@ -97,4 +100,30 @@ export async function isBusy(db: TenantQueryable, conversationId: string): Promi
     [conversationId],
   );
   return rowCount > 0;
+}
+
+/** Record why the latest turn produced no answer (null clears it). */
+export async function setLastError(
+  db: TenantQueryable,
+  conversationId: string,
+  error: string | null,
+): Promise<void> {
+  await db.query("update conversations set last_error = $2 where id = $1", [conversationId, error]);
+}
+
+/**
+ * Count one real execution of a tool call (call this inside the step that runs it). Returns the running count: 1 for a
+ * call that ran once, more when a retry ran it again.
+ */
+export async function recordToolExecution(
+  db: TenantQueryable,
+  input: { conversationId: string; callId: string; name: string },
+): Promise<number> {
+  const { rows } = await db.query<{ executions: number }>(
+    `insert into tool_executions (conversation_id, call_id, name) values ($1, $2, $3)
+     on conflict (conversation_id, call_id) do update set executions = tool_executions.executions + 1, last_at = now()
+     returning executions`,
+    [input.conversationId, input.callId, input.name],
+  );
+  return rows[0]?.executions ?? 1;
 }

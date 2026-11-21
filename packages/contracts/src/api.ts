@@ -48,6 +48,8 @@ export const GetConversationResponseSchema = z.object({
   messages: z.array(MessageSchema),
   /** True while a turn is queued or running. */
   busy: z.boolean(),
+  /** Why the latest turn produced no answer (the provider refused it, or it failed for good); cleared by the next message. */
+  lastError: z.string().nullable(),
 });
 export type GetConversationResponse = z.infer<typeof GetConversationResponseSchema>;
 

@@ -107,7 +107,12 @@ export async function getConversation(
     readMessages(ctx, deps.blobs, conversationId),
     isBusy(ctx.db, conversationId),
   ]);
-  return { conversation: conversationResource(record), messages: messages.map(toPublic), busy };
+  return {
+    conversation: conversationResource(record),
+    messages: messages.map(toPublic),
+    busy,
+    lastError: record.lastError,
+  };
 }
 
 /** One item of a conversation's event stream. `id` is set only for persisted messages, which can be replayed. */

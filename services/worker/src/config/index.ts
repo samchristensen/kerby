@@ -1,0 +1,40 @@
+import { hostname } from "node:os";
+import { loadConfig } from "@kerby/config";
+import { z } from "zod";
+
+export const workerConfigSchema = z
+  .object({
+    controlDatabaseUrl: z.string().min(1),
+    tenantDbSecret: z.string().min(16),
+    s3Endpoint: z.url(),
+    s3Bucket: z.string().min(1),
+    s3AccessKeyId: z.string().min(1),
+    s3SecretAccessKey: z.string().min(1),
+    /** Names this worker in Absurd's run rows. */
+    workerId: z
+      .string()
+      .min(1)
+      .default(() => `${hostname()}:${process.pid}`),
+    /** `development` allows the scripted fake model; `production` (the default) refuses it. */
+    kerbyEnvironment: z.enum(["development", "production"]).default("production"),
+    /** Answer with the scripted fake model instead of a real provider (local stacks and end-to-end tests). */
+    kerbyFakeModel: z.stringbool().default(false),
+    /** Offer the built-in `echo` tool to every conversation (development). */
+    enableEchoTool: z.stringbool().default(false),
+    anthropicApiKey: z.string().min(1).optional(),
+    openaiApiKey: z.string().min(1).optional(),
+    /** How often to look at every active tenant for work a notification missed. */
+    sweepIntervalSeconds: z.coerce.number().positive().default(10),
+    /** Lease length; a heartbeat extends it for as long as a turn runs. */
+    claimTimeoutSeconds: z.coerce.number().int().positive().default(120),
+    /** Turns one tenant may run at once on this worker when its limits do not say. */
+    defaultMaxConcurrentTurns: z.coerce.number().int().positive().default(4),
+  })
+  .refine((config) => !(config.kerbyFakeModel && config.kerbyEnvironment === "production"), {
+    message: "KERBY_FAKE_MODEL is only allowed with KERBY_ENVIRONMENT=development",
+    path: ["kerbyFakeModel"],
+  });
+
+export type WorkerConfig = z.output<typeof workerConfigSchema>;
+
+export const loadWorkerConfig = (): WorkerConfig => loadConfig(workerConfigSchema);
