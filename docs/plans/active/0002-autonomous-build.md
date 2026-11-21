@@ -67,7 +67,7 @@ For the agent building Kerby with no human present. Read this first after any co
 
 Each task lists what to build and its acceptance. Tests are behavioral; use the real containers.
 
-- [ ] **T0** Test infrastructure above. Acceptance: a trivial test per helper passes; `make test` leaves no containers behind.
+- [x] **T0** Test infrastructure above. Acceptance: a trivial test per helper passes; `make test` leaves no containers behind.
 - [ ] **T1 `packages/config`**: `loadConfig(schema)` with zod (add `zod` to the catalog): YAML file < env < secrets dir; fails naming keys, never values.
   Add a check (rule id `config`) that `process.env` appears only in `packages/config/src` (and scripts). Test the check and the loader.
 - [ ] **T2 `packages/observability`**: `log(level, msg, fields)` JSON to stdout, `tenantId` field required via a `withTenant(tenantId, fn)` AsyncLocalStorage helper; never logs message content (no free-form `content` field). Biome `noConsole` already forbids console.
