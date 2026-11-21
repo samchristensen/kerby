@@ -1,0 +1,16 @@
+packages:
+  - packages/*
+  - services/*
+
+# One hoisted node_modules; exact pins; pnpm refuses versions published in the last 7 days (minutes).
+nodeLinker: hoisted
+savePrefix: ""
+minimumReleaseAge: 10080
+
+# Every external dependency version lives here, once. Workspaces say "catalog:".
+catalog:
+  "@biomejs/biome": "2.6.4"
+  "@types/node": "26.6.6"
+  "typescript": "7.0.2"
+  "vitest": "5.1.0"
+  "yaml": "2.9.1"
