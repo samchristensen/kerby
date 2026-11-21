@@ -4,12 +4,12 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
-services/   deployables: api (tenants call it), worker (runs turns), control (operators run it); each owns its tables
+services/   deployables: api (tenants call it), worker (runs turns), control (operators run it); they own no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -60,12 +60,12 @@ An agent harness is replaceable by construction: `packages/agent` defines `Agent
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                      | Migrations            |
-| ------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, `usage`, audit | `migrations/control/` |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                 | `migrations/tenant/`  |
+| Plane   | Database                                             | Holds                                                                                                      | Migrations                                                  |
+| ------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, `usage`, audit | `packages/control-plane/migrations/control/`                |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                 | `packages/{durable,blobs,conversations}/migrations/tenant/` |
 
-- Every `.sql` migration lives in one of those two directories. A control table has `tenant_id` or `-- global: <reason>`
+- Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
 - `packages/db` exports `ControlDb` and `TenantDb` as distinct types. Repo functions take one, never a pool or DSN. A
   `TenantDb` comes only from a verified API key resolved in the control plane.
