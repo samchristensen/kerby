@@ -143,6 +143,7 @@ describe("blobs", () => {
     await put(a, "one");
     await put(a, "deep/two");
     const kept = await put(longer, "one");
+    expect((await blobs.listPrefix(id)).map((o) => o.key).sort()).toEqual(["deep/two", "one"]);
     expect(await blobs.deletePrefix(id)).toBe(2);
     expect(text((await blobs.get(longer, kept.blobId)).body)).toBe("one");
     expect(await blobs.deletePrefix(id)).toBe(0);

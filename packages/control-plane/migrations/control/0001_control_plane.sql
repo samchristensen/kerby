@@ -4,7 +4,7 @@
 create table tenants (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  status text not null default 'active' check (status in ('active', 'suspended', 'deleting', 'deleted')),
+  status text not null default 'provisioning' check (status in ('provisioning', 'active', 'suspended', 'deleting', 'deleted')),
   plan text not null default 'default',
   -- per-tenant limits, e.g. {"maxConcurrentTurns": 4}; absent keys take the plan's defaults
   limits jsonb not null default '{}',
@@ -18,9 +18,10 @@ create table tenants (
   schema_version text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (name),
   unique (db_name)
 );
+-- a deleted tenant keeps its row (audit, billing) but frees its name
+create unique index tenants_live_name_idx on tenants (name) where status <> 'deleted';
 
 create table api_keys (
   -- the public part of the key: `kb_<id>_<secret>`; looked up by id, secret compared by hash

@@ -1,0 +1,14 @@
+{
+  "name": "@kerby/conversations",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "dependencies": {
+    "@kerby/blobs": "workspace:*",
+    "@kerby/db": "workspace:*",
+    "@kerby/durable": "workspace:*"
+  }
+}

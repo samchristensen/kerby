@@ -66,6 +66,8 @@ export interface Blobs {
   put(ctx: TenantContext, blob: PutBlob): Promise<BlobRef>;
   /** Looks the id up in the context's own index first; an id from another tenant is simply not found. */
   get(ctx: TenantContext, blobId: string): Promise<BlobObject>;
+  /** Every object under the tenant's prefix, keys relative to it (tenant export). */
+  listPrefix(tenantId: string): Promise<{ key: string; size: number }[]>;
   /** Delete every object of a tenant (tenant deletion). Returns how many. */
   deletePrefix(tenantId: string): Promise<number>;
   /** Create the bucket if it does not exist (local stacks and tests; production buckets are provisioned). */
@@ -120,6 +122,21 @@ export function createBlobs(config: BlobsConfig): Blobs {
         mediaType: row.media_type,
         size: Number(row.size),
       };
+    },
+
+    async listPrefix(tenantId) {
+      const Prefix = prefix(tenantId);
+      const found: { key: string; size: number }[] = [];
+      let ContinuationToken: string | undefined;
+      do {
+        const page = await s3.send(new ListObjectsV2Command({ Bucket, Prefix, ContinuationToken }));
+        for (const object of page.Contents ?? []) {
+          if (object.Key)
+            found.push({ key: object.Key.slice(Prefix.length), size: object.Size ?? 0 });
+        }
+        ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+      } while (ContinuationToken);
+      return found;
     },
 
     async deletePrefix(tenantId) {

@@ -1,3 +1,4 @@
+export { type ClusterAdmin, createClusterAdmin, dumpDatabase } from "./cluster.ts";
 export {
   type ClosableControlDb,
   type ClosableTenantDb,

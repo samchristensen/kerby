@@ -100,9 +100,27 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
+
+  packages/conversations:
+    dependencies:
+      '@kerby/blobs':
+        specifier: workspace:*
+        version: link:../blobs
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../db
+      '@kerby/durable':
+        specifier: workspace:*
+        version: link:../durable
 
   packages/db:
     dependencies:
+      '@kerby/config':
+        specifier: workspace:*
+        version: link:../config
       '@kerby/observability':
         specifier: workspace:*
         version: link:../observability
@@ -142,6 +160,45 @@ importers:
       '@kerby/agent':
         specifier: workspace:*
         version: link:../agent
+
+  packages/serve:
+    dependencies:
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+
+  services/control:
+    dependencies:
+      '@kerby/blobs':
+        specifier: workspace:*
+        version: link:../../packages/blobs
+      '@kerby/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kerby/control-plane':
+        specifier: workspace:*
+        version: link:../../packages/control-plane
+      '@kerby/conversations':
+        specifier: workspace:*
+        version: link:../../packages/conversations
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@kerby/serve':
+        specifier: workspace:*
+        version: link:../../packages/serve
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
 packages:
 

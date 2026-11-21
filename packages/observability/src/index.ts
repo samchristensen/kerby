@@ -89,15 +89,23 @@ export function log(level: Level, msg: string, fields: LogFields = {}): void {
   sink(`${JSON.stringify(line)}\n`);
 }
 
+/** A string `code` property of an error (Node and Postgres errors have one), or undefined. */
+export function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
 /** Fields describing an error: its class and message, never its stack or cause chain. */
 export function errorFields(error: unknown): LogFields {
-  if (error instanceof Error) {
-    const code = (error as { code?: unknown }).code;
-    return {
-      errorName: error.name,
-      errorMessage: error.message,
-      ...(typeof code === "string" ? { errorCode: code } : {}),
-    };
-  }
-  return { errorName: "NonError" };
+  if (!(error instanceof Error)) return { errorName: "NonError" };
+  const code = errorCode(error);
+  return {
+    errorName: error.name,
+    errorMessage: error.message,
+    ...(code === undefined ? {} : { errorCode: code }),
+  };
 }

@@ -1,0 +1,37 @@
+import { audit, listTenants, setSchemaVersion } from "@kerby/control-plane";
+import { tenantMigrationDirs } from "@kerby/conversations";
+import { migrateTenants } from "@kerby/db";
+import type { ControlDeps } from "../types/index.ts";
+import { ensureTemplate } from "./template.ts";
+import { currentSchemaVersion } from "./tenants.ts";
+
+export type MigrationRun = { migrated: number; failed: { tenantId: string; error: string }[] };
+
+/**
+ * Bring the template and every active or suspended tenant database to the current tenant migrations, recording
+ * `schema_version` per tenant. Failures are reported per tenant and do not stop the others (ADR 0004: code tolerates
+ * versions n and n-1, so a partial rollout is safe).
+ */
+export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun> {
+  await ensureTemplate(deps);
+  const tenants = (await listTenants(deps.control)).filter(
+    (t) => t.status === "active" || t.status === "suspended",
+  );
+  const result = await migrateTenants(
+    deps.pools,
+    tenants.map((t) => t.id),
+    tenantMigrationDirs,
+  );
+  const version = currentSchemaVersion();
+  for (const tenantId of result.migrated) await setSchemaVersion(deps.control, tenantId, version);
+  await audit(deps.control, {
+    tenantId: null,
+    actor: "operator",
+    action: "tenants.migrate",
+    detail: { migrated: result.migrated.length, failed: result.failed.length },
+  });
+  return {
+    migrated: result.migrated.length,
+    failed: result.failed.map((f) => ({ tenantId: f.tenantId, error: f.error.message })),
+  };
+}

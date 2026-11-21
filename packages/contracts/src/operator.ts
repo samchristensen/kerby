@@ -7,7 +7,13 @@ export const LimitsSchema = z.object({
 });
 export type Limits = z.infer<typeof LimitsSchema>;
 
-export const TenantStatusSchema = z.enum(["active", "suspended", "deleting", "deleted"]);
+export const TenantStatusSchema = z.enum([
+  "provisioning",
+  "active",
+  "suspended",
+  "deleting",
+  "deleted",
+]);
 
 export const TenantSchema = z.object({
   id: z.uuid(),
@@ -64,6 +70,8 @@ export type ListTenantsResponse = z.infer<typeof ListTenantsResponseSchema>;
 export const ExportResponseSchema = z.object({
   /** A `pg_dump` custom-format file of the tenant's database, in the control service's export directory. */
   dumpFile: z.string(),
+  /** The tenant's object keys and sizes, as JSON, next to the dump. */
+  objectsFile: z.string(),
   objectPrefix: z.string(),
   objectCount: z.number().int().nonnegative(),
 });

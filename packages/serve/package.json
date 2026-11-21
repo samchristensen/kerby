@@ -1,0 +1,12 @@
+{
+  "name": "@kerby/serve",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/observability": "workspace:*",
+    "zod": "catalog:"
+  }
+}
