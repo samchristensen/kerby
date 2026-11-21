@@ -57,6 +57,9 @@ export function createScheduler(
       const executor = createTenantExecutor(lease.db, handlersFor(ctx), {
         workerId: settings.workerId,
         claimTimeoutSeconds: settings.claimTimeoutSeconds,
+        ...(settings.heartbeatEveryMs === undefined
+          ? {}
+          : { heartbeatEveryMs: settings.heartbeatEveryMs }),
       });
       const tasks = await executor.claim(free);
       remaining = tasks.length;

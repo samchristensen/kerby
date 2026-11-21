@@ -11,6 +11,8 @@ export type WorkerDeps = {
   settings: {
     workerId: string;
     claimTimeoutSeconds: number;
+    /** Lease heartbeat period; default a third of the lease. Tests lengthen it to let a lease lapse. */
+    heartbeatEveryMs?: number | undefined;
     /** Used for a tenant whose limits do not set `maxConcurrentTurns`. */
     defaultMaxConcurrentTurns: number;
     sweepIntervalMs: number;

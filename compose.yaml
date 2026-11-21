@@ -84,6 +84,8 @@ services:
       KERBY_FAKE_MODEL: ${KERBY_FAKE_MODEL:-1}
       ENABLE_ECHO_TOOL: "1"
       SWEEP_INTERVAL_SECONDS: "3"
+      # Short, so a killed worker's turn moves to another worker in seconds (the default is two minutes).
+      CLAIM_TIMEOUT_SECONDS: "10"
       # Passed through from your shell only when set (platform provider keys, for real models).
       ANTHROPIC_API_KEY:
       OPENAI_API_KEY:

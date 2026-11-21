@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -42,3 +42,6 @@ psql: ## psql into the control database (DB=<name> for another, e.g. a tenant da
 
 logs: ## Follow the stack logs
 	docker compose logs -f --tail=100
+
+e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes elsewhere (KERBY_E2E_KEEP=1 keeps the stack)
+	node scripts/e2e.ts

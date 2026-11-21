@@ -41,7 +41,12 @@ async function eventually<T>(
   }
 }
 
-type Options = { runtime?: AgentRuntime; maxConcurrent?: number; echo?: boolean };
+type Options = {
+  runtime?: AgentRuntime;
+  maxConcurrent?: number;
+  echo?: boolean;
+  settings?: Partial<WorkerDeps["settings"]>;
+};
 
 async function harness(options: Options = {}) {
   const control = await createTestControlDb();
@@ -64,6 +69,7 @@ async function harness(options: Options = {}) {
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
       sweepIntervalMs: 200,
       enableEchoTool: options.echo ?? true,
+      ...options.settings,
     },
   };
   const scheduler = createScheduler(deps, createHandlers(deps));
@@ -106,7 +112,34 @@ async function harness(options: Options = {}) {
       return all.length >= count ? all : false;
     });
 
-  return { control, blobs, deps, scheduler, tenant, post, conversation, messages, settled };
+  /** A second worker process over the same databases, with its own runtime and settings. */
+  async function extraWorker(extra: {
+    runtime: AgentRuntime;
+    settings?: Partial<WorkerDeps["settings"]>;
+  }) {
+    const second: WorkerDeps = {
+      ...deps,
+      runtime: extra.runtime,
+      settings: { ...deps.settings, ...extra.settings, workerId: "second-worker" },
+    };
+    const other = createScheduler(second, createHandlers(second));
+    await other.start();
+    cleanups.push(() => other.stop(0));
+    return other;
+  }
+
+  return {
+    control,
+    blobs,
+    deps,
+    scheduler,
+    tenant,
+    post,
+    conversation,
+    messages,
+    settled,
+    extraWorker,
+  };
 }
 
 const textOf = (message: AgentMessage | undefined): string =>
@@ -292,6 +325,80 @@ describe("recovery", () => {
       (await t.ctx.db.query<{ last_error: string | null }>("select last_error from conversations"))
         .rows[0]?.last_error,
     ).toBeNull();
+  });
+});
+
+describe("fencing", () => {
+  it("a worker whose lease lapsed cannot write a divergent message after another worker took over", async () => {
+    const release = Promise.withResolvers<void>();
+    const reachedGate = Promise.withResolvers<void>();
+    // The first worker: blocked in the model call past its lease, then it answers differently.
+    const stale: AgentRuntime = {
+      name: "stale",
+      async *run(run) {
+        yield { type: "run_start" };
+        reachedGate.resolve();
+        await release.promise;
+        void run;
+        yield {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            model: "fake/fake-1",
+            stopReason: "end",
+            content: [{ type: "text", text: "DIVERGENT" }],
+          },
+        };
+        yield { type: "run_end", reason: "done" };
+      },
+    };
+    // It never heartbeats and its lease is one second: it lapses while it waits.
+    const h = await harness({
+      runtime: stale,
+      settings: { claimTimeoutSeconds: 1, heartbeatEveryMs: 600_000 },
+    });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "hello", false);
+    await t.ctx.db.query(
+      `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb`,
+    );
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await reachedGate.promise;
+
+    // The second worker takes the turn over once the first lease lapses, and is held up before it answers.
+    const releaseSecond = Promise.withResolvers<void>();
+    const secondStarted = Promise.withResolvers<void>();
+    const real = createDevelopmentRuntime();
+    const second: AgentRuntime = {
+      name: "second",
+      async *run(run) {
+        secondStarted.resolve();
+        await releaseSecond.promise;
+        yield* real.run(run);
+      },
+    };
+    await h.extraWorker({ runtime: second, settings: { claimTimeoutSeconds: 30 } });
+    await secondStarted.promise;
+
+    // The first worker wakes up while the second owns the turn and tries to persist its own answer: refused, so
+    // nothing lands at position 2 even though the second has not written there yet.
+    release.resolve();
+    await eventually("the stale worker to give up", async () => h.scheduler.inFlight(t.id) === 0);
+    expect((await t.ctx.db.query("select 1 from messages")).rowCount).toBe(1);
+
+    releaseSecond.resolve();
+    const answered = await h.settled(t, conversation.id, 2);
+    expect(textOf(answered[1])).toBe("Echo: hello");
+    const after = await h.messages(t, conversation.id);
+    expect(after.map(textOf)).toEqual(["hello", "Echo: hello"]);
+    // Nothing the stale run wrote is reachable: its object, if it got that far, is not what the index points at.
+    const stored = await h.blobs.get(
+      t.ctx,
+      (await t.ctx.db.query<{ blob_id: string }>("select blob_id from messages where seq = 2"))
+        .rows[0]?.blob_id ?? "",
+    );
+    expect(new TextDecoder().decode(stored.body)).not.toContain("DIVERGENT");
   });
 });
 
