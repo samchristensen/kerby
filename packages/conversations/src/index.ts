@@ -11,3 +11,28 @@ export const tenantMigrationDirs: readonly string[] = [
   blobsMigrationsDir,
   conversationsMigrationsDir,
 ];
+
+export {
+  ConversationBusyError,
+  ConversationNotFoundError,
+  LeaseLostError,
+  SeqConflictError,
+} from "./errors.ts";
+export { type ConversationNotice, conversationChannel, notifyLive, parseNotice } from "./events.ts";
+export {
+  messageKey,
+  type PersistInput,
+  persistMessage,
+  postUserMessage,
+  readMessages,
+  type StoredMessage,
+} from "./messages.ts";
+export {
+  type ConversationRecord,
+  findConversation,
+  insertConversation,
+  isBusy,
+  isConversationId,
+  listMessageRows,
+  type MessageRowRecord,
+} from "./repo.ts";

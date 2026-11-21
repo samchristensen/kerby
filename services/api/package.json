@@ -1,0 +1,20 @@
+{
+  "name": "@kerby/api",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/agent": "workspace:*",
+    "@kerby/blobs": "workspace:*",
+    "@kerby/config": "workspace:*",
+    "@kerby/contracts": "workspace:*",
+    "@kerby/control-plane": "workspace:*",
+    "@kerby/conversations": "workspace:*",
+    "@kerby/db": "workspace:*",
+    "@kerby/observability": "workspace:*",
+    "@kerby/serve": "workspace:*",
+    "zod": "catalog:"
+  }
+}

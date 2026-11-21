@@ -2,6 +2,7 @@
 // `TenantDb` cannot be handed the control plane, and the reverse. Neither exposes a pool or a DSN.
 import { errorFields, log } from "@kerby/observability";
 import pg from "pg";
+import { type ListenOptions, listen, type Subscription } from "./listen.ts";
 
 export type Row = Record<string, unknown>;
 export type QueryResult<R extends Row> = { rows: R[]; rowCount: number };
@@ -21,13 +22,22 @@ export interface TenantTx extends Queryable {
   readonly [plane]: "tenant";
 }
 
+/** LISTEN on a channel over a dedicated connection that reconnects on failure. Payloads are what `pg_notify` sent. */
+export interface Listens {
+  listen(
+    channel: string,
+    onNotify: (payload: string) => void,
+    options?: ListenOptions,
+  ): Promise<Subscription>;
+}
+
 /** The operator-owned control database: tenants, keys, usage, audit. */
-export interface ControlDb extends Queryable {
+export interface ControlDb extends Queryable, Listens {
   readonly [plane]: "control";
   transaction<T>(fn: (tx: ControlTx) => Promise<T>): Promise<T>;
 }
 /** One tenant's own database: conversations, messages, blob index, Absurd. */
-export interface TenantDb extends Queryable {
+export interface TenantDb extends Queryable, Listens {
   readonly [plane]: "tenant";
   transaction<T>(fn: (tx: TenantTx) => Promise<T>): Promise<T>;
 }
@@ -63,10 +73,11 @@ async function run<R extends Row>(
   return { rows: result.rows as R[], rowCount: result.rowCount ?? 0 };
 }
 
-type Plain = Queryable & {
-  transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
-  close(): Promise<void>;
-};
+type Plain = Queryable &
+  Listens & {
+    transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
+    close(): Promise<void>;
+  };
 
 function makeHandle(url: string, options: PoolOptions): Plain {
   const pool = new pg.Pool({
@@ -106,6 +117,7 @@ function makeHandle(url: string, options: PoolOptions): Plain {
         client.release(broken);
       }
     },
+    listen: (channel, onNotify, listenOptions) => listen(url, channel, onNotify, listenOptions),
     close: () => pool.end(),
   };
   pools.set(handle, pool);

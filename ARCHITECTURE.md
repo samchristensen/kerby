@@ -117,6 +117,16 @@ flowchart LR
    stored result instead of repeating a side effect.
 6. **Retry** is a rerun of step 2 onward. The conversation resumes after its last persisted message.
 
+- **One turn at a time per conversation.** Posting a message while a turn is queued or running is a 409; the check and the
+  insert share a row lock on the conversation, so concurrent posts serialize.
+- **Object keys carry a content hash** (`conversations/<id>/messages/<seq>-<sha16>.json`): a retry of the same message
+  overwrites itself, and a stale writer's different content lands under a different key and can never replace bytes an
+  index row already points at.
+- **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`),
+  then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
+  events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
+  a poll every 5 s is the backstop for a lost notification.
+
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
 

@@ -29,14 +29,42 @@ export function json(
   });
 }
 
-/** Parse a JSON request body at the boundary: a bad body is a 400 naming the offending keys, never echoing values. */
+const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+
+async function readCapped(request: Request, maxBytes: number): Promise<string> {
+  const declared = Number(request.headers.get("content-length"));
+  if (declared > maxBytes)
+    throw new HttpError(413, "too_large", `request body is limited to ${maxBytes} bytes`);
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      throw new HttpError(413, "too_large", `request body is limited to ${maxBytes} bytes`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Parse a JSON request body at the boundary, capped at `maxBytes` (default 1 MiB): a bad body is a 400 naming the
+ * offending keys and never echoing values; an oversized one is a 413.
+ */
 export async function readJson<S extends z.ZodType>(
   request: Request,
   schema: S,
+  options: { maxBytes?: number } = {},
 ): Promise<z.output<S>> {
+  const text = await readCapped(request, options.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
   let raw: unknown;
   try {
-    raw = await request.json();
+    raw = JSON.parse(text);
   } catch {
     throw new HttpError(400, "invalid_json", "request body must be JSON");
   }
@@ -128,6 +156,8 @@ function toRequest(incoming: IncomingMessage, signal: AbortSignal): Request {
 
 async function send(response: Response, outgoing: ServerResponse): Promise<void> {
   outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+  // A stream may take a while to produce its first chunk: let the client see the status and headers now.
+  outgoing.flushHeaders();
   if (!response.body) {
     outgoing.end();
     return;

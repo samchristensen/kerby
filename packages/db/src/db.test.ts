@@ -15,6 +15,14 @@ import {
 } from "./index.ts";
 import { adminUrl, createTestDatabase, type TestDatabase } from "./testing.ts";
 
+async function eventually(check: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (await check()) return;
+    await sleep(50);
+  }
+  throw new Error("condition not reached");
+}
+
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -141,13 +149,6 @@ describe("TenantPools", () => {
       await admin.close();
     }
   }
-  async function eventually(check: () => Promise<boolean>): Promise<void> {
-    for (let i = 0; i < 50; i++) {
-      if (await check()) return;
-      await sleep(50);
-    }
-    throw new Error("condition not reached");
-  }
 
   async function threeTenants() {
     const dbs = await Promise.all([database(), database(), database()]);
@@ -232,5 +233,47 @@ describe("TenantPools", () => {
         (await pools.use(id, (db) => db.query("select count(*)::int as n from fanned"))).rows,
       ).toEqual([{ n: 0 }]);
     }
+  });
+});
+
+describe("listen", () => {
+  it("delivers notifications, and resyncs after the connection is cut", async () => {
+    const database1 = await database();
+    const db = await tenantDb(database1);
+    const received: string[] = [];
+    let reconnects = 0;
+    const subscription = await db.listen("things", (payload) => received.push(payload), {
+      onReconnect: () => {
+        reconnects++;
+      },
+    });
+    cleanups.push(() => subscription.close());
+
+    await db.query("select pg_notify('things', 'one')");
+    await eventually(async () => received.length === 1);
+    expect(received).toEqual(["one"]);
+
+    // Cut the listener's backend from the server side.
+    const admin = createControlDb(adminUrl(), { max: 1 });
+    cleanups.push(() => admin.close());
+    await admin.query(
+      "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and query like 'listen %'",
+      [database1.name],
+    );
+    await eventually(async () => reconnects === 1);
+    await db.query("select pg_notify('things', 'two')");
+    await eventually(async () => received.length === 2);
+    expect(received).toEqual(["one", "two"]);
+  });
+
+  it("stops delivering after close and rejects an unsafe channel name", async () => {
+    const db = await tenantDb(await database());
+    await expect(db.listen('x"; drop table y; --', () => {})).rejects.toThrow(/invalid channel/);
+    const received: string[] = [];
+    const subscription = await db.listen("quiet", (payload) => received.push(payload));
+    await subscription.close();
+    await db.query("select pg_notify('quiet', 'late')");
+    await sleep(200);
+    expect(received).toEqual([]);
   });
 });

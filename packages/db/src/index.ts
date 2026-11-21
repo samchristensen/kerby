@@ -17,6 +17,7 @@ export {
   type TenantQueryable,
   type TenantTx,
 } from "./handles.ts";
+export type { ListenOptions, Subscription } from "./listen.ts";
 export {
   type FanOutResult,
   type Migration,
@@ -24,4 +25,4 @@ export {
   migrateTenants,
   readMigrations,
 } from "./migrate.ts";
-export { TenantPools, type TenantPoolsOptions } from "./pools.ts";
+export { type TenantLease, TenantPools, type TenantPoolsOptions } from "./pools.ts";

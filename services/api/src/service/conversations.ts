@@ -1,0 +1,204 @@
+import type { ContentPart } from "@kerby/agent";
+import type {
+  Conversation,
+  CreateConversationRequest,
+  EventEnvelope,
+  GetConversationResponse,
+  PostMessageRequest,
+  PostMessageResponse,
+} from "@kerby/contracts";
+import { PublicMessageSchema } from "@kerby/contracts";
+import {
+  ConversationNotFoundError,
+  conversationChannel,
+  findConversation,
+  insertConversation,
+  isBusy,
+  parseNotice,
+  postUserMessage,
+  readMessages,
+  type StoredMessage,
+} from "@kerby/conversations";
+import type { TenantContext } from "@kerby/db";
+import { errorFields, log } from "@kerby/observability";
+import { type ApiDeps, NotFoundError } from "../types/index.ts";
+
+export class InvalidModelError extends Error {
+  override name = "InvalidModelError";
+}
+
+function conversationResource(record: {
+  id: string;
+  externalUserId: string | null;
+  model: string;
+  system: string;
+  createdAt: Date;
+}): Conversation {
+  return {
+    id: record.id,
+    externalUserId: record.externalUserId,
+    model: record.model,
+    system: record.system,
+    createdAt: record.createdAt.toISOString(),
+  };
+}
+
+export async function createConversation(
+  deps: ApiDeps,
+  ctx: TenantContext,
+  request: CreateConversationRequest,
+): Promise<Conversation> {
+  const model = request.model ?? deps.settings.models[0];
+  if (!model || !deps.settings.models.includes(model)) {
+    throw new InvalidModelError(`model must be one of: ${deps.settings.models.join(", ")}`);
+  }
+  const record = await insertConversation(ctx.db, {
+    externalUserId: request.externalUserId,
+    model,
+    system: request.system ?? deps.settings.defaultSystem,
+  });
+  return conversationResource(record);
+}
+
+const asParts = (content: PostMessageRequest["content"]): ContentPart[] =>
+  typeof content === "string" ? [{ type: "text", text: content }] : content;
+
+/** Append the message, enqueue its turn, and tell the workers there is work for this tenant. */
+export async function postMessage(
+  deps: ApiDeps,
+  ctx: TenantContext,
+  conversationId: string,
+  request: PostMessageRequest,
+): Promise<PostMessageResponse> {
+  if (!(await findConversation(ctx.db, conversationId)))
+    throw new NotFoundError("conversation not found");
+  let seq: number;
+  try {
+    ({ seq } = await postUserMessage(ctx, deps.blobs, conversationId, asParts(request.content)));
+  } catch (error) {
+    if (error instanceof ConversationNotFoundError)
+      throw new NotFoundError("conversation not found");
+    throw error;
+  }
+  // At-least-once: the worker's periodic sweep finds the turn even if this notification is lost.
+  await deps.control
+    .query("select pg_notify('tenant_work', $1)", [ctx.tenantId])
+    .catch((error: unknown) => {
+      log("warn", "could not notify workers; the sweep will find the turn", errorFields(error));
+    });
+  return { seq };
+}
+
+const toPublic = (message: StoredMessage) => ({
+  seq: message.seq,
+  // Parsing strips the harness's `native` payload: it stays inside Kerby.
+  message: PublicMessageSchema.parse(message.message),
+  createdAt: message.createdAt.toISOString(),
+});
+
+export async function getConversation(
+  deps: ApiDeps,
+  ctx: TenantContext,
+  conversationId: string,
+): Promise<GetConversationResponse> {
+  const record = await findConversation(ctx.db, conversationId);
+  if (!record) throw new NotFoundError("conversation not found");
+  const [messages, busy] = await Promise.all([
+    readMessages(ctx, deps.blobs, conversationId),
+    isBusy(ctx.db, conversationId),
+  ]);
+  return { conversation: conversationResource(record), messages: messages.map(toPublic), busy };
+}
+
+/** One item of a conversation's event stream. `id` is set only for persisted messages, which can be replayed. */
+export type StreamItem = { id?: number; envelope: EventEnvelope } | { keepAlive: true };
+
+const KEEP_ALIVE_MS = 15_000;
+/** Backstop for a lost NOTIFY: look at the index at least this often. */
+const POLL_MS = 5_000;
+
+/**
+ * The conversation's events: persisted messages after `afterSeq` (replayed from the index), then live as they
+ * happen. LISTEN is established before the replay reads, so nothing falls between them. Ends when `signal` aborts.
+ * `db` must stay leased for the whole iteration.
+ */
+export async function* conversationEvents(
+  deps: ApiDeps,
+  ctx: TenantContext,
+  conversationId: string,
+  afterSeq: number,
+  signal: AbortSignal,
+): AsyncGenerator<StreamItem> {
+  if (!(await findConversation(ctx.db, conversationId)))
+    throw new NotFoundError("conversation not found");
+
+  let wake = Promise.withResolvers<void>();
+  let dirty = true; // replay first
+  const live: EventEnvelope[] = [];
+  const poke = () => wake.resolve();
+  const subscription = await ctx.db.listen(
+    conversationChannel(conversationId),
+    (payload) => {
+      const notice = parseNotice(payload);
+      if (!notice) return;
+      if ("persisted" in notice) dirty = true;
+      else live.push(notice.live);
+      poke();
+    },
+    {
+      onReconnect: () => {
+        dirty = true;
+        poke();
+      },
+    },
+  );
+  const onAbort = () => poke();
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  let lastSeq = afterSeq;
+  let lastActivity = Date.now();
+  let lastPoll = 0;
+  try {
+    while (!signal.aborted) {
+      if (dirty || Date.now() - lastPoll >= POLL_MS) {
+        dirty = false;
+        lastPoll = Date.now();
+        for (const stored of await readMessages(ctx, deps.blobs, conversationId, lastSeq)) {
+          lastSeq = stored.seq;
+          lastActivity = Date.now();
+          yield {
+            id: stored.seq,
+            envelope: {
+              v: 1,
+              conversationId,
+              runId: stored.runId ?? "",
+              seq: stored.seq,
+              at: stored.createdAt.toISOString(),
+              // Public form: the harness's native payload is not for clients.
+              event: { type: "message_end", message: PublicMessageSchema.parse(stored.message) },
+            },
+          };
+        }
+      }
+      while (live.length > 0) {
+        const envelope = live.shift();
+        if (envelope) {
+          lastActivity = Date.now();
+          yield { envelope };
+        }
+      }
+      if (Date.now() - lastActivity >= KEEP_ALIVE_MS) {
+        lastActivity = Date.now();
+        yield { keepAlive: true };
+      }
+      wake = Promise.withResolvers<void>();
+      if (dirty || live.length > 0 || signal.aborted) continue;
+      const timer = setTimeout(poke, Math.min(POLL_MS, KEEP_ALIVE_MS));
+      await wake.promise;
+      clearTimeout(timer);
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await subscription.close();
+  }
+}

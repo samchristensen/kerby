@@ -76,6 +76,22 @@ describe("readJson", () => {
     expect(message).not.toContain('"x"');
     expect((await post("not json")).status).toBe(400);
   });
+
+  it("refuses a body over the cap with 413", async () => {
+    const base = await start([
+      ["POST", "/x", async (req) => json(200, await readJson(req, schema, { maxBytes: 20 }))],
+    ]);
+    const big = await fetch(`${base}/x`, {
+      method: "POST",
+      body: JSON.stringify({ name: "a".repeat(100) }),
+    });
+    expect(big.status).toBe(413);
+    const small = await fetch(`${base}/x`, {
+      method: "POST",
+      body: JSON.stringify({ name: "abc" }),
+    });
+    expect(small.status).toBe(200);
+  });
 });
 
 describe("serve", () => {

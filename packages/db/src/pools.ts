@@ -14,6 +14,9 @@ export type TenantPoolsOptions = {
   idleTimeoutMillis?: number;
 };
 
+/** A leased tenant handle: valid until `release()`. */
+export type TenantLease = { db: TenantDb; release(): Promise<void> };
+
 type Entry = {
   db: Promise<ClosableTenantDb>;
   leases: number;
@@ -33,6 +36,19 @@ export class TenantPools {
 
   /** Run `fn` with the tenant's handle. The handle is valid only until `fn` settles. */
   async use<T>(tenantId: string, fn: (db: TenantDb) => Promise<T>): Promise<T> {
+    const lease = await this.acquire(tenantId);
+    try {
+      return await fn(lease.db);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  /**
+   * Lease the tenant's handle for as long as the caller needs it (a stream outliving one call). The pool is not
+   * evicted until `release`, which must be called exactly once.
+   */
+  async acquire(tenantId: string): Promise<TenantLease> {
     if (this.#closed) throw new Error("TenantPools is closed");
     let entry = this.#entries.get(tenantId);
     if (!entry) {
@@ -51,22 +67,21 @@ export class TenantPools {
       };
       this.#entries.set(tenantId, entry);
     }
-    entry.leases++;
-    try {
-      let db: ClosableTenantDb;
-      try {
-        db = await entry.db;
-      } catch (error) {
-        // A failed open must not poison the slot.
-        if (this.#entries.get(tenantId) === entry) this.#entries.delete(tenantId);
-        throw error;
-      }
-      return await fn(db);
-    } finally {
-      entry.leases--;
-      entry.lastUsed = performance.now();
-      if (entry.leases === 0 && entry.doomed) await this.#close(entry);
+    const held = entry;
+    held.leases++;
+    const release = async () => {
+      held.leases--;
+      held.lastUsed = performance.now();
+      if (held.leases === 0 && held.doomed) await this.#close(held);
       else this.#evictIdle(this.#options.maxPools ?? 50);
+    };
+    try {
+      return { db: await held.db, release };
+    } catch (error) {
+      // A failed open must not poison the slot.
+      if (this.#entries.get(tenantId) === held) this.#entries.delete(tenantId);
+      held.leases--;
+      throw error;
     }
   }
 
