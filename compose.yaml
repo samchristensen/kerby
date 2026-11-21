@@ -65,6 +65,8 @@ services:
     environment:
       <<: *tenant-env
       MODELS: ${KERBY_MODELS:-fake/fake-1}
+      # Short, so suspension and key revocation show within seconds locally (the default is 30).
+      AUTH_CACHE_SECONDS: "3"
       PORT: "8080"
     ports:
       # The only published port: the tenant-facing API, on loopback. There is no shared proxy locally.

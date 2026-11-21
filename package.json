@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.33.2",
   "devDependencies": {
     "@biomejs/biome": "catalog:",
+    "@kerby/control-plane": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",

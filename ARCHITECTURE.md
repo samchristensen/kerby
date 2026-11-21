@@ -153,6 +153,9 @@ then provisions a `default` tenant through the operator API and prints its key. 
   `KERBY_FAKE_MODEL=0`, `KERBY_MODELS=<provider>/<model>` to use a real model.
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
+- `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
+  on conversations, streams, database roles, tasks, object prefixes and keys, suspension within the auth cache TTL
+  (`AUTH_CACHE_SECONDS`, 3 s locally, 30 s by default), then a load run (`KERBY_LOAD_TENANTS`, default 200).
 - `make e2e` (scripts/e2e.ts) is the proof on the real stack: two workers, an SSE stream, `docker kill` of the worker
   holding a turn mid-flight, then checks that the turn finished elsewhere, the tool ran once and every message exists once.
 

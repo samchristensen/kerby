@@ -85,7 +85,7 @@ Each task lists what to build and its acceptance. Tests are behavioral; use the 
 - [x] **T10 `services/worker`**: tenant scheduler (LISTEN `tenant_work` on control, bounded sweep, per-tenant concurrency from the tenant's limits), `run-turn` task per ADR 0003 and ARCHITECTURE.md#durability: rehydrate, run via `AgentRuntime`, supervisor persists each `message_end` (blob, fenced index insert, step), heartbeat, usage rows to the control plane, live deltas via `NOTIFY`. `executeTool` as an Absurd step keyed by conversation and tool-call id; start with a built-in `echo` tool and the tenant tool registry stub returning no tools (real registry is M7).
 - [x] **T11 Local stack**: Dockerfiles (`dev` and `prod` targets, node image from `.node-version`, run as non-root, `HEALTHCHECK`), `compose.yaml` (Postgres, RustFS, control, api, worker; named volumes; no published host ports except what `make up` needs: publish `api` on a documented host port because there is no shared proxy here), `make up` (provision `default` tenant, print its key), `make down`, `make down-v`, `make psql`. Check: add a rule that every `services/*` has a Dockerfile with `HEALTHCHECK`.
 - [x] **T12 End-to-end** (M5 acceptance): with the stack up and a faux model (env `KERBY_FAKE_MODEL=1`, honored only when set; production config rejects it), create a conversation, stream the answer with `curl`; kill the worker mid-turn (`docker kill`) and see the turn finish on a second worker with no duplicate tool effect; fencing test from plan 0001.
-- [ ] **T13 Multi-tenant proof** (M6): second tenant, cross-tenant attempt suite (conversations, blobs, tasks, SSE, key reuse), suspension within the cache TTL, fair scheduling test (a tenant at its limit does not delay another), a 200-tenant load run recorded in the Log.
+- [x] **T13 Multi-tenant proof** (M6): second tenant, cross-tenant attempt suite (conversations, blobs, tasks, SSE, key reuse), suspension within the cache TTL, fair scheduling test (a tenant at its limit does not delay another), a 200-tenant load run recorded in the Log.
 
 ## After T13
 
@@ -93,4 +93,4 @@ Tick M2 to M6 in plan 0001, move nothing, and stop. M7 onward needs product deci
 
 ## Blocked
 
-(none yet)
+(none: every task T0 to T13 is done. Left open on purpose, outside the runbook: M2 `secrets` and `egress`, M0 CI, M3 `make test` against the real stack with queryable logs.)
