@@ -271,6 +271,9 @@ importers:
       '@kerby/runtime-pi-durable':
         specifier: workspace:*
         version: link:../../packages/runtime-pi-durable
+      '@kerby/serve':
+        specifier: workspace:*
+        version: link:../../packages/serve
       zod:
         specifier: 'catalog:'
         version: 4.6.7

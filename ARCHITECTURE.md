@@ -138,6 +138,21 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 - Failure lists every bad key and never a value. Unknown keys in the file fail.
 - Only `packages/config` and `scripts/` read the process environment. Enforced (rule `config`).
 
+## Local stack
+
+`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, built from each service's
+`Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
+then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
+
+- One published port: the API on `127.0.0.1:${KERBY_API_PORT:-8080}`. Control and worker are reached only inside the
+  network (`make up` provisions through `docker compose exec`).
+- The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
+  two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
+- The worker runs the scripted fake model and the `echo` tool (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`); the
+  worker refuses `KERBY_FAKE_MODEL` outside development. Put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your shell and
+  `KERBY_FAKE_MODEL=0`, `KERBY_MODELS=<provider>/<model>` to use a real model.
+- Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn.
+
 ## Dependencies
 
 - One version of everything, in the `catalog:` of `pnpm-workspace.yaml`, exact pins. Workspaces say `"catalog:"`;

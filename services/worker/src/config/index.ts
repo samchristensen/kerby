@@ -23,6 +23,8 @@ export const workerConfigSchema = z
     enableEchoTool: z.stringbool().default(false),
     anthropicApiKey: z.string().min(1).optional(),
     openaiApiKey: z.string().min(1).optional(),
+    /** Port of the liveness endpoint (`GET /healthz`) for the container health check. */
+    healthPort: z.coerce.number().int().min(0).default(8082),
     /** How often to look at every active tenant for work a notification missed. */
     sweepIntervalSeconds: z.coerce.number().positive().default(10),
     /** Lease length; a heartbeat extends it for as long as a turn runs. */

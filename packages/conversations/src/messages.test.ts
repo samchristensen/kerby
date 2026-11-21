@@ -69,6 +69,24 @@ describe("postUserMessage", () => {
     ]);
   });
 
+  it("announces the new message to listeners of the conversation", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const conversation = await insertConversation(tenant.db, { model: "m", system: "" });
+    const notices: string[] = [];
+    const subscription = await tenant.db.listen(conversationChannel(conversation.id), (p) =>
+      notices.push(p),
+    );
+    try {
+      await postUserMessage(tenant, blobs, conversation.id, [...text("hi")]);
+      for (let i = 0; i < 50 && notices.length === 0; i++)
+        await new Promise((r) => setTimeout(r, 50));
+      expect(notices.map(parseNotice)).toEqual([{ persisted: 1 }]);
+    } finally {
+      await subscription.close();
+    }
+  });
+
   it("refuses a message while a turn is queued, and of a missing conversation", async () => {
     await using tenant = await createTestTenant();
     const { blobs, conversation } = await conversationWithTurn(tenant);

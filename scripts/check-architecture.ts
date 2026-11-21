@@ -9,7 +9,15 @@ import { parse } from "yaml";
 /** Lowest to highest. A layer may import its own layer and any layer to its left. */
 export const LAYERS = ["types", "config", "repo", "service", "runtime"] as const;
 
-export type Rule = "names" | "deps" | "imports" | "layers" | "tenancy" | "providers" | "config";
+export type Rule =
+  | "names"
+  | "deps"
+  | "imports"
+  | "layers"
+  | "tenancy"
+  | "providers"
+  | "config"
+  | "docker";
 export type Violation = { rule: Rule; file: string; message: string };
 
 const DEP_FIELDS = [
@@ -299,6 +307,25 @@ export function checkArchitecture(root: string): Violation[] {
           "migration is in neither migrations/control/ nor migrations/tenant/. Fix: control/ for the operator database (tenants, keys, usage), tenant/ for what lives in each tenant's own database. See ARCHITECTURE.md#tenancy",
         );
       }
+    }
+  }
+
+  // --- docker: every service is deployable and says when it is healthy -----------------------
+  for (const ws of workspaces) {
+    if (ws.kind !== "services") continue;
+    const dockerfile = join(ws.dir, "Dockerfile");
+    if (!existsSync(dockerfile)) {
+      add(
+        "docker",
+        ws.dir,
+        `no Dockerfile. Fix: add ${rel(dockerfile)} with \`dev\` and \`prod\` targets and a HEALTHCHECK, built from the repository root. See ARCHITECTURE.md#local-stack`,
+      );
+    } else if (!/^\s*HEALTHCHECK\b/m.test(readFileSync(dockerfile, "utf8"))) {
+      add(
+        "docker",
+        dockerfile,
+        "has no HEALTHCHECK. Fix: add a HEALTHCHECK that fails when the service cannot serve (Compose waits on it with `--wait`). See ARCHITECTURE.md#local-stack",
+      );
     }
   }
 

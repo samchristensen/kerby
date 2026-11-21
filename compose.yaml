@@ -1,0 +1,96 @@
+# The whole stack on one machine: the same images as a hosted deployment, started with `make up`.
+# Local values only: the tokens and secrets below are for development and must never be used elsewhere.
+name: ${KERBY_PROJECT:-kerby-stack}
+
+x-tenant-env: &tenant-env
+  CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
+  TENANT_DB_SECRET: ${KERBY_TENANT_DB_SECRET:-local-dev-tenant-db-secret-0123456789}
+  S3_ENDPOINT: http://rustfs:9000
+  S3_BUCKET: kerby
+  S3_ACCESS_KEY_ID: devkey
+  S3_SECRET_ACCESS_KEY: devsecret123
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    command: ["-c", "max_connections=500"]
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: kerby_control
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kerby_control"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rustfs:
+    image: rustfs/rustfs:1.0.6
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: devkey
+      RUSTFS_SECRET_KEY: devsecret123
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:9000/"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  control:
+    build:
+      context: .
+      dockerfile: services/control/Dockerfile
+      target: ${KERBY_IMAGE_TARGET:-prod}
+    environment:
+      <<: *tenant-env
+      OPERATOR_TOKEN: ${KERBY_OPERATOR_TOKEN:-local-dev-operator-token-0123456789}
+      CLUSTER_ADMIN_URL: postgres://postgres:dev@postgres:5432/postgres
+      CLUSTER_HOST: postgres
+      CLUSTER_PORT: "5432"
+      PORT: "8081"
+    volumes:
+      - exports:/var/lib/kerby/exports
+    depends_on:
+      postgres: { condition: service_healthy }
+      rustfs: { condition: service_healthy }
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      target: ${KERBY_IMAGE_TARGET:-prod}
+    environment:
+      <<: *tenant-env
+      MODELS: ${KERBY_MODELS:-fake/fake-1}
+      PORT: "8080"
+    ports:
+      # The only published port: the tenant-facing API, on loopback. There is no shared proxy locally.
+      - "127.0.0.1:${KERBY_API_PORT:-8080}:8080"
+    depends_on:
+      control: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+      target: ${KERBY_IMAGE_TARGET:-prod}
+    environment:
+      <<: *tenant-env
+      # Development only: the scripted model answers, and the built-in echo tool exists. Production refuses both.
+      KERBY_ENVIRONMENT: development
+      KERBY_FAKE_MODEL: ${KERBY_FAKE_MODEL:-1}
+      ENABLE_ECHO_TOOL: "1"
+      SWEEP_INTERVAL_SECONDS: "3"
+      # Passed through from your shell only when set (platform provider keys, for real models).
+      ANTHROPIC_API_KEY:
+      OPENAI_API_KEY:
+    depends_on:
+      control: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  rustfsdata:
+  exports:

@@ -16,6 +16,7 @@
     "@kerby/durable": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
+    "@kerby/serve": "workspace:*",
     "zod": "catalog:"
   }
 }

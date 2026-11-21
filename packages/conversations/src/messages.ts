@@ -84,6 +84,11 @@ export async function postUserMessage(
         "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
         [conversationId, seq, blobId],
       );
+      // Streams listening to this conversation see the message at once, and in order with the worker's events.
+      await tx.query("select pg_notify($1, $2)", [
+        conversationChannel(conversationId),
+        JSON.stringify({ persisted: seq }),
+      ]);
       await spawnInTx(
         tx,
         "run-turn",

@@ -10,6 +10,7 @@ import {
   createPiDurableRuntime,
   createProviderModels,
 } from "@kerby/runtime-pi-durable";
+import { createRouter, json, serve } from "@kerby/serve";
 import { loadWorkerConfig, type WorkerConfig } from "./config/index.ts";
 import { createHandlers } from "./runtime/handlers.ts";
 import { createScheduler, type Scheduler } from "./service/scheduler.ts";
@@ -68,12 +69,16 @@ export async function startWorker(config: WorkerConfig): Promise<{
   };
   const scheduler = createScheduler(deps, createHandlers(deps));
   await scheduler.start();
+  const health = await serve(createRouter([["GET", "/healthz", () => json(200, { ok: true })]]), {
+    port: config.healthPort,
+  });
   log("info", "worker started", { workerId: config.workerId, fakeModel: config.kerbyFakeModel });
   return {
     scheduler,
     deps,
     async close() {
       await scheduler.stop();
+      await health.close();
       await pools.close();
       await control.close();
     },

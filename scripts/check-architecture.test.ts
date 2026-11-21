@@ -26,7 +26,13 @@ const roots: string[] = [];
 function tree(overrides: Record<string, string | null> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "kerby-arch-"));
   roots.push(root);
-  const files = { ...BASE, ...overrides };
+  const files: Record<string, string | null> = { ...BASE, ...overrides };
+  // Every service in a fixture is deployable unless a test says otherwise.
+  for (const path of Object.keys(files)) {
+    const service = /^services\/([^/]+)\/package\.json$/.exec(path)?.[1];
+    const dockerfile = `services/${service}/Dockerfile`;
+    if (service && !(dockerfile in files)) files[dockerfile] = "FROM node\nHEALTHCHECK CMD true\n";
+  }
   for (const [path, content] of Object.entries(files)) {
     if (content === null) continue;
     mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -207,6 +213,24 @@ describe("checkArchitecture", () => {
       const [violation] = checkArchitecture(buried);
       expect(violation?.rule).toBe("providers");
       expect(violation?.message).toContain("AgentRuntime");
+    });
+  });
+
+  describe("docker", () => {
+    it("rejects a service without a Dockerfile, and one without a HEALTHCHECK", () => {
+      const missing = tree({ "services/api/Dockerfile": null });
+      const [first] = checkArchitecture(missing);
+      expect(first?.rule).toBe("docker");
+      expect(first?.message).toContain("HEALTHCHECK");
+
+      const unhealthy = tree({
+        "services/api/Dockerfile": "FROM node\n# HEALTHCHECK in a comment only\n",
+      });
+      expect(rules(unhealthy)).toEqual(["docker:services/api/Dockerfile"]);
+    });
+
+    it("does not ask packages for one", () => {
+      expect(checkArchitecture(tree())).toEqual([]);
     });
   });
 
