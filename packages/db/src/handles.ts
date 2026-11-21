@@ -32,6 +32,12 @@ export interface TenantDb extends Queryable {
   transaction<T>(fn: (tx: TenantTx) => Promise<T>): Promise<T>;
 }
 
+/**
+ * Who a call is for: the verified tenant and its own database. Built by a service from a verified API key,
+ * never from a request body. Anything that touches tenant data takes one (ARCHITECTURE.md#tenancy).
+ */
+export type TenantContext = { readonly tenantId: string; readonly db: TenantDb };
+
 /** A handle usable inside or outside a transaction. */
 export type ControlQueryable = ControlDb | ControlTx;
 export type TenantQueryable = TenantDb | TenantTx;

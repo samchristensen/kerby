@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { type ClosableTenantDb, createTenantDb, migrate } from "@kerby/db";
-import { createTestDatabase, type TestDatabase } from "@kerby/db/testing";
+import { type ClosableTenantDb, createTenantDb } from "@kerby/db";
+import { createMigratedDatabase } from "@kerby/db/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   cleanup,
@@ -11,25 +11,13 @@ import {
   type TaskHandlers,
 } from "./index.ts";
 
-let template: Promise<TestDatabase> | undefined;
-function durableTemplate(): Promise<TestDatabase> {
-  template ??= (async () => {
-    const db = await createTestDatabase();
-    const handle = createTenantDb(db.url, { max: 1 });
-    await migrate(handle, [durableMigrationsDir]);
-    await handle.close();
-    return db;
-  })();
-  return template;
-}
-
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const fn of cleanups.splice(0).reverse()) await fn();
 });
 
 async function tenant(): Promise<ClosableTenantDb> {
-  const database = await createTestDatabase((await durableTemplate()).name);
+  const database = await createMigratedDatabase([durableMigrationsDir]);
   const db = createTenantDb(database.url, { max: 5 });
   cleanups.push(async () => {
     await db.close();

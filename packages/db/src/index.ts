@@ -11,6 +11,7 @@ export {
   type QueryResult,
   type Row,
   rawPool,
+  type TenantContext,
   type TenantDb,
   type TenantQueryable,
   type TenantTx,
