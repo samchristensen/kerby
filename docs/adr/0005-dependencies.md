@@ -17,3 +17,4 @@ One line per dependency: name, owner workspace, why, alternatives rejected.
 - `pg` + `@types/pg` (`packages/db`): the Postgres driver Absurd also requires as a peer. Rejected: postgres.js, drizzle/kysely (Absurd needs a `pg.Pool`; SQL stays plain).
 - `absurd-sdk` (`packages/durable`): durable tasks, steps, retries as a SQL schema in each tenant database (ADR 0002). Rejected: Temporal, pg-boss (ADR 0002).
 - `@aws-sdk/client-s3` (`packages/blobs`): S3 API for RustFS locally and any S3 in production, path-style addressing. Rejected: minio-js (vendor-specific), hand-signed fetch (SigV4 and multipart are not ours to maintain).
+- `@earendil-works/pi-durable`, `pi-ai`, `chord` (`packages/runtime-pi-durable`, pinned together at 1.4.0, the spike's version; Pi publishes them in lockstep): the first agent harness (ADR 0003). Rejected: writing our own tool loop (provider quirks, retries, streaming, caching are the harness's job).

@@ -1,0 +1,14 @@
+{
+  "name": "@kerby/runtime-pi-durable",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "catalog:",
+    "@earendil-works/pi-ai": "catalog:",
+    "@earendil-works/pi-durable": "catalog:",
+    "@kerby/agent": "workspace:*"
+  }
+}
