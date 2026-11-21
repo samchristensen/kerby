@@ -15,6 +15,9 @@ catalogs:
     '@types/pg':
       specifier: 8.23.1
       version: 8.23.1
+    absurd-sdk:
+      specifier: 0.5.1
+      version: 0.5.1
     pg:
       specifier: 8.23.1
       version: 8.23.1
@@ -80,6 +83,18 @@ importers:
       '@types/pg':
         specifier: 'catalog:'
         version: 8.23.1
+
+  packages/durable:
+    dependencies:
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
+      absurd-sdk:
+        specifier: 'catalog:'
+        version: 0.5.1(pg@8.23.1)
 
   packages/observability: {}
 
@@ -438,6 +453,12 @@ packages:
 
   '@vitest/spy@5.1.0':
     resolution: {integrity: sha512-2DPO5OMHWKrBngC+fCmTQqemNF0gidRhp3lxbBmRhW+M1XJrfgPpqNqWVevXtn2f2ufD5ZaR1B6B641aAlcX5A==}
+
+  absurd-sdk@0.5.1:
+    resolution: {integrity: sha512-vs4lZBUtYFSVVKAQtLn/D0p8NOQt7xmU/Y+u7jMrAefrCm8cK1L9AWEmSSbulsQDQKGlyO0RYFXPb9Ax0azv3A==}
+    engines: {node: '>=18.0.0'}
+    peerDependencies:
+      pg: ^8.0.0
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -989,6 +1010,10 @@ snapshots:
       vite: 8.3.8(@types/node@26.6.6)(yaml@2.9.1)
 
   '@vitest/spy@5.1.0': {}
+
+  absurd-sdk@0.5.1(pg@8.23.1):
+    dependencies:
+      pg: 8.23.1
 
   assertion-error@2.0.1: {}
 

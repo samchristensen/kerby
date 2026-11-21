@@ -15,3 +15,4 @@ One line per dependency: name, owner workspace, why, alternatives rejected.
 - `zod` (`packages/config`, `packages/contracts`, services): runtime validation that doubles as the TypeScript type. Rejected: hand-written parsers (drift), valibot/ajv (a second schema language to learn for no gain).
 - `yaml` (`packages/config`, `scripts`): the YAML layer of configuration and the workspace catalog reader. Rejected: JSON-only config (operators expect YAML in Compose and Kubernetes).
 - `pg` + `@types/pg` (`packages/db`): the Postgres driver Absurd also requires as a peer. Rejected: postgres.js, drizzle/kysely (Absurd needs a `pg.Pool`; SQL stays plain).
+- `absurd-sdk` (`packages/durable`): durable tasks, steps, retries as a SQL schema in each tenant database (ADR 0002). Rejected: Temporal, pg-boss (ADR 0002).

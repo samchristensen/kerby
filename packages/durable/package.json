@@ -1,0 +1,13 @@
+{
+  "name": "@kerby/durable",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/db": "workspace:*",
+    "@kerby/observability": "workspace:*",
+    "absurd-sdk": "catalog:"
+  }
+}

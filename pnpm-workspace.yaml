@@ -9,6 +9,7 @@ minimumReleaseAge: 10080
 
 # Every external dependency version lives here, once. Workspaces say "catalog:".
 catalog:
+  "absurd-sdk": "0.5.1"
   "@biomejs/biome": "2.6.4"
   "@types/node": "26.6.6"
   "@types/pg": "8.23.1"
