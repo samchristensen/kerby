@@ -68,7 +68,7 @@ For the agent building Kerby with no human present. Read this first after any co
 Each task lists what to build and its acceptance. Tests are behavioral; use the real containers.
 
 - [x] **T0** Test infrastructure above. Acceptance: a trivial test per helper passes; `make test` leaves no containers behind.
-- [ ] **T1 `packages/config`**: `loadConfig(schema)` with zod (add `zod` to the catalog): YAML file < env < secrets dir; fails naming keys, never values.
+- [x] **T1 `packages/config`**: `loadConfig(schema)` with zod (add `zod` to the catalog): YAML file < env < secrets dir; fails naming keys, never values.
   Add a check (rule id `config`) that `process.env` appears only in `packages/config/src` (and scripts). Test the check and the loader.
 - [ ] **T2 `packages/observability`**: `log(level, msg, fields)` JSON to stdout, `tenantId` field required via a `withTenant(tenantId, fn)` AsyncLocalStorage helper; never logs message content (no free-form `content` field). Biome `noConsole` already forbids console.
 - [ ] **T3 `packages/db`**: `ControlDb`, `TenantDb` (branded wrappers exposing `query` and `transaction`), `createControlDb(url)`, `TenantPools` (LRU, injected resolver `(tenantId) => Promise<url>`), `migrate(db, dir)` recording applied files in `schema_migrations`, `migrateTenants` fan-out helper (concurrency 20). Only importer of `pg`. Control migrations (in `services/control/migrations/control/`): `tenants` (`-- global`), `api_keys`, `usage`, `audit_log`, `tenant_secrets`.

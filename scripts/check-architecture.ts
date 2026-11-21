@@ -9,7 +9,7 @@ import { parse } from "yaml";
 /** Lowest to highest. A layer may import its own layer and any layer to its left. */
 export const LAYERS = ["types", "config", "repo", "service", "runtime"] as const;
 
-export type Rule = "names" | "deps" | "imports" | "layers" | "tenancy" | "providers";
+export type Rule = "names" | "deps" | "imports" | "layers" | "tenancy" | "providers" | "config";
 export type Violation = { rule: Rule; file: string; message: string };
 
 const DEP_FIELDS = [
@@ -29,6 +29,9 @@ const SKIP_DIRS: Record<string, true> = {
   ".next": true,
 };
 const BUILTINS = new Set(builtinModules);
+/** Direct access to the process environment: `process.env`, or `env` imported from `node:process`. */
+const READS_ENV =
+  /\bprocess\s*(?:\.|\?\.)\s*env\b|\bprocess\s*\[\s*["']env["']\s*\]|import\s*\{[^}]*\benv\b[^}]*\}\s*from\s*["'](?:node:)?process["']/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 /**
@@ -182,9 +185,19 @@ export function checkArchitecture(root: string): Violation[] {
 
     for (const file of walk(ws.dir)) {
       if (!/\.(?:m?ts|tsx)$/.test(file)) continue;
+      const text = readFileSync(file, "utf8");
+      if (ws.kind === "services" || (ws.kind === "packages" && basename(ws.dir) !== "config")) {
+        if (READS_ENV.test(text)) {
+          add(
+            "config",
+            file,
+            `reads the process environment directly. Fix: declare the setting in the service's config schema and read it from the object loadConfig (@kerby/config) returns; config is read once at startup. See ARCHITECTURE.md#configuration`,
+          );
+        }
+      }
       const importerLayer =
         ws.kind === "services" && !file.endsWith(".test.ts") ? layerIndex(src, file) : -1;
-      for (const spec of specifiers(readFileSync(file, "utf8"))) {
+      for (const spec of specifiers(text)) {
         if (spec.startsWith(".")) {
           const target = resolve(dirname(file), spec);
           if (relative(ws.dir, target).startsWith("..")) {

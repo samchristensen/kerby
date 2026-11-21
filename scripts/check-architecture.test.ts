@@ -209,4 +209,32 @@ describe("checkArchitecture", () => {
       expect(violation?.message).toContain("AgentRuntime");
     });
   });
+
+  describe("config", () => {
+    const reads = "export const url = process.env.DATABASE_URL;\n";
+
+    it("rejects reading the process environment outside packages/config and scripts", () => {
+      const inService = tree({ "services/api/src/service/chats.ts": reads });
+      const [violation] = checkArchitecture(inService);
+      expect(violation?.rule).toBe("config");
+      expect(violation?.message).toContain("loadConfig");
+
+      const inPackage = tree({ "packages/contracts/src/index.ts": reads });
+      expect(rules(inPackage)).toEqual(["config:packages/contracts/src/index.ts"]);
+
+      const imported = tree({
+        "packages/contracts/src/index.ts": `import { env } from ${JSON.stringify("node:process")};\n`,
+      });
+      expect(rules(imported)).toEqual(["config:packages/contracts/src/index.ts"]);
+    });
+
+    it("lets packages/config and scripts read it", () => {
+      const root = tree({
+        "packages/config/package.json": pkg("@kerby/config"),
+        "packages/config/src/index.ts": reads,
+        "scripts/tool.ts": reads,
+      });
+      expect(checkArchitecture(root)).toEqual([]);
+    });
+  });
 });

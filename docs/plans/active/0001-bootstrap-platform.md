@@ -28,7 +28,7 @@ Decisions: ADRs 0001-0004.
 
 ### M2 Packages (each: one purpose, tests, a row in ARCHITECTURE.md#providers if it wraps a system)
 
-- [ ] `config` (`loadConfig`; add a check that `process.env` is read nowhere else), `observability` (tenant id on every log line)
+- [ ] `config` ✓ (`loadConfig`, check `config`), `observability` (tenant id on every log line)
 - [ ] `db`: `ControlDb`, `TenantDb`, tenant pool registry, migrator for both planes
 - [ ] `durable`: task names and params, spawn, register, vendored `absurd.sql`, tenant claim loop, lease heartbeat for a whole run, `fatalOnLeaseTimeout: false`, scheduled `cleanup_all_queues`
 - [ ] `blobs`: `put`/`get` taking a tenant context, writing the tenant's index
@@ -93,3 +93,4 @@ Decisions: ADRs 0001-0004.
 - 2026-11-21 Spike S2 rest (Absurd 0.5.1): lease 2 s, work 6 s, no heartbeat: the run is failed and rescheduled, a second worker claims it after the retry backoff (3.0 s) and both run concurrently; the first worker's next `ctx.step` throws `FailedTask: Task already failed`. Heartbeating every 1 s: no second claim, one attempt. So work outside steps can overlap, which is why the index insert is fenced. `cleanup_all_queues('turns')` deleted a completed task past the queue's `cleanup_ttl` (default 30 days); it runs only when called. Design consequences recorded in ADR 0002 and ARCHITECTURE.md.
 - 2026-11-21 Spike S3: RustFS (latest, Apache-2.0) and SeaweedFS (latest) both pass every operation Kerby uses through `@aws-sdk/client-s3` with path-style addressing; both reject a second `If-None-Match: *` put with 412. Not tested: Garage, multi-part uploads over the SDK's threshold, presigned URLs.
 - 2026-11-21 T0: `vitest.config.ts` plus `scripts/test-containers.ts` start `postgres:17-alpine` and `rustfs/rustfs:1.0.6` (random host ports, label `kerby-test=1`, stale ones removed at start) and `provide` them as `inject("containers")`; run takes about 2 s with images cached. Decision: `createTestControlDb`/`createTestTenant` live in `@kerby/db/testing` (T3), and take migration directories as arguments because a package may not import a service's migrations.
+- 2026-11-21 T1: `@kerby/config` `loadConfig(schema, sources?)` (file < env < secrets dir; unknown file keys fail; errors name keys, never values) and the `config` architecture rule (process environment read only in `packages/config` and `scripts`). ADR 0005 is the running list of dependency reasons; `zod` 4.6.7 added.
