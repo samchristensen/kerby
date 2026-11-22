@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant secrets-key railway-plan railway-setup deploy env-down
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -61,8 +61,11 @@ railway-plan: ## Preview what .railway/railway.ts would change in ENV (default p
 railway-setup: ## Make ENV match .railway/railway.ts (IaC), add its domain and secrets; safe to run again
 	node scripts/railway.ts setup $(ENV)
 
-deploy: ## Upload this checkout to Railway for ENV (default production): control, then api and worker
-	node scripts/railway.ts deploy $(ENV)
+deploy: ## Roll the CI-built images of TAG (default: this commit, sha-<commit>) out to ENV: control, then api and worker
+	node scripts/railway.ts deploy $(ENV) $(TAG)
+
+railway-registry: ## Give ENV's services the GHCR pull token in $GHCR_PULL_TOKEN (classic token, read:packages only)
+	node scripts/railway.ts registry $(ENV)
 
 env-down: ## Delete a Railway environment and its data: make env-down ENV=pr-123 (never production)
 	@test "$(ENV)" != production || (echo "usage: make env-down ENV=<name>; production is not deleted from here" && exit 1)

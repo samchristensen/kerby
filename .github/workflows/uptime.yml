@@ -1,0 +1,32 @@
+# External synthetic check (plan 0003, D3): every 15 minutes, from outside Railway, ask the public api for /healthz.
+# A failure fails this workflow (GitHub emails whoever last changed this file) and posts to ALERT_WEBHOOK_URL when set.
+# The address is the repository variable KERBY_API_URL. GitHub runs schedules late under load: this is a smoke alarm,
+# not a pager.
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  healthz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      API_URL: ${{ vars.KERBY_API_URL }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+    steps:
+      - name: GET /healthz
+        run: |
+          test -n "$API_URL" || { echo "::error::repository variable KERBY_API_URL is not set"; exit 1; }
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 10 --max-time 20 "$API_URL/healthz"
+      - if: failure() && env.ALERT_WEBHOOK_URL != ''
+        name: Alert
+        run: |
+          message="kerby uptime: GET $API_URL/healthz failed (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+          # `text` is what Slack reads, `content` what Discord reads; each ignores the other.
+          jq -n --arg m "$message" '{text: $m, content: $m}' |
+            curl --fail --silent --show-error --max-time 20 -H 'content-type: application/json' --data @- "$ALERT_WEBHOOK_URL"

@@ -1,15 +1,20 @@
-// Kerby's Railway infrastructure (ADR 0007). `make railway-plan` previews, `make railway-setup` applies; the runbook is
-// docs/deploy.md. The same file describes every environment: a new one starts empty and this makes it whole.
+// Kerby's Railway infrastructure (ADRs 0007, 0011). `make railway-plan` previews, `make railway-setup` applies; the runbook
+// is docs/deploy.md. The same file describes every environment: a new one starts empty and this makes it whole.
 //
 // What is NOT here, on purpose:
 //  - Secrets. A generated value (`${{secret(n)}}`) is made again on every apply, which would rotate TENANT_DB_SECRET and
 //    strand every tenant database. They are `preserve()`: `scripts/railway.ts secrets` creates each once and never
 //    replaces it.
 //  - The api's generated domain (the IaC does not manage generated domains): `scripts/railway.ts setup` adds it.
-//  - Code. Services have no `source`: `make deploy` uploads this checkout with `railway up`.
+//  - Code. Railway builds nothing: CI builds each service's image and pushes it to GHCR as `sha-<commit>`, then
+//    `scripts/railway.ts deploy` points the environment's tag (`kerby-<service>:<environment>`) at it and redeploys.
+//  - Registry credentials for GHCR: a token cannot live in this file; `scripts/railway.ts registry` sets them.
+//  - The database volume's backup schedule: `railway postgres pitr schedule set --daily --service Postgres` (daily,
+//    kept 6 days). Declaring it here would make the IaC re-attach the live volume; Railway's export does not show it.
 import {
   bucket,
   defineRailway,
+  image,
   postgres,
   preserve,
   project,
@@ -20,8 +25,13 @@ import {
 
 const REGION = "us-east4-eqdc4a";
 const BUCKET_REGION = "iad";
+const REGISTRY = "ghcr.io/samchristensen";
 
-export default defineRailway(() => {
+export default defineRailway((ctx) => {
+  const environment = ctx.environmentName ?? ctx.environment;
+  if (!environment) throw new Error("railway gave no environment name to .railway/railway.ts");
+  // Each environment runs the image its own tag points at; `scripts/railway.ts deploy` moves the tag.
+  const source = (name: string) => image(`${REGISTRY}/kerby-${name}:${environment}`);
   const db = postgres("Postgres", { region: REGION });
   db.networking = { privateNetworkEndpoint: "postgres" };
   const dbVolume = volume("postgres-volume", {
@@ -51,7 +61,7 @@ export default defineRailway(() => {
   // Control holds the administrative credentials: it makes the limited role and every tenant database. Its secrets are the
   // source; api and worker reference TENANT_DB_SECRET so there is one copy.
   const control = service("control", {
-    build: { builder: "DOCKERFILE", dockerfilePath: "services/control/Dockerfile" },
+    source: source("control"),
     healthcheck: "/healthz",
     env: {
       PORT: "8081",
@@ -68,7 +78,7 @@ export default defineRailway(() => {
 
   // The api seals tenants' model keys to the public half of the secrets key pair and cannot open them (ADR 0008).
   const api = service("api", {
-    build: { builder: "DOCKERFILE", dockerfilePath: "services/api/Dockerfile" },
+    source: source("api"),
     healthcheck: "/healthz",
     env: {
       PORT: "8080",
@@ -81,7 +91,7 @@ export default defineRailway(() => {
 
   // The worker alone holds the private half: it opens a tenant's key inside the run that uses it.
   const worker = service("worker", {
-    build: { builder: "DOCKERFILE", dockerfilePath: "services/worker/Dockerfile" },
+    source: source("worker"),
     healthcheck: "/healthz",
     env: {
       PORT: "8082",

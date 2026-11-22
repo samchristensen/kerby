@@ -1,12 +1,16 @@
-// Operate Kerby on Railway (ADR 0007). Run through `make railway-plan`, `make railway-setup` and `make deploy`.
-//   node scripts/railway.ts plan    [environment]   preview what `.railway/railway.ts` would change
-//   node scripts/railway.ts setup   [environment]   make the environment match `.railway/railway.ts`, add its domain and secrets
-//   node scripts/railway.ts secrets [environment]   create the secrets the IaC file leaves to preserve(); never replaces one
-//   node scripts/railway.ts deploy  [environment]   upload this checkout: control first, then api and worker
+// Operate Kerby on Railway (ADRs 0007, 0011). Run through `make railway-plan`, `make railway-setup` and `make deploy`.
+//   node scripts/railway.ts plan     [environment]        preview what `.railway/railway.ts` would change
+//   node scripts/railway.ts setup    [environment]        make the environment match `.railway/railway.ts`, add its domain and secrets
+//   node scripts/railway.ts secrets  [environment]        create the secrets the IaC file leaves to preserve(); never replaces one
+//   node scripts/railway.ts registry [environment]        give each service the GHCR pull token in $GHCR_PULL_TOKEN
+//   node scripts/railway.ts deploy   [environment] [tag]  point the environment's image tag at `tag` (default: this commit's
+//                                                         `sha-<commit>`, built by CI) and redeploy: control first, then api and worker
 // The infrastructure is Railway Infrastructure as Code in `.railway/railway.ts`; this script does only what that file cannot:
-// make an environment, generate secrets once, add the generated domain, and roll code out. `environment` defaults to
-// production; a new name is a copy of it with secrets of its own.
-// Needs the `railway` CLI, signed in, with the project linked (`railway init --name kerby`).
+// make an environment, generate secrets once, add the generated domain, set registry credentials, and roll images out.
+// Railway builds nothing: CI builds and pushes the images (.github/workflows/ci.yml). `environment` defaults to production;
+// a new name is a copy of it with secrets of its own.
+// Needs the `railway` CLI (signed in, or RAILWAY_TOKEN for one environment) with the project linked, and for `deploy`, docker
+// logged in to ghcr.io with permission to push tags.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -15,6 +19,9 @@ import { generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 const PRODUCTION = "production";
 const SERVICES = ["control", "api", "worker"] as const;
 type Service = (typeof SERVICES)[number];
+const REGISTRY_OWNER = "samchristensen";
+const imageOf = (service: Service, tag: string) =>
+  `ghcr.io/${REGISTRY_OWNER}/kerby-${service}:${tag}`;
 
 type Vars = Record<string, string>;
 
@@ -174,9 +181,33 @@ const FINAL: Record<string, true> = {
   SKIPPED: true,
 };
 
-async function rollout(service: Service, environment: string, message: string): Promise<void> {
+/**
+ * Point `kerby-<service>:<environment>` at `tag` and redeploy the service from its source, which pulls the tag afresh
+ * (`--from-source`; a plain redeploy would reuse the previous image). Waits for the deployment to settle.
+ */
+async function rollout(service: Service, environment: string, tag: string): Promise<void> {
+  execFileSync(
+    "docker",
+    [
+      "buildx",
+      "imagetools",
+      "create",
+      "--tag",
+      imageOf(service, environment),
+      imageOf(service, tag),
+    ],
+    { stdio: "inherit" },
+  );
   const startedAt = Date.now() - 60_000; // the clocks differ a little
-  railway(["up", "--service", service, "--environment", environment, "--detach", "-m", message]);
+  railway([
+    "redeploy",
+    "--service",
+    service,
+    "--environment",
+    environment,
+    "--from-source",
+    "--yes",
+  ]);
   const deadline = Date.now() + 20 * 60_000;
   for (;;) {
     const latest = list(
@@ -200,7 +231,7 @@ async function rollout(service: Service, environment: string, message: string): 
             `${service} deployment ${status}: railway logs --service ${service} -e ${environment}`,
           );
         }
-        console.log(`${service}: deployed`);
+        console.log(`${service}: ${tag} deployed`);
         return;
       }
     }
@@ -209,26 +240,71 @@ async function rollout(service: Service, environment: string, message: string): 
   }
 }
 
-async function deploy(environment: string): Promise<void> {
-  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
-  const dirty = git("status", "--porcelain") === "" ? "" : "+dirty";
-  const message = `${git("rev-parse", "--short=12", "HEAD")}${dirty}`;
-  // control first: it creates the limited database role that api and worker connect as.
-  await rollout("control", environment, message);
-  await Promise.all([
-    rollout("api", environment, message),
-    rollout("worker", environment, message),
-  ]);
+async function deploy(environment: string, tag: string): Promise<void> {
+  // Every image must exist before any service moves, so a release never stops half-way for a missing image.
+  for (const service of SERVICES) {
+    execFileSync("docker", ["buildx", "imagetools", "inspect", imageOf(service, tag)], {
+      stdio: "ignore",
+    });
+  }
+  // control first: it migrates the control database and creates the limited role api and worker connect as.
+  await rollout("control", environment, tag);
+  await Promise.all([rollout("api", environment, tag), rollout("worker", environment, tag)]);
 }
 
-const [command, environment = PRODUCTION] = process.argv.slice(2);
+/**
+ * GHCR images are private: give each service the pull token (a classic token with `read:packages` only). Set through the
+ * API because a token cannot live in the IaC file; safe to repeat.
+ */
+function registry(environment: string): void {
+  const token = process.env.GHCR_PULL_TOKEN;
+  if (!token)
+    throw new Error("GHCR_PULL_TOKEN is not set: a classic GitHub token with read:packages only");
+  const environments = list(
+    record(railwayJson(["environment", "list"]), "environments").environments,
+    "environments",
+  );
+  const environmentId = text(
+    environments.find((e) => e.name === environment) ?? {},
+    "id",
+    `environment ${environment}`,
+  );
+  const services = list(railwayJson(["service", "list", "--environment", environment]), "services");
+  for (const service of SERVICES) {
+    const serviceId = text(
+      services.find((s) => s.name === service) ?? {},
+      "id",
+      `service ${service}`,
+    );
+    railway(
+      [
+        "api",
+        "mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }",
+        "--variables",
+        "@-",
+      ],
+      JSON.stringify({
+        serviceId,
+        environmentId,
+        input: { registryCredentials: { username: REGISTRY_OWNER, password: token } },
+      }),
+    );
+    console.log(`${service}: registry credentials set`);
+  }
+}
+
+const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+const [command, environment = PRODUCTION, tag] = process.argv.slice(2);
 if (command === "plan") {
   ensureEnvironment(environment);
   iac("plan");
 } else if (command === "setup") setup(environment);
 else if (command === "secrets") ensureSecrets(environment);
-else if (command === "deploy") await deploy(environment);
+else if (command === "registry") registry(environment);
+else if (command === "deploy") await deploy(environment, tag ?? `sha-${git("rev-parse", "HEAD")}`);
 else {
-  console.error("usage: node scripts/railway.ts <plan|setup|secrets|deploy> [environment]");
+  console.error(
+    "usage: node scripts/railway.ts <plan|setup|secrets|registry|deploy> [environment] [tag]",
+  );
   process.exit(1);
 }
