@@ -52,6 +52,7 @@ Each external system lives behind exactly one package; nothing else imports the 
 | Absurd (`absurd-sdk`)        | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
 | S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put` / `get` taking a tenant context, writing the tenant's blob index      |
 | Pi Durable and its libraries | `runtime-pi-durable` | an `AgentRuntime`                                                           |
+| Tenant-supplied URLs         | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
@@ -76,8 +77,9 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   sealed by `packages/secrets` to a public key the api holds, stored in the control plane's `tenant_secrets`, and opened only by a
   worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the tenant id,
   never message content or secrets; the worker scrubs the key from provider errors. _review_
-- No tenant code runs in Kerby's processes. Tools are remote MCP servers reached through an egress guard (no private
-  ranges, no redirects into them). _review_
+- No tenant code runs in Kerby's processes. Tools are remote MCP servers. Every call to a URL a tenant supplied goes
+  through `createEgressFetch` from `packages/egress` ([ADR 0010](docs/adr/0010-egress-guard.md)): public addresses
+  only, connected to the address it checked, redirects re-checked, time and size limits. _review_
 - Lifecycle is an operator command in `services/control`: provision, suspend, export, delete. Provisioning copies the
   template database (migrated at startup), creates a role that owns that database and may connect to no other tenant
   database, and derives the role's password as an HMAC of a cluster secret and the tenant id: no tenant credential is stored.
