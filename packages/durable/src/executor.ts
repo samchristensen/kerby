@@ -121,6 +121,10 @@ export function createTenantExecutor(
       // its turn and sees the runs the previous one committed. A lapsed lease no longer counts; the claim below
       // fails that run and may hand its task to this worker.
       const client = await withConnectRetry(() => pool.connect());
+      // A checked-out client has no pool error listener: a connection cut while it waits on the lock must not crash
+      // the process. The failure reaches the pending query, which throws below.
+      const onError = (error: Error) => log("warn", "claim connection failed", errorFields(error));
+      client.on("error", onError);
       let broken: Error | undefined;
       try {
         await client.query("begin");
@@ -145,6 +149,7 @@ export function createTenantExecutor(
         });
         throw error;
       } finally {
+        client.off("error", onError);
         client.release(broken);
       }
     },
