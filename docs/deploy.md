@@ -234,8 +234,9 @@ Everything goes to one channel (a Slack or Discord channel the operator watches)
 1. **Railway notifications** (workspace settings, Notifications): email and in-app, on by default for build failures,
    crashed deployments, OOM kills and volume usage. Keep them on.
 2. **One project webhook** (project settings, Webhooks) to the channel's incoming-webhook URL: deployment status changes
-   (`Deployment.failed`, `Deployment.crashed`), volume usage alerts and monitor alerts. Railway formats Slack and Discord
-   URLs itself. The webhook is unsigned.
+   (`Deployment.failed`, `Deployment.crashed`, `Deployment.oom_killed`), volume usage alerts and monitor alerts. Railway
+   formats Slack and Discord URLs itself. The webhook is unsigned. There is no CLI command; the GraphQL mutation
+   `notificationRuleCreate` (`railway api`) creates one with `channelConfigs: [{type: "webhook", url}]`.
 3. **Monitors** (Pro plan; per service in the dashboard): CPU, RAM, disk and egress thresholds, alerting through the
    webhook.
 4. **`ALERT_WEBHOOK_URL`** on `control`, `api` and `worker`, the same channel URL: Railway cannot alert on log lines, so
@@ -261,6 +262,10 @@ A copy made by `make railway-setup ENV=pr-123` inherits production's value; its 
 (`kerby worker (pr-123): ...`, from Railway's `RAILWAY_ENVIRONMENT_NAME`). Remove it there with
 `railway variable delete ALERT_WEBHOOK_URL --service <s> --environment pr-123` if the channel should stay quiet.
 Locally, `KERBY_ALERT_WEBHOOK_URL=http://host.docker.internal:<port>/ make up` posts to a listener on your machine.
+
+Production (2026-11-22): a Slack app with an incoming webhook into the alerts channel; the same URL is
+`ALERT_WEBHOOK_URL` on all three services, the project webhook, and the repository secret `ALERT_WEBHOOK_URL` that the
+`uptime` workflow posts to on failure. Monitors are not set yet (tech debt).
 
 ## Do not do
 
