@@ -185,9 +185,9 @@ on purpose: a generated value there would be made again on every apply.
 - **Measured** (`make multitenant`, stream saturation, 2026-11-22; two api processes, 200 tenants provisioned, local
   `max_connections` 500): an open stream costs its tenant 3 connections on that api process (the pool of 2 and the
   listener) however many streams it has: 46 tenants with 60 streams held 156 connections on one process, 60 tenants
-  with one stream each 181 on the other (the bound above: 190). Peak 421 client connections in all (worker 61, control
-  23). One tenant role peaked at 7 (3 per api process). Postgres used 0.95 to 1.2 GiB with about 420 connections and
-  202 databases.
+  with one stream each 181 to 183 on the other (the bound above: 190). Peak 421 to 426 client connections in all
+  (worker 61, control 23 to 26). One tenant role peaked at 8 (3 per api process and 2 from the worker). Postgres used
+  0.8 to 1.2 GiB with about 420 connections and up to 202 databases.
 - **Caps**, set from those numbers: `MAX_STREAMS_PER_PROCESS` 60 (503 `server_busy` past it) keeps one api process's
   worst case at 210; `MAX_STREAMS_PER_TENANT` 15 (429 `too_many_streams`), a quarter of that, so one tenant cannot take
   a whole process (its own streams cost nothing more); `TENANT_ROLE_CONNECTION_LIMIT` 20 per tenant role, from 3 per api
