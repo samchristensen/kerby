@@ -3,7 +3,6 @@
 One line each: what, why it matters, what fixes it. Remove the line in the commit that pays it. Plan
 [0003](active/0003-tech-debt.md) schedules every line.
 
-- `knip` (dead code, unused dependencies) is not wired into `make check`. Add it with the first service.
 - The import scanner in `check-architecture.ts` is regex-based and also reads strings in comments. Replace it with a parser if a false positive appears.
 - `AgentRuntime` has one adapter and no conformance suite. Write the suite when the second adapter lands.
 - A conversation read and a turn's rehydrate fetch each message body from S3, one request per message (a page, or the history budget, at a time). Add a per-process body cache when a profile shows it (plan 0003, parked "Body cache").
