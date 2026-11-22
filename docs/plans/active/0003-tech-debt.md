@@ -98,8 +98,8 @@ flowchart LR
 - [ ] **C2 knip** ("`knip` (dead code, unused dependencies) is not wired"). S. Overdue: three services exist.
   Risk: the catalog pins TypeScript 7.0.2, which has no JavaScript API (`createSourceFile` is undefined); confirm the
   chosen knip version runs without it before adopting. Fix: catalog pin and ADR 0005 line, a config naming the entries
-  (`services/*/src/index.ts`, package `exports`, `testing.ts`, tests, `scripts/*.ts`, `.railway/railway.ts`), `make knip`
-  inside `make check`; delete what it finds. If no knip version runs, close the line with that reason.
+  (`services/*/src/index.ts`, package `exports`, `testing.ts`, tests, `scripts/*.ts`, `.railway/railway.ts`), a `knip`
+  Makefile target inside `make check`; delete what it finds. If no knip version runs, close the line with that reason.
 - [ ] **C3 Doc checks** ("No automated doc-freshness pass"). M.
   Fix: `scripts/check-docs.ts` in `make check`: relative links in every `.md` resolve; every `make <target>` the docs name
   exists in the Makefile; every rule a doc calls enforced exists in `check-architecture.ts`. The semantic pass (ADR

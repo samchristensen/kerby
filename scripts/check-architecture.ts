@@ -9,15 +9,18 @@ import { parse } from "yaml";
 /** Lowest to highest. A layer may import its own layer and any layer to its left. */
 export const LAYERS = ["types", "config", "repo", "service", "runtime"] as const;
 
-export type Rule =
-  | "names"
-  | "deps"
-  | "imports"
-  | "layers"
-  | "tenancy"
-  | "providers"
-  | "config"
-  | "docker";
+/** Every rule id; docs that say a rule is enforced name one of these (`make docs` checks). */
+export const RULES = [
+  "names",
+  "deps",
+  "imports",
+  "layers",
+  "tenancy",
+  "providers",
+  "config",
+  "docker",
+] as const;
+export type Rule = (typeof RULES)[number];
 export type Violation = { rule: Rule; file: string; message: string };
 
 const DEP_FIELDS = [
