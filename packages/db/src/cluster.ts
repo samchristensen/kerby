@@ -30,6 +30,8 @@ export interface ClusterAdmin {
    * be able to use up the connections every other tenant and the control database share.
    */
   createRole(role: string, password: string): Promise<void>;
+  /** Give an existing role a new password. Open sessions keep working; the next login needs the new one. */
+  setRolePassword(role: string, password: string): Promise<void>;
   /** Set (again) the connection limit of an existing tenant role; roles made before the limit existed get it. */
   limitRoleConnections(role: string): Promise<void>;
   /**
@@ -54,7 +56,7 @@ export interface ClusterAdmin {
   close(): Promise<void>;
 }
 
-/** An administrative connection to a cluster (a role with CREATEDB and CREATEROLE, on its maintenance database). */
+/** An administrative connection to a cluster as a superuser (Railway's `postgres`, ADR 0007), on its maintenance database. */
 export function createClusterAdmin(url: string): ClusterAdmin {
   const db = createControlDb(url, { max: 2 });
   const exec = async (sql: string) => {
@@ -83,9 +85,13 @@ export function createClusterAdmin(url: string): ClusterAdmin {
         [quoted, String(TENANT_ROLE_CONNECTION_LIMIT), password],
       );
       await exec(rows[0]?.sql ?? "");
-      // A non-superuser admin (a managed Postgres without superuser access) may only create a database owned by, and
-      // move objects to, a role it is a member of.
-      await exec(`grant ${quoted} to current_user`);
+    },
+    async setRolePassword(role, password) {
+      const { rows } = await db.query<{ sql: string }>(
+        "select format('alter role %s password %L', $1::text, $2::text) as sql",
+        [identifier(role, "role name"), password],
+      );
+      await exec(rows[0]?.sql ?? "");
     },
     async limitRoleConnections(role) {
       await exec(
@@ -120,7 +126,7 @@ export function createClusterAdmin(url: string): ClusterAdmin {
     },
     async restrictToAdmin(database) {
       const quotedDb = identifier(database, "database name");
-      // Grant first: a non-superuser admin must not lock itself out of its own maintenance database.
+      // The grant keeps the admin's own access explicit; a superuser needs none.
       await exec(`grant connect on database ${quotedDb} to current_user`);
       await exec(`revoke connect on database ${quotedDb} from public`);
     },

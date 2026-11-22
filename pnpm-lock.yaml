@@ -266,6 +266,9 @@ importers:
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secrets
       '@kerby/serve':
         specifier: workspace:*
         version: link:../../packages/serve

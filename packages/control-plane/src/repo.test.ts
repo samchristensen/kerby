@@ -1,5 +1,12 @@
 import { createControlDb } from "@kerby/db";
-import { createOpener, createSealer, generateSecretsKeyPair, SecretsError } from "@kerby/secrets";
+import {
+  createOpener,
+  createSealer,
+  createSecretBox,
+  generateBoxKey,
+  generateSecretsKeyPair,
+  SecretsError,
+} from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
   authenticateApiKey,
@@ -11,18 +18,22 @@ import {
   listApiKeys,
   listModelKeys,
   listTenants,
+  listTenantsWithoutDbPassword,
   MAX_MODEL_KEYS_PER_TENANT,
   ModelKeyLimitError,
+  newTenantDbPassword,
   parseApiKey,
   putModelKey,
   readModelKey,
+  readTenantDbPassword,
   recordUsage,
+  resealTenantDbPasswords,
+  resolveTenantDbUrl,
   revokeApiKey,
   setAppRolePassword,
   setTenantStatus,
+  storeTenantDbPassword,
   TenantNameTakenError,
-  tenantDbPassword,
-  tenantDbUrl,
 } from "./index.ts";
 import { createTestControlDb } from "./testing.ts";
 
@@ -50,26 +61,81 @@ describe("tenants", () => {
     expect((await listTenants(control.db, { status: "active" })).map((t) => t.name)).toEqual(["a"]);
     expect(await listTenants(control.db)).toHaveLength(2);
   });
+});
 
-  it("derives a per-tenant database URL from the cluster secret", () => {
-    const tenant = {
-      id: "11111111-1111-4111-8111-111111111111",
-      dbHost: "h",
-      dbPort: 6543,
-      dbName: "t_x",
-      dbRole: "r_x",
-    };
-    const url = new URL(tenantDbUrl(tenant, "cluster-secret"));
-    expect(url.username).toBe("r_x");
-    expect(url.password).toBe(tenantDbPassword("cluster-secret", tenant.id));
+describe("tenant database passwords", () => {
+  it("are random, stored sealed, and resolve to the tenant's own URL as its own role", async () => {
+    await using control = await createTestControlDb();
+    const box = createSecretBox([generateBoxKey()]);
+    const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 6543 });
+    const password = newTenantDbPassword();
+    expect(password).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(newTenantDbPassword()).not.toBe(password);
+
+    expect(await listTenantsWithoutDbPassword(control.db)).toHaveLength(1);
+    await expect(resolveTenantDbUrl(control.db, box, tenant.id)).rejects.toThrow(
+      /no stored database password. Fix: start the control service/,
+    );
+    expect(await storeTenantDbPassword(control.db, box, tenant.id, password)).toBe(true);
+    expect(await listTenantsWithoutDbPassword(control.db)).toEqual([]);
+    const { rows } = await control.db.query<{ ciphertext: Buffer }>(
+      "select ciphertext from tenant_db_credentials",
+    );
+    expect(rows[0]?.ciphertext.includes(Buffer.from(password))).toBe(false);
+
+    const url = new URL(await resolveTenantDbUrl(control.db, box, tenant.id, "verify-full"));
+    expect(url.username).toBe(tenant.dbRole);
+    expect(url.password).toBe(password);
     expect(url.host).toBe("h:6543");
-    expect(url.pathname).toBe("/t_x");
-    expect(tenantDbPassword("cluster-secret", tenant.id)).not.toBe(
-      tenantDbPassword("cluster-secret", "other"),
+    expect(url.pathname).toBe(`/${tenant.dbName}`);
+    expect(url.searchParams.get("sslmode")).toBe("verify-full");
+    await expect(resolveTenantDbUrl(control.db, box, crypto.randomUUID())).rejects.toThrow(
+      /does not exist/,
     );
-    expect(tenantDbPassword("cluster-secret", tenant.id)).not.toBe(
-      tenantDbPassword("another-secret", tenant.id),
+
+    // `ifAbsent` keeps what is stored; a plain store replaces it.
+    expect(
+      await storeTenantDbPassword(control.db, box, tenant.id, "other", { ifAbsent: true }),
+    ).toBe(false);
+    expect(await readTenantDbPassword(control.db, box, tenant.id)).toBe(password);
+    expect(await storeTenantDbPassword(control.db, box, tenant.id, "rotated")).toBe(true);
+    expect(await readTenantDbPassword(control.db, box, tenant.id)).toBe("rotated");
+  });
+
+  it("refuses a ciphertext moved to another tenant's row", async () => {
+    await using control = await createTestControlDb();
+    const box = createSecretBox([generateBoxKey()]);
+    const a = await insertTenant(control.db, newTenant("a"));
+    const b = await insertTenant(control.db, newTenant("b"));
+    await storeTenantDbPassword(control.db, box, a.id, "a-password");
+    await storeTenantDbPassword(control.db, box, b.id, "b-password");
+    await control.db.query(
+      "update tenant_db_credentials set ciphertext = (select ciphertext from tenant_db_credentials where tenant_id = $1) where tenant_id = $2",
+      [a.id, b.id],
     );
+    await expect(resolveTenantDbUrl(control.db, box, b.id)).rejects.toThrow(
+      /does not open with TENANT_DB_KEYS/,
+    );
+    await expect(readTenantDbPassword(control.db, box, b.id)).rejects.toThrow(
+      /does not open with TENANT_DB_KEYS/,
+    );
+    expect(await readTenantDbPassword(control.db, box, a.id)).toBe("a-password");
+  });
+
+  it("re-seals what an older key sealed, once, so that key can be dropped", async () => {
+    await using control = await createTestControlDb();
+    const oldKey = generateBoxKey();
+    const newKey = generateBoxKey();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    await storeTenantDbPassword(control.db, createSecretBox([oldKey]), tenant.id, "pw");
+    const rotating = createSecretBox([newKey, oldKey]);
+    expect(await resealTenantDbPasswords(control.db, rotating)).toBe(1);
+    expect(await resealTenantDbPasswords(control.db, rotating)).toBe(0);
+    expect(await readTenantDbPassword(control.db, createSecretBox([newKey]), tenant.id)).toBe("pw");
+    // A key list that opens nothing stored stops the re-seal with the fix.
+    await expect(
+      resealTenantDbPasswords(control.db, createSecretBox([generateBoxKey()])),
+    ).rejects.toThrow(/delete the tenant's row from tenant_db_credentials and restart control/);
   });
 });
 
@@ -135,6 +201,8 @@ describe("the limited app role (what api and worker connect as)", () => {
     const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
     const { secret } = await createApiKey(control.db, tenant.id);
+    const box = createSecretBox([generateBoxKey()]);
+    await storeTenantDbPassword(control.db, box, tenant.id, "tenant-db-password");
     const app = await asApp(control.url);
     try {
       // api: verify a key; worker: list and read tenants, record usage
@@ -151,6 +219,10 @@ describe("the limited app role (what api and worker connect as)", () => {
         }),
       ).toBe(true);
       await app.query("select pg_notify('tenant_work', 'x')");
+      // api and worker: open the tenant's database with its stored password
+      expect(new URL(await resolveTenantDbUrl(app, box, tenant.id)).password).toBe(
+        "tenant-db-password",
+      );
 
       // operator-only data and writes are refused
       for (const sql of [
@@ -162,6 +234,8 @@ describe("the limited app role (what api and worker connect as)", () => {
         "delete from usage",
         "update audit_log set actor = 'x'",
         "delete from audit_log",
+        "update tenant_db_credentials set ciphertext = '\\x00'",
+        "delete from tenant_db_credentials",
       ]) {
         await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
       }

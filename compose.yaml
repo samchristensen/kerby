@@ -9,7 +9,8 @@ x-hardened: &hardened
 
 x-tenant-env: &tenant-env
   CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
-  TENANT_DB_SECRET: ${KERBY_TENANT_DB_SECRET:-local-dev-tenant-db-secret-0123456789}
+  # Seals each tenant database role's random password in the control database (ADR 0009). A development key.
+  TENANT_DB_KEYS: ${KERBY_TENANT_DB_KEYS:-Ga5JSSydS48D60HoBOzAmEPJeUKLm3s44q+oguVov0M=}
   S3_ENDPOINT: http://rustfs:9000
   S3_BUCKET: kerby
   S3_ACCESS_KEY_ID: devkey

@@ -5,7 +5,10 @@ import { errorFields, log } from "@kerby/observability";
 import { type ClosableTenantDb, createTenantDb, type TenantDb } from "./handles.ts";
 
 export type TenantPoolsOptions = {
-  /** Where a tenant's database lives. Called on a cold open; the result is not cached beyond the pool's life. */
+  /**
+   * Where a tenant's database lives, with its role's current password. Called on a cold open and at every later login
+   * of the pool, so a rotated password (ADR 0009) needs no new pool: a run, and Absurd, may hold this one.
+   */
   resolveUrl(tenantId: string): Promise<string>;
   /** Pools kept open at once. Default 50. */
   maxPools?: number;
@@ -59,6 +62,7 @@ export class TenantPools {
           createTenantDb(url, {
             max: connectionsPerPool,
             ...(idleTimeoutMillis === undefined ? {} : { idleTimeoutMillis }),
+            refreshUrl: () => resolveUrl(tenantId),
           }),
         ),
         leases: 0,
@@ -85,7 +89,7 @@ export class TenantPools {
     }
   }
 
-  /** Forget a tenant's pool (deleted, moved, or credentials rotated). Closes once no run holds it. */
+  /** Forget a tenant's pool (deleted or moved; a rotated password needs no eviction). Closes once no run holds it. */
   async evict(tenantId: string): Promise<void> {
     const entry = this.#entries.get(tenantId);
     if (!entry) return;

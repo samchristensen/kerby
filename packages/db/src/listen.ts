@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { errorFields, log } from "@kerby/observability";
 import pg from "pg";
 import { withConnectRetry } from "./connect-retry.ts";
+import type { Credentials } from "./credentials.ts";
 
 export type Subscription = { close(): Promise<void> };
 export type ListenOptions = { onReconnect?: () => void };
@@ -12,7 +13,7 @@ export type ListenOptions = { onReconnect?: () => void };
 const CHANNEL = /^[a-z_][a-z0-9_]{0,62}$/;
 
 export async function listen(
-  url: string,
+  credentials: Credentials,
   channel: string,
   onNotify: (payload: string) => void,
   options: ListenOptions = {},
@@ -24,7 +25,7 @@ export async function listen(
   let wake: (() => void) | undefined;
 
   async function connect(): Promise<void> {
-    const next = new pg.Client({ connectionString: url });
+    const next = new pg.Client(credentials.config);
     next.on("notification", (message) => {
       if (!closed) onNotify(message.payload ?? "");
     });
@@ -38,7 +39,12 @@ export async function listen(
     client = next;
   }
 
-  await withConnectRetry(connect);
+  try {
+    await withConnectRetry(connect);
+  } catch (error) {
+    if (!(await credentials.renew(error))) throw error;
+    await withConnectRetry(connect);
+  }
 
   // Supervisor: waits for the connection to end, then reopens it.
   void (async () => {
@@ -54,6 +60,8 @@ export async function listen(
           break;
         } catch (error) {
           log("warn", "listen reconnect failed", errorFields(error));
+          // A rotated password: the next attempt uses the new one.
+          await credentials.renew(error).catch(() => false);
           await sleep(delay);
           delay = Math.min(delay * 2, 10_000);
         }

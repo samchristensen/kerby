@@ -14,7 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
+import { generateBoxKey, generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 
 const PRODUCTION = "production";
 const SERVICES = ["control", "api", "worker"] as const;
@@ -112,9 +112,9 @@ function iac(command: "plan" | "apply", ...flags: string[]): void {
 }
 
 /**
- * Create each secret the IaC file leaves to `preserve()`, once. A secret that exists is never replaced: TENANT_DB_SECRET
- * derives every tenant role's password and SECRETS_PRIVATE_KEYS opens every stored tenant key. Variables are set without
- * a deploy: `deploy` is what rolls them out.
+ * Create each secret the IaC file leaves to `preserve()`, once. A secret that exists is never replaced:
+ * SECRETS_PRIVATE_KEYS opens every stored tenant key, and TENANT_DB_KEYS every stored tenant database password (rotate
+ * it by the runbook in docs/deploy.md). Variables are set without a deploy: `deploy` is what rolls them out.
  */
 function ensureSecrets(environment: string): void {
   const set = (service: Service, name: string, value: string) =>
@@ -136,10 +136,14 @@ function ensureSecrets(environment: string): void {
   // A copy of production starts with production's secrets, which it must not share: those are replaced.
   const copied =
     environment !== PRODUCTION &&
-    control.TENANT_DB_SECRET !== undefined &&
-    control.TENANT_DB_SECRET === variablesOf("control", PRODUCTION).TENANT_DB_SECRET;
-  for (const name of ["OPERATOR_TOKEN", "TENANT_DB_SECRET", "APP_DATABASE_PASSWORD"]) {
+    control.OPERATOR_TOKEN !== undefined &&
+    control.OPERATOR_TOKEN === variablesOf("control", PRODUCTION).OPERATOR_TOKEN;
+  for (const name of ["OPERATOR_TOKEN", "APP_DATABASE_PASSWORD"]) {
     if (control[name] === undefined || copied) set("control", name, secret());
+  }
+  // api and worker reference control's copy (.railway/railway.ts).
+  if (control.TENANT_DB_KEYS === undefined || copied) {
+    set("control", "TENANT_DB_KEYS", generateBoxKey());
   }
   const existing = copied ? undefined : variablesOf("worker", environment).SECRETS_PRIVATE_KEYS;
   const privateKeys = existing ?? generateSecretsKeyPair().privateKey;

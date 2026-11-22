@@ -24,10 +24,11 @@ password.
   credential to connect, and the api must never hold the model-key private key, which only the worker has. A separate key
   also keeps the two rotations independent.
 - **Connections follow the stored password.** `TenantPools` resolves a tenant's URL from its row and stored credential
-  (`resolveTenantDbUrl`). A pool asks for the password on every new connection; when Postgres refuses it (`28P01`), the
-  pool resolves once more and retries that connect, so a rotation reaches every process without a restart. The pool
-  object stays, because Absurd holds it for the length of a turn. Sessions already open keep working: Postgres checks
-  passwords only at login.
+  (`resolveTenantDbUrl`), and a pool looks the password up again at every login (pg's password callback), so a rotation
+  reaches every process without a restart or a new pool. The pool object must stay: Absurd holds it, raw, for the length
+  of a turn, and a retry around Kerby's own handle would not cover Absurd's logins (seen on the local stack). A login
+  refused with `28P01`, a rotation committing at that moment, is retried once. Sessions already open keep working:
+  Postgres checks passwords only at login.
 - **Rotation.** Storing the new ciphertext and `alter role ... password` run in one control transaction, row locked: two
   rotations at once leave the role and the row agreeing, and a failed `alter role` stores nothing.
 - **Control repairs at startup.** It gives every tenant that has a role and no stored credential a fresh password
@@ -46,7 +47,7 @@ password.
 - No one secret opens every tenant database by itself: an attacker needs `TENANT_DB_KEYS` and a read of the control
   database. Anyone holding both (control, api or worker compromised, or the Railway login) still reaches every tenant;
   the gain is that a leaked password or key can be rotated without a lockout.
-- One extra control-plane read on a pool's cold open and after a refused connection; none per query.
+- One control-plane read per new tenant connection, beside the SCRAM login it precedes; none per query.
 - Rotating `TENANT_DB_KEYS` and a tenant's password are runbook steps in [deploy.md](../deploy.md).
 - Rejected: storing passwords in plaintext (a control dump would open every tenant); the ADR 0008 pair (puts the private
   key on the api); a key-management service (Railway has none, ADR 0007); client certificates (Railway's private network

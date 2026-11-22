@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tenantPrefix } from "@kerby/blobs";
-import { audit, tenantDbUrl } from "@kerby/control-plane";
+import { audit, resolveTenantDbUrl } from "@kerby/control-plane";
 import { dumpDatabase } from "@kerby/db";
 import { log } from "@kerby/observability";
 import type { ControlDeps } from "../types/index.ts";
@@ -49,7 +49,7 @@ export async function exportTenant(deps: ControlDeps, tenantId: string): Promise
   try {
     const file = join(dir, "tenant.dump");
     await dumpDatabase(
-      tenantDbUrl(tenant, settings.tenantDbSecret, settings.tenantDbSslmode),
+      await resolveTenantDbUrl(deps.control, deps.tenantDbBox, tenant.id, settings.tenantDbSslmode),
       file,
       settings.pgDumpPath,
     );

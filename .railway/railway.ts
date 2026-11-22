@@ -2,8 +2,8 @@
 // is docs/deploy.md. The same file describes every environment: a new one starts empty and this makes it whole.
 //
 // What is NOT here, on purpose:
-//  - Secrets. A generated value (`${{secret(n)}}`) is made again on every apply, which would rotate TENANT_DB_SECRET and
-//    strand every tenant database. They are `preserve()`: `scripts/railway.ts secrets` creates each once and never
+//  - Secrets. A generated value (`${{secret(n)}}`) is made again on every apply, which would rotate SECRETS_PRIVATE_KEYS
+//    and strand every stored model key. They are `preserve()`: `scripts/railway.ts secrets` creates each once and never
 //    replaces it. ALERT_WEBHOOK_URL is `preserve()` too: an operator sets it per environment with `railway variable set`
 //    (docs/deploy.md#alerts), and unset it is simply absent.
 //  - The api's generated domain (the IaC does not manage generated domains): `scripts/railway.ts setup` adds it.
@@ -70,7 +70,7 @@ export default defineRailway((ctx) => {
   const alerts = { ALERT_WEBHOOK_URL: preserve() };
 
   // Control holds the administrative credentials: it makes the limited role and every tenant database. Its secrets are the
-  // source; api and worker reference TENANT_DB_SECRET so there is one copy.
+  // source; api and worker reference TENANT_DB_KEYS (which opens tenant database passwords, ADR 0009) so there is one copy.
   const control = service("control", {
     source: source("control"),
     healthcheck: "/healthz",
@@ -84,7 +84,7 @@ export default defineRailway((ctx) => {
       CLUSTER_HOST: host,
       CLUSTER_PORT: port,
       OPERATOR_TOKEN: preserve(),
-      TENANT_DB_SECRET: preserve(),
+      TENANT_DB_KEYS: preserve(),
       APP_DATABASE_PASSWORD: preserve(),
       ...alerts,
     },
@@ -98,7 +98,7 @@ export default defineRailway((ctx) => {
       PORT: "8080",
       ...s3,
       CONTROL_DATABASE_URL: limitedUrl,
-      TENANT_DB_SECRET: control.env.TENANT_DB_SECRET,
+      TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
       SECRETS_PUBLIC_KEY: preserve(),
       ...alerts,
       // Railway's edge writes X-Forwarded-For with the client first: the failed-auth limit counts that address.
@@ -115,7 +115,7 @@ export default defineRailway((ctx) => {
       HEALTH_PORT: "8082",
       ...s3,
       CONTROL_DATABASE_URL: limitedUrl,
-      TENANT_DB_SECRET: control.env.TENANT_DB_SECRET,
+      TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
       SECRETS_PRIVATE_KEYS: preserve(),
       ...alerts,
     },

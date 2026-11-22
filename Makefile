@@ -61,7 +61,7 @@ e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, and a 200-tenant load run (KERBY_LOAD_TENANTS=n)
 	node scripts/multitenant.ts
 
-secrets-key: ## Make a secrets key pair for the workers (private) and the api (public)
+secrets-key: ## Make secret keys: the secrets pair (workers private, api public) and a TENANT_DB_KEYS key
 	node scripts/secrets-key.ts
 
 railway-plan: ## Preview what .railway/railway.ts would change in ENV (default production); changes nothing

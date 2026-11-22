@@ -63,10 +63,10 @@ An agent harness is replaceable by construction: `packages/agent` defines `Agent
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                      | Migrations                                                  |
-| ------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, `usage`, audit | `packages/control-plane/migrations/control/`                |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                 | `packages/{durable,blobs,conversations}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                      | Migrations                                                  |
+| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit | `packages/control-plane/migrations/control/`                |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                                                 | `packages/{durable,blobs,conversations}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -84,11 +84,14 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 - No tenant code runs in Kerby's processes. Tools are remote MCP servers. Every call to a URL a tenant supplied goes
   through `createEgressFetch` from `packages/egress` ([ADR 0010](docs/adr/0010-egress-guard.md)): public addresses
   only, connected to the address it checked, redirects re-checked, time and size limits. _review_
-- Lifecycle is an operator command in `services/control`: provision, suspend, export, delete. Provisioning copies the
-  template database (migrated at startup), creates a role that owns that database and may connect to no other tenant
-  database, and derives the role's password as an HMAC of a cluster secret and the tenant id: no tenant credential is stored.
-  At startup control also closes the maintenance databases (`postgres`, `template1`) and the template to everyone but
-  its admin role, as it does the control database: a tenant role can open its own database and nothing else.
+- Lifecycle is an operator command in `services/control`: provision, suspend, export, delete, rotate the database password.
+  Provisioning copies the template database (migrated at startup) and creates a role that owns that database and may
+  connect to no other tenant database, with a random password of its own ([ADR 0009](docs/adr/0009-tenant-database-credentials.md)):
+  stored in `tenant_db_credentials` sealed by `packages/secrets` under `TENANT_DB_KEYS` (tenant id as authenticated data),
+  which control, api and worker hold. `TenantPools` resolves a tenant's URL from it and its pools look the password up
+  again at every login, so a rotation needs no restart. At startup control gives a password to every tenant lacking one, re-seals those under an older key,
+  and closes the maintenance databases (`postgres`, `template1`) and the template to everyone but its admin role, as it
+  does the control database: a tenant role can open its own database and nothing else.
   Deleting drops the database and role, deletes the object prefix and purges keys; the row stays with status `deleted`.
   Exporting uploads a `pg_dump` and the object listing to the export bucket and returns presigned URLs; exports are kept
   30 days. Nightly, control copies new objects to the backup bucket and drops deleted tenants' copies (ADR 0013).

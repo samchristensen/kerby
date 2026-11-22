@@ -9,6 +9,15 @@ export const controlMigrationsDir = join(import.meta.dirname, "..", "migrations"
 export { APP_ROLE, restrictControlDatabase, setAppRolePassword } from "./app-role.ts";
 export { type AuditDetail, audit } from "./audit.ts";
 export {
+  listTenantsWithoutDbPassword,
+  newTenantDbPassword,
+  openTenantDbPassword,
+  readTenantDbPassword,
+  resealTenantDbPasswords,
+  resolveTenantDbUrl,
+  storeTenantDbPassword,
+} from "./db-credentials.ts";
+export {
   type ApiKeyRecord,
   type Authenticated,
   authenticateApiKey,
@@ -40,7 +49,6 @@ export {
   type TenantRecord,
   type TenantStatus,
   tenantDatabaseNames,
-  tenantDbPassword,
   tenantDbUrl,
 } from "./tenants.ts";
 export { recordUsage, type UsageEntry } from "./usage.ts";

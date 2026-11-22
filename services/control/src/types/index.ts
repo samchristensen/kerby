@@ -1,5 +1,6 @@
 import type { Bucket } from "@kerby/blobs";
 import type { ClusterAdmin, ControlDb, TenantPools } from "@kerby/db";
+import type { SecretBox } from "@kerby/secrets";
 
 /** Everything the operator commands need, built once in `src/index.ts` and passed down. */
 export type ControlDeps = {
@@ -17,11 +18,11 @@ export type ControlDeps = {
   now: () => Date;
   /** Opens tenant databases as their own roles (used to migrate them). */
   pools: TenantPools;
+  /** Seals and opens tenant database passwords (TENANT_DB_KEYS, ADR 0009). */
+  tenantDbBox: SecretBox;
   settings: {
     clusterHost: string;
     clusterPort: number;
-    /** See `tenantDbPassword`. */
-    tenantDbSecret: string;
     tenantDbSslmode?: "disable" | "require" | "verify-full" | undefined;
     templateDatabase: string;
     pgDumpPath: string;

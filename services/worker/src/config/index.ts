@@ -5,7 +5,8 @@ import { z } from "zod";
 export const workerConfigSchema = z
   .object({
     controlDatabaseUrl: z.string().min(1),
-    tenantDbSecret: z.string().min(16),
+    /** Opens tenants' stored database passwords (ADR 0009): the same comma-separated key list control holds. */
+    tenantDbKeys: z.string().min(1),
     /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
     tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
     /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */

@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { type Limits, LimitsSchema } from "@kerby/contracts";
 import type { ControlQueryable } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
@@ -66,23 +65,15 @@ export function tenantDatabaseNames(tenantId: string): { dbName: string; dbRole:
   return { dbName: `t_${hex}`, dbRole: `r_${hex}` };
 }
 
-/**
- * The tenant role's password: an HMAC of the cluster secret and the tenant id, so no tenant credential is stored
- * and every service holding the secret can open any tenant's database (and only through its own role).
- */
-export function tenantDbPassword(secret: string, tenantId: string): string {
-  return createHmac("sha256", secret).update(`tenant-db:${tenantId}`).digest("hex");
-}
-
-/** The connection URL for a tenant's own database, as its own role. */
+/** The connection URL for a tenant's own database, as its own role with `password` (see `resolveTenantDbUrl`). */
 export function tenantDbUrl(
-  tenant: Pick<TenantRecord, "id" | "dbHost" | "dbPort" | "dbName" | "dbRole">,
-  secret: string,
+  tenant: Pick<TenantRecord, "dbHost" | "dbPort" | "dbName" | "dbRole">,
+  password: string,
   sslmode?: "disable" | "require" | "verify-full",
 ): string {
   const url = new URL("postgres://placeholder");
   url.username = tenant.dbRole;
-  url.password = tenantDbPassword(secret, tenant.id);
+  url.password = password;
   url.hostname = tenant.dbHost;
   url.port = String(tenant.dbPort);
   url.pathname = `/${tenant.dbName}`;
@@ -175,7 +166,8 @@ export async function setSchemaVersion(
   ]);
 }
 
-/** Remove a tenant row that never became usable (failed provisioning). */
+/** Remove a tenant row that never became usable (failed provisioning), with the password stored for it. */
 export async function deleteTenantRow(db: ControlQueryable, id: string): Promise<void> {
+  await db.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
   await db.query("delete from tenants where id::text = $1", [id]);
 }

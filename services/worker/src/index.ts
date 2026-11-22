@@ -2,7 +2,7 @@
 // the real adapters, including the agent harness behind the AgentRuntime port.
 import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
-import { getTenant, readModelKey, tenantDbUrl } from "@kerby/control-plane";
+import { readModelKey, resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
@@ -10,7 +10,7 @@ import {
   createPiDurableRuntime,
   createTenantModels,
 } from "@kerby/runtime-pi-durable";
-import { createOpener, splitKeys } from "@kerby/secrets";
+import { createOpener, createSecretBox, splitKeys } from "@kerby/secrets";
 import { createRouter, json, serve } from "@kerby/serve";
 import { loadWorkerConfig, type WorkerConfig } from "./config/index.ts";
 import { createHandlers } from "./runtime/handlers.ts";
@@ -45,12 +45,10 @@ export async function startWorker(config: WorkerConfig): Promise<{
     bucket: config.s3Bucket,
     credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
   });
+  const tenantDbBox = createSecretBox(splitKeys(config.tenantDbKeys), "TENANT_DB_KEYS key");
   const pools = new TenantPools({
-    async resolveUrl(tenantId) {
-      const tenant = await getTenant(control, tenantId);
-      if (!tenant) throw new Error(`tenant ${tenantId} does not exist`);
-      return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
-    },
+    resolveUrl: (tenantId) =>
+      resolveTenantDbUrl(control, tenantDbBox, tenantId, config.tenantDbSslmode),
   });
   // Real runs use the tenant's own key for the model's provider; only the development fake model needs none.
   const opener =

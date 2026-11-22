@@ -8,11 +8,14 @@ export const controlConfigSchema = z.object({
   controlDatabaseUrl: z.string().min(1),
   /** Bearer token for the operator API. */
   operatorToken: z.string().min(16),
-  /** Derives every tenant database role's password (ADR 0004). All services that open tenant databases share it. */
-  tenantDbSecret: z.string().min(16),
+  /**
+   * Keys sealing every tenant database role's password (ADR 0009): base64 32-byte keys, comma separated; the first
+   * seals, every one opens. api and worker hold the same list. `make secrets-key` makes one.
+   */
+  tenantDbKeys: z.string().min(1),
   /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
   tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
-  /** An administrative URL on the cluster that holds tenant databases (CREATEDB, CREATEROLE). */
+  /** An administrative URL, as a superuser (Railway's `postgres`), on the cluster that holds tenant databases. */
   clusterAdminUrl: z.string().min(1),
   /** Where services reach tenant databases: written into each tenant's row. */
   clusterHost: z.string().min(1),

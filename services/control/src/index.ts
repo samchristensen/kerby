@@ -2,17 +2,18 @@
 import { createBucket } from "@kerby/blobs";
 import {
   controlMigrationsDir,
-  getTenant,
+  resolveTenantDbUrl,
   restrictControlDatabase,
   setAppRolePassword,
-  tenantDbUrl,
 } from "@kerby/control-plane";
 import { createClusterAdmin, createControlDb, migrate, TenantPools } from "@kerby/db";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
+import { createSecretBox, splitKeys } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { type ControlConfig, loadControlConfig } from "./config/index.ts";
 import { createControlApp } from "./runtime/http.ts";
 import { startNightly } from "./runtime/nightly.ts";
+import { ensureTenantDbPasswords } from "./service/db-credentials.ts";
 import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
@@ -27,6 +28,7 @@ export async function startControl(config: ControlConfig) {
     environment: config.railwayEnvironmentName,
     webhookUrl: config.alertWebhookUrl,
   });
+  const tenantDbBox = createSecretBox(splitKeys(config.tenantDbKeys), "TENANT_DB_KEYS key");
   const control = createControlDb(config.controlDatabaseUrl);
   await migrate(control, [controlMigrationsDir]);
   if (config.appDatabasePassword) await setAppRolePassword(control, config.appDatabasePassword);
@@ -61,11 +63,8 @@ export async function startControl(config: ControlConfig) {
   };
   for (const bucket of Object.values(buckets)) await bucket.ensureBucket();
   const pools = new TenantPools({
-    async resolveUrl(tenantId) {
-      const tenant = await getTenant(control, tenantId);
-      if (!tenant) throw new Error(`tenant ${tenantId} does not exist`);
-      return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
-    },
+    resolveUrl: (tenantId) =>
+      resolveTenantDbUrl(control, tenantDbBox, tenantId, config.tenantDbSslmode),
   });
   const deps: ControlDeps = {
     control,
@@ -73,10 +72,10 @@ export async function startControl(config: ControlConfig) {
     buckets,
     now: () => new Date(),
     pools,
+    tenantDbBox,
     settings: {
       clusterHost: config.clusterHost,
       clusterPort: config.clusterPort,
-      tenantDbSecret: config.tenantDbSecret,
       tenantDbSslmode: config.tenantDbSslmode,
       templateDatabase: config.templateDatabase,
       pgDumpPath: config.pgDumpPath,
@@ -84,6 +83,7 @@ export async function startControl(config: ControlConfig) {
   };
   await ensureTemplate(deps);
   await restrictClusterDatabases(deps);
+  await ensureTenantDbPasswords(deps);
   const server = await serve(createControlApp(deps, config.operatorToken), {
     host: config.host,
     port: config.port,
