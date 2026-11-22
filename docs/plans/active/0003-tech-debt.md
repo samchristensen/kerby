@@ -52,7 +52,7 @@ flowchart LR
 
 ## B. Isolation and capacity
 
-- [ ] **B1 Maintenance and template databases** ("A tenant role can still `connect`"). S.
+- [x] **B1 Maintenance and template databases** ("A tenant role can still `connect`"). S.
   Now: `restrictControlDatabase` (`packages/control-plane/src/app-role.ts`) and `ClusterAdmin.restrictDatabase` cover the
   control and tenant databases. `postgres`, `template1` and the tenant template (`kerby_tenant_template`, made by
   `ensureTemplate` without a restriction) still admit `public`. A session held in the template also makes provisioning
@@ -137,7 +137,7 @@ flowchart LR
 
 ## E. Credentials
 
-- [ ] **E1 Per-tenant database credentials** ("Every tenant role's password derives from one shared secret"). L. ADR first.
+- [x] **E1 Per-tenant database credentials** ("Every tenant role's password derives from one shared secret"). L. ADR first.
   Now: `tenantDbPassword` (`packages/control-plane/src/tenants.ts`) is an HMAC of `TENANT_DB_SECRET` and the tenant id,
   used by api, worker and control. That secret alone opens every tenant database.
   Proposal: a random password per tenant, stored in the control plane encrypted with a versioned symmetric key
@@ -207,7 +207,7 @@ No work until the trigger; the debt line stays and names it.
 - **Conformance suite** ("`AgentRuntime` has one adapter"). Trigger: a second adapter is proposed. Fix then: lift the
   port-contract cases out of `runtime-pi-durable/src/runtime.test.ts` (event order, persist-before-act gate, rehydration
   without repeating a tool, unanswered tool calls through `executeTool`, refusal) into `@kerby/agent/testing`.
-- **Admin-membership grant** ("`reassignOwned` (packages/db) moves ownership by hand"). Trigger: H1. Correction:
+- **Admin-membership grant** (paid in PR #8: deleted, ADR 0012) ("`reassignOwned` (packages/db) moves ownership by hand"). Trigger: H1. Correction:
   `reassignOwned` runs on every host, Railway included, because a superuser cannot `REASSIGN OWNED` its own objects and
   the tenant role must own its schema to migrate it. Only `grant <role> to current_user` in `createRole` serves the
   non-superuser path; delete it if H1 keeps a superuser admin.
@@ -266,3 +266,7 @@ No work until the trigger; the debt line stays and names it.
 - 2026-11-22 C3 (PR #10): `make docs` (scripts/check-docs.ts) in `make check`: relative links in tracked .md resolve,
   named make targets and architecture rule ids exist (`RULES` exported from check-architecture.ts); fixed the one
   finding (C2 named a `knip` target that does not exist yet). The semantic pass stays at milestone close.
+- 2026-11-22 B1, E1 paid (PR #8): control closes `postgres`, `template1` and the template to tenant roles; per-tenant
+  random database passwords sealed under `TENANT_DB_KEYS` (ADR 0009), with operator rotation, a startup backfill and
+  re-seal, and pools that look the password up at every login; `TENANT_DB_SECRET` deleted. Non-superuser admin path
+  deleted (H1 keeps Railway's superuser).
