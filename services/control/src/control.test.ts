@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tenantPrefix } from "@kerby/blobs";
 import { createEmptyTestBucket, createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import type {
@@ -9,7 +10,13 @@ import type {
   RestoreResponse,
   Tenant,
 } from "@kerby/contracts";
-import { authenticateApiKey, getTenant, tenantDbUrl } from "@kerby/control-plane";
+import {
+  authenticateApiKey,
+  getTenant,
+  insertTenant,
+  readTenantDbPassword,
+  resolveTenantDbUrl,
+} from "@kerby/control-plane";
 import { createTestControlDb, type TestControlDb } from "@kerby/control-plane/testing";
 import {
   insertConversation,
@@ -20,23 +27,27 @@ import {
 import {
   type ClusterAdmin,
   createClusterAdmin,
+  createControlDb,
   createTenantDb,
   readMigrations,
   TenantPools,
 } from "@kerby/db";
 import { adminUrl } from "@kerby/db/testing";
 import { configureLogging } from "@kerby/observability";
+import { createSecretBox, generateBoxKey } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createControlApp } from "./index.ts";
 import { untilNext } from "./runtime/nightly.ts";
 import { BACKUP_LOCK_KEY } from "./service/backup.ts";
+import { ensureTenantDbPasswords } from "./service/db-credentials.ts";
 import { deleteExpiredExports } from "./service/export.ts";
-import { ensureTemplate } from "./service/template.ts";
+import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
 const TOKEN = "operator-token-for-tests";
-const SECRET = "cluster-secret-for-tests-0123456789";
+/** TENANT_DB_KEYS for every test: one box, as one deployment has. */
+const tenantDbBox = createSecretBox([generateBoxKey()]);
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -48,6 +59,27 @@ function captureLogs(): Record<string, unknown>[] {
   configureLogging({ write: (line) => lines.push(JSON.parse(line)) });
   cleanups.push(() => configureLogging({ write: (line) => process.stdout.write(line) }));
   return lines;
+}
+
+/** End every session of `role`, as a restart or an idle timeout would, so its pools must log in again. */
+async function endSessions(role: string): Promise<void> {
+  const admin = createControlDb(adminUrl(), { max: 1 });
+  try {
+    await admin.query("select pg_terminate_backend(pid) from pg_stat_activity where usename = $1", [
+      role,
+    ]);
+    for (let i = 0; i < 50; i++) {
+      const { rows } = await admin.query<{ n: number }>(
+        "select count(*)::int as n from pg_stat_activity where usename = $1",
+        [role],
+      );
+      if (rows[0]?.n === 0) break;
+      await sleep(50);
+    }
+  } finally {
+    await admin.close();
+  }
+  await sleep(100); // pools drop the clients the server ended
 }
 
 async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
@@ -67,13 +99,9 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   const setNow = (at: Date) => {
     now = at;
   };
-  const pools = new TenantPools({
-    async resolveUrl(tenantId) {
-      const tenant = await getTenant(control.db, tenantId);
-      if (!tenant) throw new Error("no such tenant");
-      return tenantDbUrl(tenant, SECRET);
-    },
-  });
+  /** The tenant's database URL as its own role, with the password control stored for it. */
+  const tenantUrl = (tenantId: string) => resolveTenantDbUrl(control.db, tenantDbBox, tenantId);
+  const pools = new TenantPools({ resolveUrl: tenantUrl });
   cleanups.push(() => pools.close());
   const adminHost = new URL(adminUrl());
   const templateDatabase = `kt_tpl_${randomBytes(4).toString("hex")}`;
@@ -83,15 +111,16 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
     buckets,
     now: () => now ?? new Date(),
     pools,
+    tenantDbBox,
     settings: {
       clusterHost: adminHost.hostname,
       clusterPort: Number(adminHost.port),
-      tenantDbSecret: SECRET,
       templateDatabase,
       pgDumpPath: "pg_dump",
     },
   };
   await ensureTemplate(deps);
+  await restrictClusterDatabases(deps);
   cleanups.push(() => realCluster.dropDatabase(templateDatabase));
   const server = await serve(createControlApp(deps, TOKEN), { host: "127.0.0.1", port: 0 });
   cleanups.push(() => server.close());
@@ -112,8 +141,7 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
     return (await response.json()) as CreateTenantResponse;
   };
   const tenantDb = async (tenantId: string) => {
-    const row = (await getTenant(control.db, tenantId)) ?? expect.fail("no tenant row");
-    const db = createTenantDb(tenantDbUrl(row, SECRET));
+    const db = createTenantDb(await tenantUrl(tenantId));
     cleanups.push(() => db.close());
     return { tenantId, db };
   };
@@ -127,6 +155,7 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
     provision,
     setNow,
     tenantDb,
+    tenantUrl,
   };
 }
 
@@ -142,7 +171,7 @@ describe("operator API auth", () => {
 
 describe("provisioning", () => {
   it("creates a migrated database owned by a role that can reach only it, plus a working first key", async () => {
-    const { call, provision, cluster, control } = await start();
+    const { call, provision, cluster, control, tenantUrl } = await start();
     const created = await provision("acme");
     const tenant = (await getTenant(control.db, created.tenant.id)) ?? expect.fail("no tenant row");
 
@@ -152,7 +181,7 @@ describe("provisioning", () => {
     expect(await cluster.roleExists(tenant.dbRole)).toBe(true);
     expect((await authenticateApiKey(control.db, created.secret))?.tenant.id).toBe(tenant.id);
 
-    const own = createTenantDb(tenantDbUrl(tenant, SECRET));
+    const own = createTenantDb(await tenantUrl(tenant.id));
     cleanups.push(() => own.close());
     const owners = await own.query<{ tableowner: string }>(
       "select distinct tableowner from pg_tables where tablename in ('conversations', 'messages', 'blobs')",
@@ -164,13 +193,34 @@ describe("provisioning", () => {
     const other = await provision("globex");
     const otherTenant =
       (await getTenant(control.db, other.tenant.id)) ?? expect.fail("no tenant row");
-    const crossUrl = new URL(tenantDbUrl(otherTenant, SECRET));
+    const crossUrl = new URL(await tenantUrl(otherTenant.id));
     crossUrl.pathname = `/${tenant.dbName}`;
     const intruder = createTenantDb(crossUrl.toString(), { max: 1 });
     cleanups.push(() => intruder.close());
     await expect(intruder.query("select 1")).rejects.toThrow(/permission denied|not allowed/);
 
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(200);
+  });
+
+  it("refuses a tenant role on the maintenance databases and the template, and still provisions from it", async () => {
+    const { provision, control, cluster, deps, tenantUrl } = await start();
+    const created = await provision("acme");
+    const tenant = (await getTenant(control.db, created.tenant.id)) ?? expect.fail("no tenant row");
+    // Over the network address with the role's own password, as a tenant would try.
+    for (const database of ["postgres", "template1", deps.settings.templateDatabase]) {
+      const url = new URL(await tenantUrl(tenant.id));
+      url.pathname = `/${database}`;
+      const intruder = createTenantDb(url.toString(), { max: 1 });
+      cleanups.push(() => intruder.close());
+      await expect(intruder.query("select 1"), database).rejects.toThrow(
+        `permission denied for database "${database}"`,
+      );
+    }
+    // Copying the closed template works, and so does the admin URL, which connects to `postgres`.
+    const other = await provision("globex");
+    const otherTenant =
+      (await getTenant(control.db, other.tenant.id)) ?? expect.fail("no tenant row");
+    expect(await cluster.databaseExists(otherTenant.dbName)).toBe(true);
   });
 
   it("rejects a duplicate or malformed name", async () => {
@@ -262,10 +312,10 @@ describe("lifecycle", () => {
   });
 
   it("deletes everything: database, role, objects, keys; and frees the name", async () => {
-    const { call, provision, cluster, control, blobs, buckets } = await start();
+    const { call, provision, cluster, control, blobs, buckets, tenantUrl } = await start();
     const { tenant, secret } = await provision("acme");
     const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
-    const own = createTenantDb(tenantDbUrl(row, SECRET));
+    const own = createTenantDb(await tenantUrl(row.id));
     await blobs.put(
       { tenantId: tenant.id, db: own },
       {
@@ -288,6 +338,13 @@ describe("lifecycle", () => {
     expect(
       (await control.db.query("select 1 from api_keys where tenant_id = $1", [tenant.id])).rowCount,
     ).toBe(0);
+    expect(
+      (
+        await control.db.query("select 1 from tenant_db_credentials where tenant_id = $1", [
+          tenant.id,
+        ])
+      ).rowCount,
+    ).toBe(0);
     expect((await getTenant(control.db, tenant.id))?.status).toBe("deleted");
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(404);
     expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(404);
@@ -305,6 +362,78 @@ describe("lifecycle", () => {
       { action: "tenant.create", actor: "operator" },
       { action: "tenant.suspend", actor: "operator" },
     ]);
+  });
+});
+
+describe("database passwords", () => {
+  const refused = /password authentication failed/;
+
+  it("rotates a tenant's password: the old one is refused, the new one works, and open pools log in again", async () => {
+    const { call, provision, control, deps, tenantUrl } = await start();
+    const { tenant } = await provision("acme");
+    const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
+    const before = await tenantUrl(tenant.id);
+    // Control's own pool for the tenant is open (provisioning migrated through it) and holds the old password.
+    await deps.pools.use(tenant.id, (db) => db.query("select 1"));
+
+    const response = await call("POST", `/v1/operator/tenants/${tenant.id}/rotate-db-password`);
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(await response.json())).not.toContain(new URL(before).password);
+    const after = await tenantUrl(tenant.id);
+    expect(new URL(after).password).not.toBe(new URL(before).password);
+
+    const old = createTenantDb(before, { max: 1 });
+    cleanups.push(() => old.close());
+    await expect(old.query("select 1")).rejects.toThrow(refused);
+    const fresh = createTenantDb(after, { max: 1 });
+    cleanups.push(() => fresh.close());
+    expect((await fresh.query("select 1 as one")).rows).toEqual([{ one: 1 }]);
+
+    // End the pool's sessions so its next query logs in: refused (28P01), resolved again, retried with the new one.
+    await endSessions(row.dbRole);
+    expect((await deps.pools.use(tenant.id, (db) => db.query("select 2 as two"))).rows).toEqual([
+      { two: 2 },
+    ]);
+
+    const { rows } = await control.db.query<{ action: string }>(
+      "select action from audit_log where tenant_id = $1 order by id",
+      [tenant.id],
+    );
+    expect(rows.map((r) => r.action)).toEqual(["tenant.create", "tenant.rotate_db_password"]);
+    expect(
+      (await call("POST", `/v1/operator/tenants/${crypto.randomUUID()}/rotate-db-password`)).status,
+    ).toBe(404);
+  });
+
+  it("gives every tenant without a stored password a new one at startup, once, even from two replicas", async () => {
+    const { provision, control, cluster: admin, deps, tenantUrl } = await start();
+    const legacy = await provision("legacy");
+    const current = await provision("current");
+    const legacyRow = (await getTenant(control.db, legacy.tenant.id)) ?? expect.fail("no row");
+    const kept = await readTenantDbPassword(control.db, tenantDbBox, current.tenant.id);
+    // A tenant from before ADR 0009: a role with a derived password and nothing stored.
+    await admin.setRolePassword(legacyRow.dbRole, "derived-from-the-old-shared-secret");
+    await control.db.query("delete from tenant_db_credentials where tenant_id = $1", [
+      legacy.tenant.id,
+    ]);
+    // A row whose role was never made (provisioning in flight) gets nothing.
+    const inFlight = await insertTenant(control.db, { name: "in-flight", dbHost: "h", dbPort: 1 });
+
+    const [first, second] = await Promise.all([
+      ensureTenantDbPasswords(deps),
+      ensureTenantDbPasswords(deps),
+    ]);
+    expect((first?.created ?? 0) + (second?.created ?? 0)).toBe(1);
+    const legacyDb = createTenantDb(await tenantUrl(legacy.tenant.id), { max: 1 });
+    cleanups.push(() => legacyDb.close());
+    expect((await legacyDb.query("select 1 as one")).rows).toEqual([{ one: 1 }]);
+    expect(await readTenantDbPassword(control.db, tenantDbBox, current.tenant.id)).toBe(kept);
+    expect(await readTenantDbPassword(control.db, tenantDbBox, inFlight.id)).toBeUndefined();
+
+    // Every later start changes nothing.
+    const stored = await readTenantDbPassword(control.db, tenantDbBox, legacy.tenant.id);
+    expect(await ensureTenantDbPasswords(deps)).toEqual({ created: 0, resealed: 0 });
+    expect(await readTenantDbPassword(control.db, tenantDbBox, legacy.tenant.id)).toBe(stored);
   });
 });
 
@@ -468,7 +597,7 @@ describe("bucket backup", () => {
 
 describe("migration fan-out", () => {
   it("brings a tenant database that is behind up to date, and reports one that cannot be reached", async () => {
-    const { call, provision, control, cluster } = await start();
+    const { call, provision, control, cluster, tenantUrl } = await start();
     const behind = await provision("behind");
     const gone = await provision("gone");
     const behindRow =
@@ -476,7 +605,7 @@ describe("migration fan-out", () => {
     const goneRow = (await getTenant(control.db, gone.tenant.id)) ?? expect.fail("no tenant row");
 
     // Make `behind` look like an older release: its newest migration was never applied.
-    const own = createTenantDb(tenantDbUrl(behindRow, SECRET));
+    const own = createTenantDb(await tenantUrl(behindRow.id));
     await own.query("drop table tool_executions, messages, conversations");
     await own.query("delete from schema_migrations where name like 'conversations/%'");
     await own.close();
@@ -502,7 +631,7 @@ describe("migration fan-out", () => {
       }),
     ]);
 
-    const after = createTenantDb(tenantDbUrl(behindRow, SECRET));
+    const after = createTenantDb(await tenantUrl(behindRow.id));
     cleanups.push(() => after.close());
     expect((await after.query("select 1 from conversations")).rowCount).toBe(0);
     expect((await getTenant(control.db, behind.tenant.id))?.schemaVersion).toBe(

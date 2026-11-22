@@ -3,6 +3,7 @@
 import { errorFields, log } from "@kerby/observability";
 import pg from "pg";
 import { withConnectRetry } from "./connect-retry.ts";
+import { credentialsFor } from "./credentials.ts";
 import { type ListenOptions, listen, type Subscription } from "./listen.ts";
 
 export type Row = Record<string, unknown>;
@@ -53,7 +54,15 @@ export type TenantContext = { readonly tenantId: string; readonly db: TenantDb }
 export type ControlQueryable = ControlDb | ControlTx;
 export type TenantQueryable = TenantDb | TenantTx;
 
-export type PoolOptions = { max?: number; idleTimeoutMillis?: number };
+export type PoolOptions = {
+  max?: number;
+  idleTimeoutMillis?: number;
+  /**
+   * The URL again, current password included: asked at every login after the first, so a rotated password reaches the
+   * pool (and whoever holds `rawPool`) without a new one. A login refused with 28P01 is retried once. `TenantPools` sets it.
+   */
+  refreshUrl?: () => Promise<string>;
+};
 
 // packages/durable needs the pool behind a TenantDb for the Absurd client. Nothing else may.
 const pools = new WeakMap<object, pg.Pool>();
@@ -81,8 +90,9 @@ type Plain = Queryable &
   };
 
 function makeHandle(url: string, options: PoolOptions): Plain {
+  const credentials = credentialsFor(url, options.refreshUrl);
   const pool = new pg.Pool({
-    connectionString: url,
+    ...credentials.config,
     max: options.max ?? 10,
     idleTimeoutMillis: options.idleTimeoutMillis ?? 10_000,
     // A connect that hangs (a cluster resuming) fails after this and is retried by `withConnectRetry`.
@@ -92,10 +102,19 @@ function makeHandle(url: string, options: PoolOptions): Plain {
   pool.on("error", (error: Error) =>
     log("warn", "idle database client failed", errorFields(error)),
   );
+  // Nothing has been sent before a login succeeds, so a retry after renewing the password repeats nothing.
+  const connect = async (): Promise<pg.PoolClient> => {
+    try {
+      return await withConnectRetry(() => pool.connect());
+    } catch (error) {
+      if (!(await credentials.renew(error))) throw error;
+      return withConnectRetry(() => pool.connect());
+    }
+  };
 
   const handle: Plain = {
     async query<R extends Row = Row>(text: string, params?: readonly unknown[]) {
-      const client = await withConnectRetry(() => pool.connect());
+      const client = await connect();
       try {
         return await run<R>(client, text, params);
       } finally {
@@ -103,7 +122,7 @@ function makeHandle(url: string, options: PoolOptions): Plain {
       }
     },
     async transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
-      const client = await withConnectRetry(() => pool.connect());
+      const client = await connect();
       let broken: Error | undefined;
       try {
         await client.query("begin");
@@ -126,7 +145,8 @@ function makeHandle(url: string, options: PoolOptions): Plain {
         client.release(broken);
       }
     },
-    listen: (channel, onNotify, listenOptions) => listen(url, channel, onNotify, listenOptions),
+    listen: (channel, onNotify, listenOptions) =>
+      listen(credentials, channel, onNotify, listenOptions),
     close: () => pool.end(),
   };
   pools.set(handle, pool);

@@ -1,10 +1,10 @@
 // The tenant-facing API service. This file is the composition root: it builds the real adapters.
 import { createBlobs } from "@kerby/blobs";
-import { getTenant, tenantDbUrl } from "@kerby/control-plane";
+import { resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
-import { createSealer } from "@kerby/secrets";
+import { createSealer, createSecretBox, splitKeys } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { type ApiConfig, loadApiConfig } from "./config/index.ts";
 import { createApiApp } from "./runtime/http.ts";
@@ -27,12 +27,10 @@ export async function startApi(config: ApiConfig) {
     bucket: config.s3Bucket,
     credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
   });
+  const tenantDbBox = createSecretBox(splitKeys(config.tenantDbKeys), "TENANT_DB_KEYS key");
   const pools = new TenantPools({
-    async resolveUrl(tenantId) {
-      const tenant = await getTenant(control, tenantId);
-      if (!tenant) throw new Error(`tenant ${tenantId} does not exist`);
-      return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
-    },
+    resolveUrl: (tenantId) =>
+      resolveTenantDbUrl(control, tenantDbBox, tenantId, config.tenantDbSslmode),
   });
   const deps: ApiDeps = {
     control,

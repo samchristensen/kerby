@@ -133,12 +133,23 @@ The `uptime` workflow checks `GET /healthz` on the repository variable `KERBY_AP
 
 ## Secrets
 
-Generated once by `railway-setup` (24 random bytes, hex), stored as service variables, readable with
+Generated once by `railway-setup` (24 random bytes, hex; `TENANT_DB_KEYS` a base64 32-byte key), stored as service variables, readable with
 `railway variable list --service control`: whoever can run that can read every secret. They are `preserve()` in the IaC file
 on purpose: a generated value there would be made again on every apply.
 
-- Do not change `TENANT_DB_SECRET`: every tenant role's password derives from it, so every tenant would be locked out
-  of its database until each role's password is reset.
+- Each tenant database role has its own random password, stored in the control database sealed with `TENANT_DB_KEYS`
+  ([ADR 0009](adr/0009-tenant-database-credentials.md)). The variable lives on `control`; `api` and `worker` reference it.
+  Control gives a password to every tenant that has none stored at each start.
+- **Rotate a tenant's database password**: `POST /v1/operator/tenants/<id>/rotate-db-password`, called inside the control
+  container as under "Provision a tenant". Open sessions keep working; api and worker log in with the new password at their
+  next connection (the old one is refused, they read the stored one again). No redeploy.
+- **Rotate `TENANT_DB_KEYS`** in three redeploys (`make deploy TAG=sha-<the running commit>`: control, then api and
+  worker), so no process ever meets a password it cannot open. Make a key with `make secrets-key`. (1) Set
+  `TENANT_DB_KEYS=<old>,<new>` on `control` and redeploy: everyone opens both, `<old>` still seals. (2) Set `<new>,<old>`
+  and redeploy: at start control seals every password again with `<new>` (its log line `tenant database passwords
+  checked` counts them in `resealed`). (3) Set `<new>` and redeploy.
+- **Lost `TENANT_DB_KEYS`**: nothing is stranded. Set a new key, delete every row of `tenant_db_credentials` (psql below,
+  database `railway`), and redeploy: control gives every tenant a new password before api and worker start.
 - Only `control` holds the administrative database URL. `api` and `worker` connect to the control database as the limited
   `kerby_app` role, which control creates (migration 0002) and gives its password at start: deploy control first.
 - The buckets' keys are references (`${{kerby.ACCESS_KEY_ID}}`), so resetting them needs no change here; redeploy the services.
@@ -213,7 +224,7 @@ Locally, `KERBY_ALERT_WEBHOOK_URL=http://host.docker.internal:<port>/ make up` p
 
 ## Do not do
 
-- Do not change `TENANT_DB_SECRET` on a live system.
+- Do not replace `TENANT_DB_KEYS` in one step on a live system: add the new key first (Secrets, above).
 - Do not give `control` a public domain.
 - Do not delete `production` or its Postgres volume: backups belong to the volume.
 

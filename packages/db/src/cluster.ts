@@ -30,6 +30,8 @@ export interface ClusterAdmin {
    * be able to use up the connections every other tenant and the control database share.
    */
   createRole(role: string, password: string): Promise<void>;
+  /** Give an existing role a new password. Open sessions keep working; the next login needs the new one. */
+  setRolePassword(role: string, password: string): Promise<void>;
   /** Set (again) the connection limit of an existing tenant role; roles made before the limit existed get it. */
   limitRoleConnections(role: string): Promise<void>;
   /**
@@ -39,6 +41,11 @@ export interface ClusterAdmin {
   createDatabase(name: string, options?: { template?: string; owner?: string }): Promise<void>;
   /** `public` may no longer connect to `database`; `role` and the admin role may, and no one else. */
   restrictDatabase(database: string, role: string): Promise<void>;
+  /**
+   * Only the admin role (and superusers) may connect to `database`: for the maintenance databases and the tenant
+   * template. Revoking from a database the admin does not own only warns, so check the result with a refused login.
+   */
+  restrictToAdmin(database: string): Promise<void>;
   /** Hand every object in `database` owned by the admin role to `role` (so the tenant owns its schema). */
   reassignOwned(database: string, role: string): Promise<void>;
   /** The admin URL pointed at another database of the cluster. */
@@ -49,7 +56,7 @@ export interface ClusterAdmin {
   close(): Promise<void>;
 }
 
-/** An administrative connection to a cluster (a role with CREATEDB and CREATEROLE, on its maintenance database). */
+/** An administrative connection to a cluster as a superuser (Railway's `postgres`, ADR 0007), on its maintenance database. */
 export function createClusterAdmin(url: string): ClusterAdmin {
   const db = createControlDb(url, { max: 2 });
   const exec = async (sql: string) => {
@@ -78,9 +85,13 @@ export function createClusterAdmin(url: string): ClusterAdmin {
         [quoted, String(TENANT_ROLE_CONNECTION_LIMIT), password],
       );
       await exec(rows[0]?.sql ?? "");
-      // A non-superuser admin (a managed Postgres without superuser access) may only create a database owned by, and
-      // move objects to, a role it is a member of.
-      await exec(`grant ${quoted} to current_user`);
+    },
+    async setRolePassword(role, password) {
+      const { rows } = await db.query<{ sql: string }>(
+        "select format('alter role %s password %L', $1::text, $2::text) as sql",
+        [identifier(role, "role name"), password],
+      );
+      await exec(rows[0]?.sql ?? "");
     },
     async limitRoleConnections(role) {
       await exec(
@@ -112,6 +123,12 @@ export function createClusterAdmin(url: string): ClusterAdmin {
       await exec(
         `grant connect on database ${quotedDb} to ${identifier(role, "role name")}, current_user`,
       );
+    },
+    async restrictToAdmin(database) {
+      const quotedDb = identifier(database, "database name");
+      // The grant keeps the admin's own access explicit; a superuser needs none.
+      await exec(`grant connect on database ${quotedDb} to current_user`);
+      await exec(`revoke connect on database ${quotedDb} from public`);
     },
     async reassignOwned(database, role) {
       // `quoted` is a validated, double-quoted identifier, so it is safe inside the statement text below.

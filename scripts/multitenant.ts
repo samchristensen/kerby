@@ -1,14 +1,20 @@
 // Multi-tenant proof on the real Compose stack (plan 0002, T13; plan 0001, M6). Run with `make multitenant`.
 //   1. two tenants, provisioned through the operator API, each with a conversation answered by the worker;
 //   2. the cross-tenant attempt suite: conversations, event streams, database roles, tasks, object prefixes, keys;
-//   3. suspension takes effect within the API's auth cache TTL, and only for that tenant;
-//   4. a load run with N tenants (default 200): provisioning, a turn each, connections, memory, then deletion.
+//   3. a database password rotation: the old password is refused and api and worker log in with the new one;
+//   4. suspension takes effect within the API's auth cache TTL, and only for that tenant;
+//   5. a load run with N tenants (default 200): provisioning, a turn each, connections, memory, then deletion.
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { tenantDbPassword } from "@kerby/control-plane";
+import { openTenantDbPassword } from "@kerby/control-plane";
+import { createSecretBox, splitKeys } from "@kerby/secrets";
 
 const API = `http://127.0.0.1:${process.env.KERBY_API_PORT ?? "8080"}`;
-const SECRET = process.env.KERBY_TENANT_DB_SECRET ?? "local-dev-tenant-db-secret-0123456789";
+// TENANT_DB_KEYS in compose.yaml: the script opens stored passwords as api and worker do.
+const box = createSecretBox(
+  splitKeys(process.env.KERBY_TENANT_DB_KEYS ?? "Ga5JSSydS48D60HoBOzAmEPJeUKLm3s44q+oguVov0M="),
+);
 const TENANTS = Number(process.env.KERBY_LOAD_TENANTS ?? "200");
 const KEEP = process.env.KERBY_E2E_KEEP === "1";
 const AUTH_TTL_MS = 3_000; // AUTH_CACHE_SECONDS in compose.yaml
@@ -111,9 +117,18 @@ async function converse(key: string, text: string): Promise<{ id: string; ms: nu
   throw new Error(`conversation ${id} was not answered in time`);
 }
 
+/** The tenant's database password as control stored it (sealed in the control database), opened. */
+function storedPassword(tenantId: string): string {
+  const sealed = psql(
+    "kerby_control",
+    `select encode(ciphertext, 'base64') from tenant_db_credentials where tenant_id = '${tenantId}'`,
+  );
+  return openTenantDbPassword(box, tenantId, Buffer.from(sealed.replaceAll("\n", ""), "base64"));
+}
+
 /** Connect to `database` as `role` from inside the postgres container, over the network address (loopback is `trust` in the image); returns psql's error text, or "" on success. */
-function connectAs(role: string, tenantId: string, database: string): string {
-  const url = `postgresql://${role}:${tenantDbPassword(SECRET, tenantId)}@postgres:5432/${database}`;
+function connectAs(role: string, password: string, database: string): string {
+  const url = `postgresql://${role}:${encodeURIComponent(password)}@postgres:5432/${database}`;
   try {
     compose("exec", "-T", "postgres", "psql", url, "-tAc", "select 1");
     return "";
@@ -152,18 +167,35 @@ async function crossTenantSuite(a: Tenant, b: Tenant): Promise<void> {
   );
 
   // Databases: each tenant's role reaches its own database and no other (conversations, blob index and tasks live there).
-  check(connectAs(a.dbRole, a.id, a.dbName) === "", "A's role can open A's database");
+  const passwordA = storedPassword(a.id);
+  const passwordB = storedPassword(b.id);
+  check(connectAs(a.dbRole, passwordA, a.dbName) === "", "A's role can open A's database");
   check(
-    /permission denied|not allowed/.test(connectAs(a.dbRole, a.id, b.dbName)),
+    /permission denied|not allowed/.test(connectAs(a.dbRole, passwordA, b.dbName)),
     "A's role cannot open B's database",
   );
   check(
-    /permission denied|not allowed/.test(connectAs(b.dbRole, b.id, a.dbName)),
+    /permission denied|not allowed/.test(connectAs(b.dbRole, passwordB, a.dbName)),
     "B's role cannot open A's database",
   );
+  // ...nor the maintenance databases or the template every tenant database is copied from.
+  for (const database of ["postgres", "template1", "kerby_tenant_template"]) {
+    check(
+      connectAs(a.dbRole, passwordA, database).includes(
+        `permission denied for database "${database}"`,
+      ),
+      `A's role cannot open ${database}`,
+    );
+  }
   check(
-    /password authentication failed/.test(connectAs(a.dbRole, b.id, a.dbName)),
-    "a role with another tenant's derived password is refused",
+    /password authentication failed/.test(connectAs(a.dbRole, passwordB, a.dbName)),
+    "A's role with B's stored password is refused",
+  );
+  check(
+    /password authentication failed/.test(
+      connectAs(a.dbRole, randomBytes(32).toString("base64url"), a.dbName),
+    ),
+    "A's role with a wrong password is refused",
   );
   check(
     psql(a.dbName, "select count(*) from absurd.t_turns") === "1",
@@ -214,6 +246,34 @@ async function crossTenantSuite(a: Tenant, b: Tenant): Promise<void> {
     (await api(`kb_${"0".repeat(12)}_${"A".repeat(43)}`, "GET", `/v1/conversations/${convA.id}`))
       .status === 401,
     "a fabricated key is refused",
+  );
+}
+
+async function rotationSuite(a: Tenant, b: Tenant): Promise<void> {
+  console.log("database password rotation");
+  const before = storedPassword(a.id);
+  const untouched = storedPassword(b.id);
+  check(
+    (await operator("POST", `/tenants/${a.id}/rotate-db-password`)).status === 200,
+    "rotated A's database password through the operator API",
+  );
+  const after = storedPassword(a.id);
+  check(after !== before, "A has a new stored password");
+  check(
+    /password authentication failed/.test(connectAs(a.dbRole, before, a.dbName)),
+    "A's old password is refused",
+  );
+  check(connectAs(a.dbRole, after, a.dbName) === "", "A's new password opens A's database");
+  check(storedPassword(b.id) === untouched, "B's password is unchanged");
+  // End every session of A's role: the api's and the worker's pools must log in again, and are refused the old password
+  // (28P01) before they resolve the new one.
+  psql(
+    "postgres",
+    `select count(pg_terminate_backend(pid)) from pg_stat_activity where usename = '${a.dbRole}'`,
+  );
+  check(
+    (await converse(a.secret, "after the rotation")).id !== "",
+    "A's conversation is answered after the rotation (api and worker reconnected)",
   );
 }
 
@@ -318,6 +378,7 @@ async function main(): Promise<void> {
   const a = await provision("tenant-a");
   const b = await provision("tenant-b");
   await crossTenantSuite(a, b);
+  await rotationSuite(a, b);
   await suspensionSuite(a, b);
   console.log(`\nresult: ${await loadRun()}`);
 

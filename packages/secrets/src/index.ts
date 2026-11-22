@@ -179,3 +179,93 @@ export const splitKeys = (value: string): string[] =>
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+
+// A secret box: secrets the process that stores them must also open, such as tenant database passwords (ADR 0009).
+// AES-256-GCM under a list of symmetric keys: the first seals, every key opens, so a key is retired by putting a new
+// one first and re-sealing. The `context` is authenticated as in `seal`. Layout: version(1) | key id(8) | nonce(12) |
+// ciphertext | tag(16). The version differs from the sealed layout's, so one is never mistaken for the other.
+const BOX_VERSION = 2;
+const BOX_HEADER_BYTES = 1 + KEY_ID_BYTES + NONCE_BYTES;
+const BOX_KEY_BYTES = 32;
+
+export type SecretBox = {
+  seal(plaintext: string, context: string): Buffer;
+  open(sealed: Uint8Array, context: string): string;
+  /** Sealed with the first key? Re-seal what is not before dropping an older key. */
+  sealedWithCurrentKey(sealed: Uint8Array): boolean;
+};
+
+/** A new secret box key: 32 random bytes, base64. */
+export const generateBoxKey = (): string => randomBytes(BOX_KEY_BYTES).toString("base64");
+
+// The id names a key without revealing it: a hash of 32 random bytes, domain-separated from the sealed key ids.
+const boxKeyId = (key: Buffer): string =>
+  createHash("sha256")
+    .update("kerby-secret-box-key-id:")
+    .update(key)
+    .digest()
+    .subarray(0, KEY_ID_BYTES)
+    .toString("hex");
+
+/**
+ * A box over `keysBase64` (each 32 bytes, base64): seals with the first, opens with any. `name` is how config calls one
+ * key, for the error message.
+ */
+export function createSecretBox(keysBase64: readonly string[], name = "secret box key"): SecretBox {
+  const fix = `each ${name} must be 32 bytes, base64 encoded (generate one: make secrets-key)`;
+  const keys = new Map<string, Buffer>();
+  for (const value of keysBase64) {
+    const key = Buffer.from(value.trim(), "base64");
+    if (key.length !== BOX_KEY_BYTES) throw new SecretsError(fix);
+    keys.set(boxKeyId(key), key);
+  }
+  const [currentId, currentKey] = keys.entries().next().value ?? [];
+  if (currentId === undefined || currentKey === undefined) {
+    throw new SecretsError(`at least one ${name} is required: ${fix}`);
+  }
+  const currentIdBytes = Buffer.from(currentId, "hex");
+  const idOf = (buffer: Buffer): string | undefined =>
+    buffer.length >= BOX_HEADER_BYTES + TAG_BYTES && buffer[0] === BOX_VERSION
+      ? buffer.subarray(1, 1 + KEY_ID_BYTES).toString("hex")
+      : undefined;
+  return {
+    seal(plaintext, context) {
+      const nonce = randomBytes(NONCE_BYTES);
+      const cipher = createCipheriv("aes-256-gcm", currentKey, nonce);
+      cipher.setAAD(Buffer.from(context));
+      const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+      return Buffer.concat([
+        Buffer.of(BOX_VERSION),
+        currentIdBytes,
+        nonce,
+        body,
+        cipher.getAuthTag(),
+      ]);
+    },
+    open(sealed, context) {
+      const buffer = Buffer.from(sealed);
+      const id = idOf(buffer);
+      if (id === undefined) throw new SecretsError("not a secret box ciphertext");
+      const key = keys.get(id);
+      if (!key) throw new SecretsError(`sealed with a ${name} this process does not hold`);
+      try {
+        const decipher = createDecipheriv(
+          "aes-256-gcm",
+          key,
+          buffer.subarray(1 + KEY_ID_BYTES, BOX_HEADER_BYTES),
+        );
+        decipher.setAAD(Buffer.from(context));
+        decipher.setAuthTag(buffer.subarray(buffer.length - TAG_BYTES));
+        return Buffer.concat([
+          decipher.update(buffer.subarray(BOX_HEADER_BYTES, buffer.length - TAG_BYTES)),
+          decipher.final(),
+        ]).toString("utf8");
+      } catch {
+        throw new SecretsError("could not open the secret: wrong owner or altered bytes");
+      }
+    },
+    sealedWithCurrentKey(sealed) {
+      return idOf(Buffer.from(sealed)) === currentId;
+    },
+  };
+}

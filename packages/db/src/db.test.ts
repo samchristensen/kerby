@@ -11,6 +11,7 @@ import {
   createTenantDb,
   migrate,
   migrateTenants,
+  rawPool,
   TENANT_ROLE_CONNECTION_LIMIT,
   type TenantDb,
   TenantPools,
@@ -216,6 +217,71 @@ describe("TenantPools", () => {
     expect((await pools.use("a", (db) => db.query("select 1 as one"))).rows).toEqual([{ one: 1 }]);
   });
 
+  it("logs in with the stored password after a rotation, raw pool and LISTEN included", async () => {
+    const target = await database();
+    const root = createControlDb(adminUrl(), { max: 1 });
+    const role = `r_${Math.random().toString(16).slice(2, 10)}`;
+    await root.query(`create role ${role} login password 'first'`);
+    cleanups.push(async () => {
+      await root.query(`drop role if exists ${role}`);
+      await root.close();
+    });
+    let stored = "first";
+    let resolved = 0;
+    const pools = new TenantPools({
+      resolveUrl: async () => {
+        resolved++;
+        const url = new URL(target.url);
+        url.username = role;
+        url.password = stored;
+        return url.toString();
+      },
+    });
+    cleanups.push(() => pools.close());
+    /** Change the role's password as control does, and end its open sessions so the next query must log in. */
+    const rotate = async (password: string, store: boolean) => {
+      await root.query(`alter role ${role} password '${password}'`);
+      if (store) stored = password;
+      const { rows } = await root.query<{ pid: number }>(
+        "select pid from pg_stat_activity where usename = $1",
+        [role],
+      );
+      const pids = rows.map((row) => row.pid);
+      await root.query("select pg_terminate_backend(pid) from unnest($1::int[]) as pid", [pids]);
+      await eventually(
+        async () =>
+          (await root.query("select 1 from pg_stat_activity where pid = any($1::int[])", [pids]))
+            .rowCount === 0,
+      );
+      await sleep(100); // the pool drops the clients the server ended
+    };
+
+    const lease = await pools.acquire("t");
+    cleanups.push(() => lease.release());
+    const reconnected = Promise.withResolvers<void>();
+    const subscription = await lease.db.listen("rotated", () => {}, {
+      onReconnect: () => reconnected.resolve(),
+    });
+    cleanups.push(() => subscription.close());
+    expect(resolved).toBe(1);
+
+    await rotate("second", true);
+    // The same pool and the same lease: the next login asks for the stored password.
+    expect((await lease.db.query("select 2 as two")).rows).toEqual([{ two: 2 }]);
+    expect(resolved).toBeGreaterThan(1);
+    // ...and so does a login through the raw pool, which Absurd uses without Kerby's handle.
+    await rotate("third", true);
+    expect((await rawPool(lease.db).query("select 4 as four")).rows).toEqual([{ four: 4 }]);
+    await reconnected.promise; // the LISTEN connection logged in again with the new password too
+    expect((await pools.use("t", (db) => db.query("select 3 as three"))).rows).toEqual([
+      { three: 3 },
+    ]);
+
+    // A password that is wrong in the store too fails after one retry, with Postgres's error.
+    await rotate("fourth", false);
+    await expect(lease.db.query("select 1")).rejects.toThrow(/password authentication failed/);
+  });
+
   it("fans a migration out to every tenant and reports the ones that fail", async () => {
     const dbs = await Promise.all([database(), database()]);
     const urls = new Map([
@@ -238,32 +304,18 @@ describe("TenantPools", () => {
   });
 });
 
-describe("ClusterAdmin as a non-superuser", () => {
-  it("provisions a database owned by a restricted role without superuser rights", async () => {
+describe("ClusterAdmin", () => {
+  it("limits a tenant role's connections, also one made before the limit, and changes its password", async () => {
     const root = createControlDb(adminUrl(), { max: 1 });
-    const suffix = Math.random().toString(16).slice(2, 10);
-    const admin = `adm_${suffix}`;
-    await root.query(`create role ${admin} login createdb createrole password 'pw'`);
+    const cluster = createClusterAdmin(adminUrl());
+    const target = await database();
+    const role = `r_${Math.random().toString(16).slice(2, 10)}`;
     cleanups.push(async () => {
-      await root.query(`drop role if exists ${admin}`);
+      await cluster.dropRole(role);
+      await cluster.close();
       await root.close();
     });
-    const url = new URL(adminUrl());
-    url.username = admin;
-    url.password = "pw";
-    const cluster = createClusterAdmin(url.toString());
-    cleanups.push(() => cluster.close());
-
-    // A template the admin owns, as the control service makes it.
-    const template = `tpl_${suffix}`;
-    await cluster.createDatabase(template);
-    const inTemplate = createTenantDb(cluster.urlFor(template), { max: 1 });
-    await inTemplate.query("create table things (id int)");
-    await inTemplate.close();
-
-    const role = `r_${suffix}`;
-    const name = `t_${suffix}`;
-    await cluster.createRole(role, "tenant-pw");
+    await cluster.createRole(role, "first");
     const limit = async () =>
       (
         await root.query<{ rolconnlimit: number }>(
@@ -272,46 +324,22 @@ describe("ClusterAdmin as a non-superuser", () => {
         )
       ).rows[0]?.rolconnlimit;
     expect(await limit()).toBe(TENANT_ROLE_CONNECTION_LIMIT);
-    // a role made before the limit existed gets it when asked
     await root.query(`alter role ${role} connection limit -1`);
     await cluster.limitRoleConnections(role);
     expect(await limit()).toBe(TENANT_ROLE_CONNECTION_LIMIT);
-    await cluster.createDatabase(name, { template, owner: role });
-    await cluster.reassignOwned(name, role);
-    await cluster.restrictDatabase(name, role);
-    cleanups.push(async () => {
-      await cluster.dropDatabase(name);
-      await cluster.dropRole(role);
-      await cluster.dropDatabase(template);
-    });
 
-    const tenantUrl = new URL(adminUrl());
-    tenantUrl.username = role;
-    tenantUrl.password = "tenant-pw";
-    tenantUrl.pathname = `/${name}`;
-    const own = createTenantDb(tenantUrl.toString(), { max: 1 });
-    cleanups.push(() => own.close());
-    await own.query("insert into things values (1)");
-    expect(
-      (
-        await own.query<{ tableowner: string }>(
-          "select tableowner from pg_tables where tablename = 'things'",
-        )
-      ).rows,
-    ).toEqual([{ tableowner: role }]);
-    // and nobody else can get in
-    expect(await cluster.databaseExists(name)).toBe(true);
-    const outsider = `o_${suffix}`;
-    await root.query(`create role ${outsider} login password 'pw'`);
-    cleanups.push(async () => {
-      await root.query(`drop role if exists ${outsider}`);
-    });
-    const outsiderUrl = new URL(tenantUrl);
-    outsiderUrl.username = outsider;
-    outsiderUrl.password = "pw";
-    const intruder = createTenantDb(outsiderUrl.toString(), { max: 1 });
-    cleanups.push(() => intruder.close());
-    await expect(intruder.query("select 1")).rejects.toThrow(/permission denied|not allowed/);
+    const as = (password: string) => {
+      const url = new URL(target.url);
+      url.username = role;
+      url.password = password;
+      const handle = createTenantDb(url.toString(), { max: 1 });
+      cleanups.push(() => handle.close());
+      return handle;
+    };
+    expect((await as("first").query("select 1 as one")).rows).toEqual([{ one: 1 }]);
+    await cluster.setRolePassword(role, "it's-second");
+    await expect(as("first").query("select 1")).rejects.toThrow(/password authentication failed/);
+    expect((await as("it's-second").query("select 2 as two")).rows).toEqual([{ two: 2 }]);
   });
 });
 

@@ -658,7 +658,7 @@ describe("scheduling", () => {
 describe("worker config", () => {
   const base = {
     controlDatabaseUrl: "postgres://x",
-    tenantDbSecret: "0123456789abcdef",
+    tenantDbKeys: "Ga5JSSydS48D60HoBOzAmEPJeUKLm3s44q+oguVov0M=",
     s3Endpoint: "http://localhost:9000",
     s3Bucket: "b",
     s3AccessKeyId: "k",

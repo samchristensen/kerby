@@ -5,8 +5,8 @@ export const apiConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
   port: z.coerce.number().int().min(0).default(8080),
   controlDatabaseUrl: z.string().min(1),
-  /** See `tenantDbPassword`: the same secret the control service provisions roles with. */
-  tenantDbSecret: z.string().min(16),
+  /** Opens tenants' stored database passwords (ADR 0009): the same comma-separated key list control holds. */
+  tenantDbKeys: z.string().min(1),
   /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
   tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
   /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */

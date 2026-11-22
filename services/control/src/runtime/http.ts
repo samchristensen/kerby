@@ -25,6 +25,7 @@ import {
   readJson,
 } from "@kerby/serve";
 import { backupBuckets, restoreFromBackup } from "../service/backup.ts";
+import { rotateTenantDbPassword } from "../service/db-credentials.ts";
 import { exportTenant } from "../service/export.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
@@ -134,6 +135,14 @@ export function createControlApp(deps: ControlDeps, operatorToken: string): Fetc
       "/v1/operator/tenants/:id/resume",
       authorized(async (_request, params) =>
         json(200, tenantResource(await resumeTenant(deps, id(params)))),
+      ),
+    ],
+    [
+      // A new random password for the tenant's database role, stored sealed (ADR 0009). Audited; returns no secret.
+      "POST",
+      "/v1/operator/tenants/:id/rotate-db-password",
+      authorized(async (_request, params) =>
+        json(200, tenantResource(await rotateTenantDbPassword(deps, id(params)))),
       ),
     ],
     [

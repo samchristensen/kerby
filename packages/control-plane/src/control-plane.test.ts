@@ -10,6 +10,7 @@ it("the control migrations create the control tables, and keys belong to a tenan
     "api_keys",
     "audit_log",
     "schema_migrations",
+    "tenant_db_credentials",
     "tenant_secrets",
     "tenants",
     "usage",

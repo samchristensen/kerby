@@ -26,11 +26,12 @@ already do.
 - **Networking.** Only `api` has a public domain. `control` (the operator API) and `worker` have none: operators reach
   control with `railway ssh`. Services reach Postgres over Railway's private network, which does not use TLS, so
   `TENANT_DB_SSLMODE` stays unset.
-- **Postgres.** The control database is the template's `railway` database. The `postgres` role is a superuser, so the
-  provisioning path for a non-superuser admin is unused here (kept, and tested, for hosts that give none). Postgres 18 is
+- **Postgres.** The control database is the template's `railway` database. Control's administrative URL is the `postgres`
+  superuser; provisioning relies on it (no path for a non-superuser admin is kept). Postgres 18 is
   what the template ships, so Compose, the test containers and `pg_dump` in the control image are 18 too.
 - **Secrets** are generated once by the setup script (24 random bytes, hex), stored as service variables, and kept on
-  every later run. `TENANT_DB_SECRET` is never regenerated on a live system: every tenant role's password derives from it.
+  every later run. `TENANT_DB_KEYS` ([ADR 0009](0009-tenant-database-credentials.md), a base64 32-byte key) is made once
+  the same way on `control`, which api and worker reference; it is rotated by the runbook in deploy.md, never by regenerating it.
   The secrets key pair ([ADR 0008](0008-byok-sealed-secrets.md)) is made once the same way: the private key on `worker`, the public
   key on `api`. Kerby holds no model provider keys: tenants bring theirs.
 - **Infrastructure is Railway Infrastructure as Code** ([`.railway/railway.ts`](../../.railway/railway.ts), the `railway` SDK pinned
@@ -38,7 +39,7 @@ already do.
   variable, with references between them. `make railway-plan` previews and `make railway-setup` applies it (the Railway CLI
   compares the file with the environment and shows the diff first; deletions need a person). One file describes every environment.
 - **What the file leaves to `scripts/railway.ts`.** Secrets: a generated variable (`${{secret(n)}}`) is made again on every
-  apply (verified), which would rotate `TENANT_DB_SECRET`, so they are `preserve()` and the script creates each once and
+  apply (verified), which would rotate `TENANT_DB_KEYS` and `SECRETS_PRIVATE_KEYS`, so they are `preserve()` and the script creates each once and
   never replaces it. The api's generated domain (the IaC does not manage generated domains). Code: each service's source is
   the GHCR image tagged with the environment's name, which `make deploy` moves (ADR 0011). A new environment: a copy of production (`environment new --duplicate`),
   because an empty environment filled in by the file never gets its bucket deployed (verified); the script then replaces the

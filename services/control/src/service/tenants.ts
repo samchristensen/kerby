@@ -7,11 +7,12 @@ import {
   getTenant,
   insertTenant,
   listTenants,
+  newTenantDbPassword,
   setSchemaVersion,
   setTenantStatus,
+  storeTenantDbPassword,
   TenantNameTakenError,
   type TenantRecord,
-  tenantDbPassword,
 } from "@kerby/control-plane";
 import { tenantMigrationDirs } from "@kerby/conversations";
 import { migrate, readMigrations } from "@kerby/db";
@@ -42,7 +43,7 @@ export async function provisionTenant(
   deps: ControlDeps,
   request: ProvisionRequest,
 ): Promise<Provisioned> {
-  const { control, cluster, settings, pools } = deps;
+  const { control, cluster, settings, pools, tenantDbBox } = deps;
   let tenant: TenantRecord;
   try {
     tenant = await insertTenant(control, {
@@ -58,12 +59,14 @@ export async function provisionTenant(
   }
 
   try {
-    await cluster.createRole(tenant.dbRole, tenantDbPassword(settings.tenantDbSecret, tenant.id));
+    // Stored before the role exists, so control's startup repair never gives a role being made a second password.
+    const password = newTenantDbPassword();
+    await storeTenantDbPassword(control, tenantDbBox, tenant.id, password);
+    await cluster.createRole(tenant.dbRole, password);
     await cluster.createDatabase(tenant.dbName, {
       template: settings.templateDatabase,
       owner: tenant.dbRole,
     });
-    // Re-own first: restricting connect would lock out a non-superuser admin before it could.
     await cluster.reassignOwned(tenant.dbName, tenant.dbRole);
     await cluster.restrictDatabase(tenant.dbName, tenant.dbRole);
     // The copy may predate the newest migrations: catch up, as the tenant's own role.
@@ -139,6 +142,7 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
   await control.transaction(async (tx) => {
     await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
+    await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
     await setTenantStatus(tx, id, "deleted");
   });
   await audit(control, {
