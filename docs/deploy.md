@@ -122,8 +122,10 @@ read why with `railway logs --service <name>`; roll back with `make deploy TAG=s
 
 CI needs two repository secrets, made once by a person:
 
-- `RAILWAY_TOKEN`: project `kerby` → Settings → Tokens, scoped to `production`. It can plan, apply and deploy that one
-  environment and read its variables (so its secrets). The CLI login cannot create one.
+- `RAILWAY_TOKEN`: project `kerby` → Settings → Tokens, scoped to `production`. Measured (plan 0003, C4): it can plan and
+  apply the IaC, set registry credentials, redeploy, read logs, and read every variable and the bucket credentials of that
+  environment (so all its secrets); it cannot create environments, list projects or make account queries. The CLI login
+  cannot create one.
 - `GHCR_PULL_TOKEN`: a classic GitHub token with `read:packages` only (https://github.com/settings/tokens/new?scopes=read:packages);
   Railway uses it to pull the private images.
 

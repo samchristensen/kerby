@@ -104,12 +104,12 @@ flowchart LR
   Fix: `scripts/check-docs.ts` in `make check`: relative links in every `.md` resolve; every `make <target>` the docs name
   exists in the Makefile; every rule a doc calls enforced exists in `check-architecture.ts`. The semantic pass (ADR
   decisions and AGENTS.md invariants against code) runs at each milestone close, and on a CI schedule once C1 exists.
-- [ ] **C4 Railway token scope** ("Hosting: whoever holds the Railway login can read every secret"). S, **human**: create
+- [x] **C4 Railway token scope** ("Hosting: whoever holds the Railway login can read every secret"). S, **human**: create
   the tokens.
   Measure which commands `scripts/railway.ts` uses (`environment new --duplicate`, `variable set`, `domain`, `up`, `config
   apply`, `environment delete`) succeed under a project token scoped to one environment. Outcome: agents get tokens for
   non-production environments only; production changes go through C5 or a person. Record it in ADR 0007 and deploy.md.
-- [ ] **C5 IaC and environments in CI** (same line, second half). M. After C1 and C4.
+- [x] **C5 IaC and environments in CI** (same line, second half). M. After C1 and C4.
   Fix: `railwayapp/config` plans on pull requests and applies on merge; a pull request gets `ENV=pr-<n>` (setup, deploy,
   a smoke call), deleted with `make env-down` on close.
 - [ ] **C6 Orphan bucket** ("IaC and buckets: an environment filled in from the file alone"). S, **human**.
@@ -285,3 +285,20 @@ No work until the trigger; the debt line stays and names it.
   (unused contract types and `ErrorResponseSchema`, `taskNames`, service `start*` functions and type re-exports, package
   index re-exports). Kept: the tool-read default exports (config ignore), `EgressError` and the vitest globalSetup
   (`@public` with the reason), `@biomejs/biome` (the Makefile runs it).
+- 2026-11-22 Production `max_connections` 100 → 500 (`ALTER SYSTEM`, Postgres restarted, `show max_connections` 500,
+  api healthy). TENANT_DB_KEYS created on control before the release (`scripts/railway.ts secrets`).
+- 2026-11-22 First release from GHCR (C5). The owner added `RAILWAY_TOKEN` and `GHCR_PULL_TOKEN`; the release for #12
+  stopped, as designed, at the IaC deletion of `TENANT_DB_SECRET`. After an on-demand Postgres backup and reviewing the
+  plan (image sources, two buckets, ten control variables, `TENANT_DB_KEYS`/`TRUST_PROXY`, three deletions), applied by
+  hand with `--confirm-destructive`; the new buckets deployed (objects 0, regions iad and sjc). Re-run of the release:
+  registry credentials set, control then api then worker deployed `sha-6c6f33e`; sources are
+  `ghcr.io/samchristensen/kerby-<svc>:production`. Production smoke: tenant provisioned, `PUT /v1/model-keys/nope` 400
+  `unknown_provider`, a fake Anthropic key stored, a turn ran (worker reached Anthropic: 401 `invalid x-api-key` in
+  `lastError`), paged read 200, export 200 and both presigned URLs downloaded (dump starts `PGDMP`; a tampered signature
+  403), backup copied 1 object, tenant database password rotated and the read still 200, tenant deleted and its key
+  refused (401). `POST /v1/operator/migrate` 200 (new role connection limit).
+- 2026-11-22 C4 measured with a throwaway workflow (PR #13, closed): the production project token can run `railway
+  status`, list services, read logs, read all 32 control variables (secrets included) and bucket credentials, plan and
+  apply the IaC, set registry credentials and redeploy; it cannot create an environment, list projects or answer
+  account queries. So agents and CI get project tokens per environment; creating environments stays with the login
+  (ADR 0011). The residual risk is a tech-debt line.
