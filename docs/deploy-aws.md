@@ -40,6 +40,36 @@ You need an AWS account and credentials, a Route 53 hosted zone, Terraform 1.9+,
 failing deployment. After a release that adds tenant migrations, run the fan-out (`POST /v1/operator/migrate`, same way
 as above): code must tolerate schema versions n and n-1 while it runs.
 
+## Monitoring
+
+Set `alarm_emails` (each address must confirm its subscription) and subscribe a pager or chat tool to the `alarm_topic_arn` output.
+The `dashboard` output links to the CloudWatch dashboard.
+
+| Alarm                                                                                                | Means                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `api-5xx`, `alb-5xx`, `api-latency-p95`, `api-unhealthy-targets`                                     | the API is failing, slow, or a task fails its health check                                        |
+| `<service>-running-tasks`                                                                            | fewer tasks than the minimum: crash loop, failed deployment, capacity                             |
+| `<service>-cpu`, `<service>-memory`                                                                  | above 85% for 15 minutes                                                                          |
+| `rds-cpu`, `-freeable-memory`, `-free-storage`, `-connections`, `-read/write-latency`, `-disk-queue` | the Postgres budget is running out; every tenant is a database                                    |
+| `turn-failed`                                                                                        | a turn used all its attempts: a customer got no answer (`lastError` on the conversation says why) |
+| `lease-lost`, `heartbeat-failed`                                                                     | runs losing their lease: workers stalled or overloaded                                            |
+| `scheduler-trouble`                                                                                  | the worker cannot find work                                                                       |
+| `app-errors-*`, `api-server-errors`                                                                  | any `level=error` log line; authenticated requests answered 5xx                                   |
+| `turn-duration-p95`                                                                                  | slow turns: provider, tool or worker saturation                                                   |
+
+Logs are JSON with `tenantId` and never message content. Useful Logs Insights queries (the dashboard has the first three):
+`filter level = "error"`, slowest turns (`msg = "turn completed"`, sort by `durationMs`), requests per tenant
+(`msg = "request"`, `stats count(*) by tenantId`), and one tenant's activity (`filter tenantId = "<id>"`). ALB access logs
+are in the `*-alb-logs` bucket for 90 days (`alb_log_retention_days`).
+
+## Database roles
+
+The control service connects to Postgres as the RDS admin (`kerby_admin`), creates the limited `kerby_app` role at start
+(migration 0002) and sets its password. `api` and `worker` connect to the control database as `kerby_app`: it can read tenants
+and keys, mark a key used, and insert usage, and nothing else (no `tenant_secrets`, no audit log, no writes to tenants). At
+start, control also revokes `connect` on the control database from `public`, so a tenant role cannot even open it. A tenant
+database is always opened as that tenant's own role.
+
 ## Budgets to know
 
 - **Postgres**: about 1 GiB of memory per 200 tenant databases was measured locally; every tenant is a database, so size
@@ -58,6 +88,6 @@ as above): code must tolerate schema versions n and n-1 while it runs.
 
 ## Known gaps
 
-See `docs/plans/tech-debt.md`: no WAF or rate limiting at the edge, `api` and `worker` hold admin database credentials,
-tenant exports land on the control task's ephemeral disk, S3 versioning delays deletion for 30 days, no alarms or dashboards,
-a single RDS instance.
+See `docs/plans/tech-debt.md`: no WAF or rate limiting at the edge, `api` and `worker` still derive every tenant role's
+password from one shared secret, tenant exports land on the control task's ephemeral disk, S3 versioning delays deletion for
+30 days, no synthetic external check, a single RDS instance. Alarm thresholds are starting points: tune them with real traffic.

@@ -2,6 +2,7 @@
 import { CreateConversationRequestSchema, PostMessageRequestSchema } from "@kerby/contracts";
 import { ConversationBusyError, findConversation, isConversationId } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
+import { log, withTenant } from "@kerby/observability";
 import {
   bearerToken,
   createRouter,
@@ -82,6 +83,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
   /** Authenticate, then run `handler` with the tenant's context. The tenant id comes from the key only. */
   const authed =
     (
+      route: string,
       handler: (
         request: Request,
         params: Record<string, string>,
@@ -106,15 +108,37 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           throw new HttpError(403, "tenant_unavailable", error.message);
         throw error;
       }
+      // One line per authenticated request, tagged with the tenant: the route pattern, never the path or body.
+      const started = performance.now();
+      let status = 500;
       try {
-        return await handler(request, params, principal);
+        return await withTenant(principal.tenantId, async () => {
+          try {
+            const response = await handler(request, params, principal);
+            status = response.status;
+            return response;
+          } catch (error) {
+            if (error instanceof NotFoundError)
+              throw new HttpError(404, "not_found", error.message);
+            if (error instanceof ConversationBusyError)
+              throw new HttpError(409, "conversation_busy", error.message);
+            if (error instanceof InvalidModelError)
+              throw new HttpError(400, "invalid_model", error.message);
+            throw error;
+          }
+        });
       } catch (error) {
-        if (error instanceof NotFoundError) throw new HttpError(404, "not_found", error.message);
-        if (error instanceof ConversationBusyError)
-          throw new HttpError(409, "conversation_busy", error.message);
-        if (error instanceof InvalidModelError)
-          throw new HttpError(400, "invalid_model", error.message);
+        status = error instanceof HttpError ? error.status : 500;
         throw error;
+      } finally {
+        withTenant(principal.tenantId, () =>
+          log("info", "request", {
+            route,
+            method: request.method,
+            status,
+            durationMs: Math.round(performance.now() - started),
+          }),
+        );
       }
     };
 
@@ -133,7 +157,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/conversations",
-      authed(async (request, _params, principal) => {
+      authed("POST /v1/conversations", async (request, _params, principal) => {
         const body = await readJson(request, CreateConversationRequestSchema);
         return json(201, await inTenant(principal, (ctx) => createConversation(deps, ctx, body)));
       }),
@@ -141,7 +165,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/conversations/:id/messages",
-      authed(async (request, params, principal) => {
+      authed("POST /v1/conversations/:id/messages", async (request, params, principal) => {
         const id = conversationId(params);
         const body = await readJson(request, PostMessageRequestSchema, {
           maxBytes: MESSAGE_BODY_BYTES,
@@ -152,7 +176,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations/:id",
-      authed(async (_request, params, principal) => {
+      authed("GET /v1/conversations/:id", async (_request, params, principal) => {
         const id = conversationId(params);
         return json(200, await inTenant(principal, (ctx) => getConversation(deps, ctx, id)));
       }),
@@ -160,7 +184,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations/:id/events",
-      authed(async (request, params, principal) => {
+      authed("GET /v1/conversations/:id/events", async (request, params, principal) => {
         const id = conversationId(params);
         const header =
           request.headers.get("last-event-id") ?? new URL(request.url).searchParams.get("after");

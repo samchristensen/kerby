@@ -1,6 +1,12 @@
 // The control service: the operator API. This file is the composition root: it builds the real adapters.
 import { createBlobs } from "@kerby/blobs";
-import { controlMigrationsDir, getTenant, tenantDbUrl } from "@kerby/control-plane";
+import {
+  controlMigrationsDir,
+  getTenant,
+  restrictControlDatabase,
+  setAppRolePassword,
+  tenantDbUrl,
+} from "@kerby/control-plane";
 import { createClusterAdmin, createControlDb, migrate, TenantPools } from "@kerby/db";
 import { log } from "@kerby/observability";
 import { serve } from "@kerby/serve";
@@ -17,6 +23,8 @@ export type { ControlConfig };
 export async function startControl(config: ControlConfig) {
   const control = createControlDb(config.controlDatabaseUrl);
   await migrate(control, [controlMigrationsDir]);
+  if (config.appDatabasePassword) await setAppRolePassword(control, config.appDatabasePassword);
+  await restrictControlDatabase(control);
 
   const cluster = createClusterAdmin(config.clusterAdminUrl);
   const blobs = createBlobs({

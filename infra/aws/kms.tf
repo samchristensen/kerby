@@ -24,6 +24,15 @@ data "aws_iam_policy_document" "kms" {
       values   = ["arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/kerby/${var.environment}/*"]
     }
   }
+  statement {
+    sid       = "AlarmsPublishToEncryptedTopic"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com", "events.rds.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_kms_key" "data" {

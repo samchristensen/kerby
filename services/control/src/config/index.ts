@@ -17,6 +17,8 @@ export const controlConfigSchema = z.object({
   /** Where services reach tenant databases: written into each tenant's row. */
   clusterHost: z.string().min(1),
   clusterPort: z.coerce.number().int().positive(),
+  /** Password for the limited `kerby_app` role api and worker use on the control database. Omit locally. */
+  appDatabasePassword: z.string().min(16).optional(),
   /** The database tenant databases are copied from; created and migrated at startup. */
   templateDatabase: z
     .string()

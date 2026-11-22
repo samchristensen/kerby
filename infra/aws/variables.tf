@@ -133,3 +133,39 @@ variable "log_retention_days" {
   type    = number
   default = 30
 }
+
+# --- Monitoring -----------------------------------------------------------------------------------------------------
+variable "alarm_emails" {
+  type        = list(string)
+  default     = []
+  description = "Addresses subscribed to the alarm topic (each must confirm the subscription email). Wire a pager to the topic too."
+}
+
+variable "db_connections_alarm_threshold" {
+  type        = number
+  default     = 400
+  description = "Alarm when Postgres connections exceed this. Keep it below max_connections (about 900 on db.m7g.large)."
+}
+
+variable "db_freeable_memory_alarm_bytes" {
+  type        = number
+  default     = 1073741824
+  description = "Alarm when freeable memory drops below this. Every tenant database costs memory: raise it with the tenant count."
+}
+
+variable "db_free_storage_alarm_bytes" {
+  type        = number
+  default     = 21474836480
+  description = "Alarm when free storage drops below this (20 GiB)."
+}
+
+variable "turn_duration_alarm_ms" {
+  type        = number
+  default     = 120000
+  description = "Alarm when the p95 of turn durations over 5 minutes exceeds this."
+}
+
+variable "alb_log_retention_days" {
+  type    = number
+  default = 90
+}

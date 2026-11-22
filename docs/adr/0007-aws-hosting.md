@@ -22,6 +22,8 @@ Plan 0001 left the hosting target open. The target is AWS without a platform lay
   member of each tenant role, re-owns objects with `ALTER ... OWNER` (not `REASSIGN OWNED`), and restricts connect last.
 - **S3**: one bucket, versioned, SSE-KMS, public access blocked, TLS-only policy. Tasks use their **task role**
   (no static keys): read and write under `t/*`; only `control` may list and delete.
+- **Monitoring** is CloudWatch-native: an SNS topic, alarms on the load balancer, ECS services, RDS and on metrics derived from
+  the structured JSON logs (failed turns, lost leases, errors), a dashboard, ALB access logs and an RDS event subscription.
 - **Secrets Manager** holds generated secrets (admin database URLs, operator token, tenant-database secret) and the
   optional provider keys; ECS injects them as environment variables, which is what `@kerby/config` reads. Services
   connect to Postgres with `sslmode=verify-full`; the images carry the Amazon RDS CA bundle.
@@ -31,9 +33,9 @@ Plan 0001 left the hosting target open. The target is AWS without a platform lay
 - One instance is one failure domain and one connection and memory budget (plan 0001, S4/S5 and the 200-tenant run: about
   1 GiB at 200 tenant databases). Scaling out means a second cluster; a tenant row already names its host, but the
   services know only one cluster today.
-- `api` and `worker` hold the cluster admin credentials in their control-database URL, and the shared tenant-database secret
-  derives every tenant role's password. A compromised task can reach every tenant. Narrower roles for the control database
-  and per-tenant stored credentials are follow-ups (tech debt).
+- `api` and `worker` connect to the control database as the limited `kerby_app` role, not the RDS admin. The shared
+  tenant-database secret still derives every tenant role's password, so a compromised task can reach every tenant
+  database; per-tenant stored credentials with rotation are a follow-up (tech debt).
 - S3 versioning keeps deleted tenant objects as noncurrent versions for 30 days: a deletion guarantee shorter than that
   needs the lifecycle rule changed.
 - Not verified against a real AWS account: this configuration passes `terraform validate` only.

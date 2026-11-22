@@ -1,5 +1,11 @@
 # Secrets are generated here and injected into tasks by ECS from Secrets Manager. Their values live in Terraform state
 # (encrypted S3 backend): protect that bucket like the secrets themselves.
+# The limited `kerby_app` role api and worker use on the control database (migration 0002); control sets its password.
+resource "random_password" "app_db" {
+  length  = 40
+  special = false
+}
+
 resource "random_password" "operator_token" {
   length  = 48
   special = false
@@ -15,10 +21,12 @@ resource "random_password" "tenant_db_secret" {
 locals {
   db_host = aws_db_instance.main.address
   secrets = {
-    control_database_url = "postgres://kerby_admin:${random_password.db_admin.result}@${local.db_host}:5432/kerby_control?sslmode=verify-full"
-    cluster_admin_url    = "postgres://kerby_admin:${random_password.db_admin.result}@${local.db_host}:5432/postgres?sslmode=verify-full"
-    operator_token       = random_password.operator_token.result
-    tenant_db_secret     = random_password.tenant_db_secret.result
+    control_database_url     = "postgres://kerby_admin:${random_password.db_admin.result}@${local.db_host}:5432/kerby_control?sslmode=verify-full"
+    control_database_url_app = "postgres://kerby_app:${random_password.app_db.result}@${local.db_host}:5432/kerby_control?sslmode=verify-full"
+    app_database_password    = random_password.app_db.result
+    cluster_admin_url        = "postgres://kerby_admin:${random_password.db_admin.result}@${local.db_host}:5432/postgres?sslmode=verify-full"
+    operator_token           = random_password.operator_token.result
+    tenant_db_secret         = random_password.tenant_db_secret.result
   }
 }
 

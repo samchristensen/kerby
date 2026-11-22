@@ -30,8 +30,7 @@ locals {
     KERBY_ENVIRONMENT = "production"
   }
   common_secrets = {
-    CONTROL_DATABASE_URL = local.secret_ref.control_database_url
-    TENANT_DB_SECRET     = local.secret_ref.tenant_db_secret
+    TENANT_DB_SECRET = local.secret_ref.tenant_db_secret
   }
 
   provider_secrets = merge(
@@ -48,9 +47,12 @@ locals {
         CLUSTER_PORT = "5432"
         EXPORT_DIR   = "/var/lib/kerby/exports"
       }
+      # Only control holds the admin credentials: it provisions databases and gives api and worker their limited role.
       secrets = {
-        OPERATOR_TOKEN    = local.secret_ref.operator_token
-        CLUSTER_ADMIN_URL = local.secret_ref.cluster_admin_url
+        CONTROL_DATABASE_URL  = local.secret_ref.control_database_url
+        OPERATOR_TOKEN        = local.secret_ref.operator_token
+        CLUSTER_ADMIN_URL     = local.secret_ref.cluster_admin_url
+        APP_DATABASE_PASSWORD = local.secret_ref.app_database_password
       }
     }
     api = {
@@ -60,7 +62,7 @@ locals {
         MODELS             = var.models
         AUTH_CACHE_SECONDS = tostring(var.auth_cache_seconds)
       }
-      secrets = {}
+      secrets = { CONTROL_DATABASE_URL = local.secret_ref.control_database_url_app }
     }
     worker = {
       port = 8082
@@ -68,7 +70,7 @@ locals {
         HEALTH_PORT                  = "8082"
         DEFAULT_MAX_CONCURRENT_TURNS = tostring(var.default_max_concurrent_turns)
       }
-      secrets = local.provider_secrets
+      secrets = merge(local.provider_secrets, { CONTROL_DATABASE_URL = local.secret_ref.control_database_url_app })
     }
   }
 }

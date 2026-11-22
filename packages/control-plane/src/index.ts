@@ -6,6 +6,7 @@ import { join } from "node:path";
 /** Control-plane migrations, for `migrate(controlDb, [controlMigrationsDir])`. */
 export const controlMigrationsDir = join(import.meta.dirname, "..", "migrations", "control");
 
+export { APP_ROLE, restrictControlDatabase, setAppRolePassword } from "./app-role.ts";
 export { type AuditDetail, audit } from "./audit.ts";
 export {
   type ApiKeyRecord,

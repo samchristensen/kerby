@@ -33,6 +33,13 @@ resource "aws_lb" "api" {
   drop_invalid_header_fields = true
   # Event streams are idle between events; the API sends a keep-alive every 15 s, this is the backstop.
   idle_timeout = 120
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.bucket
+    prefix  = "alb"
+    enabled = true
+  }
+  depends_on = [aws_s3_bucket_policy.alb_logs]
 }
 
 resource "aws_lb_target_group" "api" {

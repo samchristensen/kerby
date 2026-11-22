@@ -86,6 +86,8 @@ export async function runTurn(
   run: RunContext,
 ): Promise<void> {
   const { conversationId } = params;
+  const started = performance.now();
+  let persisted = 0;
   const conversation = await findConversation(ctx.db, conversationId);
   if (!conversation) throw new Error(`conversation ${conversationId} does not exist`);
 
@@ -128,6 +130,7 @@ export async function runTurn(
         persistMessage(ctx, deps.blobs, { conversationId, seq, message: event.message, run }),
       );
       nextSeq = seq + 1;
+      persisted++;
       if (event.message.role === "assistant" && event.message.usage) {
         const usage = event.message.usage;
         await recordUsage(deps.control, {
@@ -142,6 +145,11 @@ export async function runTurn(
         });
       }
     }
+    log("info", "turn completed", {
+      durationMs: Math.round(performance.now() - started),
+      messages: persisted,
+      attempt: run.attempt,
+    });
   } catch (error) {
     if (error instanceof LeaseLostError) {
       // Another worker owns this turn now; it will rehydrate from what is persisted. Write nothing more.
@@ -155,6 +163,7 @@ export async function runTurn(
     // The last attempt failing for good leaves a trace on the conversation, unless this run is already superseded.
     const finalAttempt = run.maxAttempts !== null && run.attempt >= run.maxAttempts;
     if (finalAttempt && (await holdsRun(ctx.db, run).catch(() => false))) {
+      log("error", "turn failed for good", { attempt: run.attempt, ...errorFields(error) });
       await setLastError(
         ctx.db,
         conversationId,

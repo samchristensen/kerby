@@ -1,3 +1,4 @@
+import { createControlDb } from "@kerby/db";
 import { describe, expect, it } from "vitest";
 import {
   authenticateApiKey,
@@ -7,7 +8,9 @@ import {
   listApiKeys,
   listTenants,
   parseApiKey,
+  recordUsage,
   revokeApiKey,
+  setAppRolePassword,
   setTenantStatus,
   TenantNameTakenError,
   tenantDbPassword,
@@ -105,5 +108,57 @@ describe("api keys", () => {
     const { key, secret } = await createApiKey(control.db, a.id);
     expect(await revokeApiKey(control.db, b.id, key.id)).toBe(false);
     expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(a.id);
+  });
+});
+
+describe("the limited app role (what api and worker connect as)", () => {
+  async function asApp(controlUrl: string) {
+    const admin = createControlDb(controlUrl, { max: 1 });
+    await setAppRolePassword(admin, "app-role-password-for-tests");
+    await admin.close();
+    const url = new URL(controlUrl);
+    url.username = "kerby_app";
+    url.password = "app-role-password-for-tests";
+    return createControlDb(url.toString(), { max: 1 });
+  }
+
+  it("does what the services need and nothing of the operator's", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
+    await setTenantStatus(control.db, tenant.id, "active");
+    const { secret } = await createApiKey(control.db, tenant.id);
+    const app = await asApp(control.url);
+    try {
+      // api: verify a key; worker: list and read tenants, record usage
+      expect((await authenticateApiKey(app, secret))?.tenant.id).toBe(tenant.id);
+      expect((await listTenants(app, { status: "active" })).map((t) => t.name)).toEqual(["acme"]);
+      expect(await getTenant(app, tenant.id)).toBeDefined();
+      expect(
+        await recordUsage(app, {
+          tenantId: tenant.id,
+          dedupeKey: "k",
+          model: "m",
+          inputTokens: 1,
+          outputTokens: 1,
+        }),
+      ).toBe(true);
+      await app.query("select pg_notify('tenant_work', 'x')");
+
+      // operator-only data and writes are refused
+      for (const sql of [
+        "select * from tenant_secrets",
+        "select * from audit_log",
+        "insert into tenants (name, db_host, db_port, db_name, db_role) values ('x', 'h', 1, 'd', 'r')",
+        "update tenants set status = 'suspended'",
+        "update api_keys set revoked_at = null",
+        "update api_keys set key_hash = '\\x00'",
+        "delete from usage",
+        "insert into audit_log (actor, action) values ('a', 'b')",
+      ]) {
+        await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await app.close();
+    }
   });
 });
