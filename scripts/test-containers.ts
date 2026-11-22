@@ -1,6 +1,7 @@
 // Vitest globalSetup: starts disposable Postgres and RustFS containers for the whole run and hands their
 // addresses to tests through `inject("containers")`. Torn down after the run. Containers carry the label
-// `kerby-test=1`, so a run killed before teardown is cleaned up by the next one.
+// `kerby-test=1` and the owning process id, so a run killed before teardown is cleaned up by the next one while
+// runs in other worktrees keep theirs.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -22,6 +23,7 @@ declare module "vitest" {
 }
 
 const LABEL = "kerby-test=1";
+const OWNER = "kerby-test-owner";
 const READY_TIMEOUT_MS = 60_000;
 
 function docker(...args: string[]): string {
@@ -55,9 +57,35 @@ async function until(what: string, probe: () => Promise<boolean> | boolean): Pro
   );
 }
 
-function removeStale(): void {
-  const stale = docker("ps", "-aq", "--filter", `label=${LABEL}`);
-  if (stale) docker("rm", "-f", ...stale.split("\n"));
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Remove test containers whose owning process is gone. Another run's containers stay. */
+export function removeStale(alive: (pid: number) => boolean = isAlive): void {
+  const lines = docker(
+    "ps",
+    "-a",
+    "--filter",
+    `label=${LABEL}`,
+    "--format",
+    `{{.ID}} {{.Label "${OWNER}"}}`,
+  );
+  const stale = lines
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((line) => {
+      const [id = "", owner = ""] = line.split(" ");
+      const pid = Number(owner);
+      return Number.isInteger(pid) && pid > 0 && alive(pid) ? [] : [id];
+    });
+  if (stale.length > 0) docker("rm", "-f", ...stale);
 }
 
 export default async function setup(project: TestProject): Promise<() => void> {
@@ -82,6 +110,8 @@ export default async function setup(project: TestProject): Promise<() => void> {
       pg,
       "--label",
       LABEL,
+      "--label",
+      `${OWNER}=${process.pid}`,
       "-e",
       "POSTGRES_PASSWORD=dev",
       "-p",
@@ -105,6 +135,8 @@ export default async function setup(project: TestProject): Promise<() => void> {
       s3,
       "--label",
       LABEL,
+      "--label",
+      `${OWNER}=${process.pid}`,
       "-e",
       "RUSTFS_ACCESS_KEY=devkey",
       "-e",
