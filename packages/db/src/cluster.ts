@@ -17,10 +17,12 @@ function identifier(name: string, what: string): string {
 }
 
 /**
- * Connections one tenant's role may hold across every api and worker process: the pools (2 each), live event streams
- * and the worker's listeners. The cluster's `max_connections` is shared by all tenants.
+ * Connections one tenant's role may hold across every process. Measured (docs/deploy.md#postgres): 3 per api process
+ * (its pool of 2 and the shared listener, however many streams), 2 per worker process, 3 from control (pool and
+ * `pg_dump`). 20 covers 3 api plus 4 workers, or 4 api plus 2; raise it before running more. The cluster's
+ * `max_connections` is shared by all tenants: this keeps one tenant from using it up.
  */
-export const TENANT_ROLE_CONNECTION_LIMIT = 50;
+export const TENANT_ROLE_CONNECTION_LIMIT = 20;
 
 export interface ClusterAdmin {
   databaseExists(name: string): Promise<boolean>;

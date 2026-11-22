@@ -62,6 +62,9 @@ importers:
       '@kerby/control-plane':
         specifier: workspace:*
         version: link:packages/control-plane
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:packages/db
       '@kerby/secrets':
         specifier: workspace:*
         version: link:packages/secrets

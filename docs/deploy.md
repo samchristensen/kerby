@@ -157,9 +157,47 @@ on purpose: a generated value there would be made again on every apply.
 
 ## Postgres
 
-- `max_connections` is 100 (the template's default). Each api or worker process may hold up to 50 tenant pools of 2
-  connections, plus one connection per open event stream. Keep the sum well below the limit, and raise it before the
-  tenant count grows: `ALTER SYSTEM SET max_connections = ...` and a restart, run by you from `railway ssh --service Postgres`.
+- `max_connections` must be 500 (the template starts at 100). Set it once per environment, then restart Postgres (a
+  restart drops every connection for a few seconds; the services reconnect):
+
+  ```sh
+  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -c "alter system set max_connections = 500"'
+  railway restart --service Postgres --yes
+  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -tAc "show max_connections"'   # 500
+  ```
+
+  `ALTER SYSTEM` writes `postgresql.auto.conf` on the volume, so the value survives restarts and redeploys. Neither the
+  template nor `railway postgres` (only `pitr`, `ha`, `pgbouncer`) has a setting for it, and a custom start command
+  (`-c max_connections=...`) would make the database ours to manage instead of Railway's. A new environment
+  (`ENV=pr-123`) gets its own volume: check `show max_connections` there and run the same two commands if it says 100.
+- **Connection budget.** Every process opens at most (upper bounds, from the code's defaults):
+
+  | Process | Connections                         | Terms                                                                                                                                                                                                                             |
+  | ------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | api     | `2 × max(maxPools, D + R) + D + 10` | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10 |
+  | worker  | `2 × max(maxPools, W) + 10 + 1`     | `W` tenants with a turn running here; the control pool; one `LISTEN` on the control database                                                                                                                                      |
+  | control | `2 × maxPools + 10 + 2 + 1`         | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                          |
+
+  The sum over all processes, plus `superuser_reserved_connections` (3) and room for operators' `psql` (say 17), must
+  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 111 + control 113 + 20 = 454
+  of 500. Each extra worker adds 111 and each extra api 210: raise `max_connections` by as much first (and
+  `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api.
+- **Measured** (`make multitenant`, stream saturation, 2026-11-22; two api processes, 200 tenants provisioned, local
+  `max_connections` 500): an open stream costs its tenant 3 connections on that api process (the pool of 2 and the
+  listener) however many streams it has: 46 tenants with 60 streams held 156 connections on one process, 60 tenants
+  with one stream each 181 on the other (the bound above: 190). Peak 421 client connections in all (worker 61, control
+  23). One tenant role peaked at 7 (3 per api process). Postgres used 0.95 to 1.2 GiB with about 420 connections and
+  202 databases.
+- **Caps**, set from those numbers: `MAX_STREAMS_PER_PROCESS` 60 (503 `server_busy` past it) keeps one api process's
+  worst case at 210; `MAX_STREAMS_PER_TENANT` 15 (429 `too_many_streams`), a quarter of that, so one tenant cannot take
+  a whole process (its own streams cost nothing more); `TENANT_ROLE_CONNECTION_LIMIT` 20 per tenant role, from 3 per api
+  process, 2 per worker and 3 from control (pool and `pg_dump`): enough for 3 api and 4 workers, or 4 api and 2. A role
+  made before a change gets the new limit at the next `POST /v1/operator/migrate`.
+- **PgBouncer** (`railway postgres pgbouncer`) is not used. Transaction pooling breaks `LISTEN`, which event streams and
+  the worker's scheduler rely on, and Railway repoints every service referencing the database's variables to the
+  pooler; session pooling saves nothing, since Kerby's connections are long-lived pools already; and PgBouncer pools per
+  user and database, which is per tenant here. Revisit when the budget outgrows one Postgres's memory: transaction
+  pooling for tenant pools only, with `LISTEN` and control on `DATABASE_UNPOOLED_URL`.
 - About 1 GiB of memory per 200 tenant databases was measured locally.
 - Backups: a daily backup of the Postgres volume, kept 6 days (`railway postgres pitr schedule list --service Postgres`;
   set with `railway postgres pitr schedule set --daily`). Restore: `railway postgres pitr backup list`, then

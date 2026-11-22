@@ -22,6 +22,7 @@ x-tenant-env: &tenant-env
 services:
   postgres:
     image: postgres:18-alpine
+    # The same limit as hosted Postgres (docs/deploy.md#postgres), so `make multitenant` measures against it.
     command: ["-c", "max_connections=500"]
     environment:
       POSTGRES_PASSWORD: dev
