@@ -34,7 +34,7 @@ Decisions: ADRs 0001-0004.
 - [x] `blobs`: `put`/`get` taking a tenant context, writing the tenant's index
 - [x] `contracts`: HTTP schemas; the persisted event envelope
 - [x] `secrets`: sealed secrets (X25519 + HKDF + AES-256-GCM, a data key per secret, owner bound as authenticated data); public key on the api, private key on the worker (ADR 0008)
-- [ ] `egress`: outbound guard for tenant-supplied URLs (private ranges, DNS rebinding, redirects, size and time limits)
+- [x] `egress`: outbound guard for tenant-supplied URLs (private ranges, DNS rebinding, redirects, size and time limits; ADR 0010, plan 0003 G1)
 - [x] `runtime-pi-durable`: adapter (seed via `appendEntry`, sentinel continue plus `beforeRequest` filter, drop `system` entries, resolve unanswered tool calls first, `native` passthrough, tool `callId` as the executeTool key); passes the conformance cases it can
 
 ### M3 Local stack

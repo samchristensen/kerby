@@ -31,4 +31,3 @@ One line each: what, why it matters, what fixes it. Remove the line in the commi
 - No per-tenant request rate limit and no storage quota: a tenant can store up to 64 MiB in each of unboundedly many conversations. Meter and cap storage with usage in M8.
 - A conversation is capped at 2000 messages and 64 MiB so a read or a turn cannot exhaust memory, but both still load the whole history. Page reads and give the worker a history budget (with the N-requests line above).
 - Deleting a tenant keeps its export files on the control volume (they may be the hand-over copy). Decide a retention period and delete expired exports; see the export-bucket line above.
-- Not built: `egress` (plan 0001, M2). Nothing calls a tenant-supplied URL yet (model providers are a fixed list, tools are M7); build it before the first tool or custom provider base URL.

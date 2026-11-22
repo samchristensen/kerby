@@ -173,7 +173,7 @@ flowchart LR
 
 ## G. Before plan 0001 milestones
 
-- [ ] **G1 Egress guard** ("Not built: `egress`"; plan 0001 M2). L. Before the first tool (M7) or custom base URL.
+- [x] **G1 Egress guard** ("Not built: `egress`"; plan 0001 M2). L. Before the first tool (M7) or custom base URL.
   Fix: `packages/egress` on Node built-ins: resolve all addresses and refuse private, loopback, link-local (metadata),
   CGNAT, unique-local and mapped IPv6 ranges with `net.BlockList`; connect to the address that was checked (no second
   lookup, so no DNS rebinding); follow redirects by hand, re-checking each hop, with a hop limit; time and size limits
@@ -223,3 +223,7 @@ No work until the trigger; the debt line stays and names it.
 - 2026-11-22 Plan written. Every tech-debt.md line checked against the code. Corrections made there: `reassignOwned` is
   needed on Railway too; the tenant template database also admits `public`. New lines: no copy of the bucket, no
   per-process connection ceiling (one `LISTEN` connection per event stream).
+- 2026-11-22 G1: `packages/egress` (ADR 0010): `createEgressFetch`, a `fetch` that reaches only public addresses (every
+  resolved address checked with `net.BlockList`, mapped/NAT64 IPv6 included), connects to the checked address through a
+  pinned `lookup`, re-checks every redirect hop (limit 5, no https→http, credentials dropped across origins), one deadline
+  and request/response byte limits; any port. Not wired: no caller until plan 0001 M7. PR #2.
