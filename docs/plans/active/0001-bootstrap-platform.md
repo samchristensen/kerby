@@ -16,7 +16,7 @@ Decisions: ADRs 0001-0004.
 - [x] Repo scaffold, `make check`, `make test`, git hooks
 - [x] `scripts/check-architecture.ts`: workspaces, layers, providers, planes and tenancy, pinned deps (tested)
 - [x] `packages/agent`: the `AgentRuntime` / `AgentEvent` port
-- [ ] CI runs `make check` and `make test`
+- [x] CI runs `make check` and `make test` (GitHub Actions, `.github/workflows/ci.yml`; `main` requires both; ADR 0011)
 
 ### M1 Spikes: each ends with a yes/no and a log line
 

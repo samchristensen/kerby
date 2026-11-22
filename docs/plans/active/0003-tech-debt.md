@@ -32,14 +32,14 @@ flowchart LR
 
 ## A. Do not lose data
 
-- [ ] **A1 Postgres backups** ("Hosting (ADR 0007): no backups"). S, needs Railway access.
+- [x] **A1 Postgres backups** ("Hosting (ADR 0007): no backups"). S, needs Railway access.
   Now: `.railway/railway.ts` declares `postgres-volume` with usage alerts and no backups. The pinned `railway` SDK types
   accept `backupSchedules: ("DAILY" | "WEEKLY" | "MONTHLY")[]` on a volume mount.
   Fix: declare `DAILY` and `WEEKLY`; `make railway-plan` shows it; after `make railway-setup` a second plan is clean. If
   apply does not keep it, set it in the dashboard and name it under "What is NOT here" in the file's header.
   Proof: restore the newest backup outside production and read a known conversation through that environment's api.
   Write the procedure and the measured restore time in docs/deploy.md; drop "no backup" from deploy.md and ADR 0007.
-- [ ] **A2 Secrets private key copy** ("Secrets private key: lives only as a Railway variable"). S, **human**.
+- [x] **A2 Secrets private key copy** ("Secrets private key: lives only as a Railway variable"). S, **human**.
   Copy `SECRETS_PRIVATE_KEYS` from `worker` to a store outside Railway. Prove the copy: `publicKeyOf(copy)`
   (`packages/secrets`) equals `api`'s `SECRETS_PUBLIC_KEY`. Write where it lives (never the value) and the check in
   docs/deploy.md. Do it with A1: a restored database without this key restores no model key.
@@ -90,7 +90,7 @@ flowchart LR
 
 ## C. Ship through a gate
 
-- [ ] **C1 CI** ("Ephemeral environments are created and deleted by whoever runs", first half; plan 0001 M0). M,
+- [x] **C1 CI** ("Ephemeral environments are created and deleted by whoever runs", first half; plan 0001 M0). M,
   **human**: create the remote and its secrets.
   Fix: a workflow running `make setup`, `make check`, `make test` on every push and pull request (hosted runners have
   Docker, which `scripts/test-containers.ts` needs); `make e2e` and `make multitenant` nightly. Actions pinned by commit
@@ -187,12 +187,12 @@ flowchart LR
 
 ## H. Decisions
 
-- [ ] **H1 High availability** ("Hosting: one Postgres instance on one volume"). M: an ADR, then its work.
+- [x] **H1 High availability** ("Hosting: one Postgres instance on one volume"). M: an ADR, then its work.
   Options: (a) one instance plus A1 and A3, RTO measured in A1; (b) WAL archiving to a bucket for point-in-time recovery
   (a custom Postgres image and a new tool); (c) a Railway replica, if its Postgres offers one (the SDK types have
   `clusterRole` and `replicaConfig`, unverified for Postgres); (d) managed Postgres elsewhere, an ADR 0007 change that
   likely brings a non-superuser admin. Default: (a) until tenants pay.
-- [ ] **H2 Sleep** ("Hosting: `api` and `worker` never sleep"). S. Cost only: last.
+- [x] **H2 Sleep** ("Hosting: `api` and `worker` never sleep"). S. Cost only: last.
   Turn `sleepApplication` on for `api` in a scratch environment; measure whether it sleeps with pools and streams, the
   cold start, and an open stream across the threshold. Enable it in the IaC or record the result in ADR 0007. The worker
   stays awake: its scheduler sweeps every 10 s.
@@ -227,3 +227,21 @@ No work until the trigger; the debt line stays and names it.
   resolved address checked with `net.BlockList`, mapped/NAT64 IPv6 included), connects to the checked address through a
   pinned `lookup`, re-checks every redirect hop (limit 5, no https→http, credentials dropped across origins), one deadline
   and request/response byte limits; any port. Not wired: no caller until plan 0001 M7. PR #2.
+- 2026-11-22 Remote `samchristensen/kerby` (private); CI `check` and `test` on every PR and push, `main` protected. The first
+  CI run caught a real bug: `serve` lost a stream's abort when the Request was garbage collected (undici links its signal
+  through a WeakRef), so SSE streams outlived their clients; fixed, the test forces a GC (PR #1). Parallel `make test`
+  runs no longer remove each other's containers (owner pid label, regression test).
+- 2026-11-22 C1/ADR 0011 (PR #3): CI builds the three images and pushes `ghcr.io/samchristensen/kerby-<svc>:sha-<commit>`
+  on main; Railway services run `kerby-<svc>:<environment>` (IaC `image()`, Railway passes the environment name); release
+  on merge moves the tag (`imagetools create`) and `railway redeploy --from-source`, control first; IaC plan on PRs.
+  `uptime` (GET /healthz every 15 min) and `nightly` (`make e2e`, `make multitenant`) workflows. Preview environments stay
+  manual: a project token cannot create environments.
+- 2026-11-22 A1: daily volume backups on production (`railway postgres pitr schedule set --daily`, kept 6 days; the IaC
+  export does not show volume attachments and declaring one plans a re-attach, so the schedule lives outside the file).
+  Restore drill in a copy environment `drill`: marker row, on-demand backup, second row, restore: back with only the first
+  row after 77 s; environment deleted. A2: `SECRETS_PRIVATE_KEYS` copied to the operator's macOS login keychain; the
+  copy equals the live value and its public key equals `api`'s `SECRETS_PUBLIC_KEY`.
+- 2026-11-22 H1/H2 (ADR 0012): RPO 24 h (nightly), one instance until a tenant pays (then PITR) or an SLA is sold (then
+  `railway postgres ha convert`); the admin stays a superuser, so the non-superuser provisioning path goes; nothing
+  sleeps. C6: the orphan bucket `modular-safe-wx5G` has no instance in any environment; `railway bucket delete` refuses
+  it and an environment patch marking it deleted did not remove it: delete it in the dashboard.
