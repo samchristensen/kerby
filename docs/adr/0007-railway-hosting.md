@@ -16,9 +16,10 @@ already do.
 - **Railway**, one project `kerby`, one standing environment `production`. Any other environment is a name
   (`make railway-setup ENV=pr-123`) and is removed with `make env-down ENV=pr-123`.
 - **Four services per environment.** `Postgres` (Railway's PostgreSQL template: a `postgres-ssl` image on a volume),
-  and `control`, `api`, `worker`, each built by Railway from its own `services/<name>/Dockerfile` (the last stage, `prod`)
-  and uploaded with `railway up`; there is no Git connection, so a deploy is what is on disk. `make deploy` deploys
-  control first (it creates the limited `kerby_app` role that api and worker connect as), then the other two.
+  and `control`, `api`, `worker`, each running the image CI builds from its own `services/<name>/Dockerfile` (the last
+  stage, `prod`) and pushes to GHCR ([ADR 0011](0011-images-from-ghcr.md), which replaced Railway building what `railway up`
+  uploaded). `make deploy` deploys control first (it creates the limited `kerby_app` role that api and worker connect as),
+  then the other two.
 - **One bucket per environment**, a Railway bucket (S3-compatible, `@kerby/blobs` unchanged). `S3_*` on each service are
   references to the bucket's variables. Keys stay under `t/<tenantId>/`.
 - **Networking.** Only `api` has a public domain. `control` (the operator API) and `worker` have none: operators reach
@@ -32,13 +33,13 @@ already do.
   The secrets key pair ([ADR 0008](0008-byok-sealed-secrets.md)) is made once the same way: the private key on `worker`, the public
   key on `api`. Kerby holds no model provider keys: tenants bring theirs.
 - **Infrastructure is Railway Infrastructure as Code** ([`.railway/railway.ts`](../../.railway/railway.ts), the `railway` SDK pinned
-  in the catalog): the database, its volume, the bucket, the three services (Dockerfile builds, health checks) and every
+  in the catalog): the database, its volume, the bucket, the three services (image sources, health checks) and every
   variable, with references between them. `make railway-plan` previews and `make railway-setup` applies it (the Railway CLI
   compares the file with the environment and shows the diff first; deletions need a person). One file describes every environment.
 - **What the file leaves to `scripts/railway.ts`.** Secrets: a generated variable (`${{secret(n)}}`) is made again on every
   apply (verified), which would rotate `TENANT_DB_SECRET`, so they are `preserve()` and the script creates each once and
-  never replaces it. The api's generated domain (the IaC does not manage generated domains). Code: services have no
-  `source`; `make deploy` uploads the checkout. A new environment: a copy of production (`environment new --duplicate`),
+  never replaces it. The api's generated domain (the IaC does not manage generated domains). Code: each service's source is
+  the GHCR image tagged with the environment's name, which `make deploy` moves (ADR 0011). A new environment: a copy of production (`environment new --duplicate`),
   because an empty environment filled in by the file never gets its bucket deployed (verified); the script then replaces the
   secrets the copy inherited.
 - Rejected: Terraform (a third-party Railway provider plus a state backend); an imperative script alone (what this replaced:

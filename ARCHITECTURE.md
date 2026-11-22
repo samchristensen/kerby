@@ -166,8 +166,9 @@ then provisions a `default` tenant through the operator API and prints its key. 
 ## Hosting
 
 Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket, and `control`, `api` and `worker` built from the Dockerfiles Compose
-runs: [ADR 0007](docs/adr/0007-railway-hosting.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
+ephemeral copy), and per environment a `Postgres` service, a bucket, and `control`, `api` and `worker` running the images CI builds from
+the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
+[ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
 Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys. The secrets private key is
 a variable on `worker` only; the api gets the public half.
 
