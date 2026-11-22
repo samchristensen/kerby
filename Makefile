@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
+.PHONY: help setup check typecheck lint format architecture docs test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -12,7 +12,7 @@ setup: ## Install dependencies and git hooks
 	pnpm install --frozen-lockfile
 	git config core.hooksPath .githooks
 
-check: typecheck lint architecture ## The gate: everything CI requires except tests. Run before saying done.
+check: typecheck lint architecture docs ## The gate: everything CI requires except tests. Run before saying done.
 
 typecheck: ## tsc, strict
 	pnpm exec tsc
@@ -25,6 +25,9 @@ format: ## Biome auto-fix + format
 
 architecture: ## Boundaries, layers, names, pinned deps, tenant-scoped tables (see ARCHITECTURE.md)
 	node scripts/check-architecture.ts
+
+docs: ## Every tracked .md: relative links resolve, named make targets and architecture rules exist
+	node scripts/check-docs.ts
 
 test: ## Run all tests
 	pnpm exec vitest run

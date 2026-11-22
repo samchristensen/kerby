@@ -98,9 +98,9 @@ flowchart LR
 - [ ] **C2 knip** ("`knip` (dead code, unused dependencies) is not wired"). S. Overdue: three services exist.
   Risk: the catalog pins TypeScript 7.0.2, which has no JavaScript API (`createSourceFile` is undefined); confirm the
   chosen knip version runs without it before adopting. Fix: catalog pin and ADR 0005 line, a config naming the entries
-  (`services/*/src/index.ts`, package `exports`, `testing.ts`, tests, `scripts/*.ts`, `.railway/railway.ts`), `make knip`
-  inside `make check`; delete what it finds. If no knip version runs, close the line with that reason.
-- [ ] **C3 Doc checks** ("No automated doc-freshness pass"). M.
+  (`services/*/src/index.ts`, package `exports`, `testing.ts`, tests, `scripts/*.ts`, `.railway/railway.ts`), a `knip`
+  Makefile target inside `make check`; delete what it finds. If no knip version runs, close the line with that reason.
+- [x] **C3 Doc checks** ("No automated doc-freshness pass"). M.
   Fix: `scripts/check-docs.ts` in `make check`: relative links in every `.md` resolve; every `make <target>` the docs name
   exists in the Makefile; every rule a doc calls enforced exists in `check-architecture.ts`. The semantic pass (ADR
   decisions and AGENTS.md invariants against code) runs at each milestone close, and on a CI schedule once C1 exists.
@@ -263,3 +263,6 @@ No work until the trigger; the debt line stays and names it.
   with `Retry-After`), per-address failed-auth limit (30/min, left-most `X-Forwarded-For` with `TRUST_PROXY` on
   Railway), storage quota (1 GiB, 413). No edge proxy yet (owner); `uptime` is the external check. New debts: usage
   metering of stored bytes, a quota race leaving an object, no endpoint to change limits, no canary read.
+- 2026-11-22 C3 (PR #10): `make docs` (scripts/check-docs.ts) in `make check`: relative links in tracked .md resolve,
+  named make targets and architecture rule ids exist (`RULES` exported from check-architecture.ts); fixed the one
+  finding (C2 named a `knip` target that does not exist yet). The semantic pass stays at milestone close.
