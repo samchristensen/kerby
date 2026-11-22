@@ -164,6 +164,12 @@ then provisions a `default` tenant through the operator API and prints its key. 
   (`AUTH_CACHE_SECONDS`, 3 s locally, 30 s by default), then a load run (`KERBY_LOAD_TENANTS`, default 200).
 - `make e2e` (scripts/e2e.ts) is the proof on the real stack: two workers, an SSE stream, `docker kill` of the worker
   holding a turn mid-flight, then checks that the turn finished elsewhere, the tool ran once and every message exists once.
+- `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e` and
+  `make multitenant` are the real-stack runs. There is no tracing: logs are the record until a profile needs more.
+- Every process writes JSON lines (`@kerby/observability`: `at`, `level`, `msg`, `tenantId`, scalar fields, never
+  content). `make logs-query` filters them: `TENANT=<id>`, `LEVEL=warn` (that level and worse), `MSG=<substring>`,
+  `SERVICE=api`, `SINCE=30m`/`UNTIL=` (a duration back from now or ISO 8601); it reads this stack's `docker compose logs`
+  (honoring `KERBY_PROJECT`), or Railway's with `ENV=<environment>`.
 
 ## Hosting
 

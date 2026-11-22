@@ -133,7 +133,11 @@ real figure rather than an estimate here.
 
 `railway logs --service <name>` (add `--lines N`), `railway metrics --service <name> --since 1h`. Logs are JSON with
 `tenantId` and never message content: a `request` line per API request, `turn completed`, `turn failed for good`.
-There are no alarms yet (tech debt).
+`make logs-query ENV=production` reads them and keeps the lines that match `TENANT=<id>`, `LEVEL=warn` (that level and
+worse), `MSG=<substring>`, `SERVICE=<control|api|worker>`, `SINCE=`/`UNTIL=` (`30m`, `2h`, `1d` back from now, or ISO
+8601; Railway's default here is the last hour), one JSON line each, oldest first. Run it from a checkout linked with
+`railway link`; Railway serves the current deployment's logs this way, older ones are in the dashboard. Without `ENV`
+it reads the local stack. There are no alarms yet (tech debt).
 
 ## Do not do
 
