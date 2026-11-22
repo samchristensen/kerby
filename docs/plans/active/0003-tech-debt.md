@@ -124,7 +124,7 @@ flowchart LR
   plan 0001 and tick its M3 item). No traces until a profile needs them.
   Fix: `scripts/logs.ts` (`make logs-query`) reads JSON lines from `docker compose logs`, or from `railway logs` for
   `ENV=<name>`, and filters by `tenantId`, `level`, `msg` and time. Check the Railway CLI's JSON output first.
-- [ ] **D2 Alerts** ("Hosting: no alarms, dashboard or error alerting"). M, **human**: the destination.
+- [x] **D2 Alerts** ("Hosting: no alarms, dashboard or error alerting"). M, **human**: the destination.
   Fix: Railway notifications for a failed deploy and a crashed service (dashboard; the IaC types have no notification
   setting). In `packages/observability`, `alert(kind, fields)` logs and posts to `ALERT_WEBHOOK_URL` (required outside
   development), debounced per kind, for `turn failed for good`, `lease lost`, a failed provisioning and a failed migration
@@ -302,3 +302,10 @@ No work until the trigger; the debt line stays and names it.
   apply the IaC, set registry credentials and redeploy; it cannot create an environment, list projects or answer
   account queries. So agents and CI get project tokens per environment; creating environments stays with the login
   (ADR 0011). The residual risk is a tech-debt line.
+- 2026-11-22 D2 wired: the owner made a Slack app with an incoming webhook. `ALERT_WEBHOOK_URL` set on
+  control, api and worker (redeployed in order) and as the repository secret the `uptime` workflow posts to; a Railway
+  project webhook created through `notificationRuleCreate` (the CLI has no webhook command) for `Deployment.failed`,
+  `crashed`, `oom_killed`, preview environments included. Proof: a direct post reached the channel, and `alert()` run
+  inside the production control container with its own configuration posted "alert channel check" there. Not done:
+  Monitors (dashboard only) and a live Railway event through the rule (`webhookTest` is not authorized for the login):
+  a tech-debt line.
