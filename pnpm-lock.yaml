@@ -154,6 +154,9 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../durable
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
 
   packages/db:
     dependencies:

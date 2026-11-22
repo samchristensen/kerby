@@ -54,7 +54,7 @@ Each external system lives behind exactly one package; nothing else imports the 
 | ---------------------------- | -------------------- | --------------------------------------------------------------------------- |
 | Postgres (`pg`)              | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes) |
 | Absurd (`absurd-sdk`)        | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
-| S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put` / `get` taking a tenant context; raw-key `Bucket` for control only    |
+| S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put`/`get`/`delete` by tenant context; raw-key `Bucket` for control only   |
 | Pi Durable and its libraries | `runtime-pi-durable` | an `AgentRuntime`                                                           |
 | Tenant-supplied URLs         | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 
@@ -130,7 +130,10 @@ flowchart LR
 1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` (a periodic sweep catches missed ones) and
    claims from that tenant's database only while the tenant is under its concurrency limit, counted across every
    worker: the claim runs in a tenant-database transaction holding an advisory lock, counts the turns running there
-   under a live lease and claims at most the difference. A worker already at the limit by itself does not ask.
+   under a live lease and claims at most the difference. A worker already at the limit by itself does not ask. A worker
+   also caps its running turns across all tenants (`MAX_RUNNING_TURNS`, default 50), which bounds its tenant
+   connection pools: it reserves slots before a claim and never claims more than it can run, and a tenant that asks
+   while the worker is full waits its turn (longest-waiting first), so a busy tenant cannot hold the slots against others.
 2. **Rehydrate.** The task reads the conversation's messages from the tenant's index (bodies from S3) and starts a
    fresh in-memory harness with them as `AgentRun.history`. Workers hold no state, so any worker takes any turn. A tool
    call in the history without a persisted result is resolved first through `executeTool` (a cached step), never left to the harness.

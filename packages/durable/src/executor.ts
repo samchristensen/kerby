@@ -45,9 +45,10 @@ export type ExecutorOptions = {
 export interface TenantExecutor {
   /**
    * Claim runnable tasks while fewer than `limit` of this tenant's turns run, counted across every worker on the
-   * tenant's database. Each claimed task must be passed to `execute`.
+   * tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that is not
+   * run sits until its lease lapses). Each claimed task must be passed to `execute`.
    */
-  claim(limit: number): Promise<ClaimedRun[]>;
+  claim(limit: number, max?: number): Promise<ClaimedRun[]>;
   /** Run a claimed task to completion. Never throws: failures are recorded on the task and retried by Absurd. */
   execute(task: ClaimedRun): Promise<void>;
 }
@@ -115,8 +116,8 @@ export function createTenantExecutor(
   }
 
   return {
-    async claim(limit) {
-      if (limit <= 0) return [];
+    async claim(limit, max = Number.POSITIVE_INFINITY) {
+      if (limit <= 0 || max <= 0) return [];
       // Count and claim in one transaction holding a per-database lock: every worker's claim for this tenant waits
       // its turn and sees the runs the previous one committed. A lapsed lease no longer counts; the claim below
       // fails that run and may hand its task to this worker.
@@ -133,7 +134,7 @@ export function createTenantExecutor(
           `select count(*)::int as running from absurd.r_${QUEUE}
             where state = 'running' and claim_expires_at > clock_timestamp()`,
         );
-        const free = limit - (rows[0]?.running ?? 0);
+        const free = Math.min(limit - (rows[0]?.running ?? 0), max);
         const tasks =
           free > 0
             ? await absurd

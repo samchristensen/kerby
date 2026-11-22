@@ -56,6 +56,12 @@ export const workerConfigSchema = z
       .default(8 * 1024 * 1024),
     /** Turns one tenant may run at once on this worker when its limits do not say. */
     defaultMaxConcurrentTurns: z.coerce.number().int().positive().default(4),
+    /**
+     * Turns this worker runs at once across all tenants. Each running turn holds its tenant's pool of 2 connections,
+     * so this bounds the worker's tenant connections to 2 × this (docs/deploy.md#postgres). Default 50, the pool
+     * count the budget is sized for. Past it a worker claims nothing more and waiting tenants are served in turn.
+     */
+    maxRunningTurns: z.coerce.number().int().positive().default(50),
   })
   .refine((config) => config.kerbyFakeModel || config.secretsPrivateKeys !== undefined, {
     message:

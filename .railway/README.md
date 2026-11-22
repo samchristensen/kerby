@@ -119,4 +119,5 @@ command reports the API error without falling back to a configuration apply.
 - Use `replicas` for scaling; advanced placement can still specify region names.
 - Use `group("Name", [resources])` to keep large projects organized on the Railway canvas.
 - Secrets imported from Railway are rendered as `preserve()` so existing values are retained without writing secret values to source. Use `railway config pull --omit-preserved-variables` for a smaller import. `railway config pull --include-variables` decrypts and inlines non-sealed values (including secrets that were never sealed).
+- An environment filled in from `.railway/railway.ts` alone never gets its bucket deployed (verified, ADR 0007), so new environments are copies of production (`scripts/railway.ts`). Retry an empty environment (`railway config apply` into a fresh one, then check `railway status` lists every bucket) whenever the `railway` pin in the catalog is bumped; if it works, drop the copy step from `ensureEnvironment` and ADR 0007's note.
 - `railway config migrate` finds every `railway.json` / `railway.toml` in the repository and writes them into this one file.

@@ -11,6 +11,7 @@
     "@kerby/blobs": "workspace:*",
     "@kerby/contracts": "workspace:*",
     "@kerby/db": "workspace:*",
-    "@kerby/durable": "workspace:*"
+    "@kerby/durable": "workspace:*",
+    "@kerby/observability": "workspace:*"
   }
 }

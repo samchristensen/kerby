@@ -1,10 +1,11 @@
 // Object storage behind one door (ADR 0002). Tenant code goes through `Blobs`, which takes a tenant context on every
 // call: the object key is `t/<tenantId>/<key>`, and the tenant's own `blobs` table is the index. The object is written
 // first, then the index row, so a crash between them leaves an orphan object (swept in M8), never an index row without
-// bytes. `Bucket` (./bucket.ts) is the operator's raw-key access, for `control` only.
+// bytes; `delete` goes the other way (row first, then object) for the same reason. `Bucket` (./bucket.ts) is the
+// operator's raw-key access, for `control` only.
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import type { TenantContext } from "@kerby/db";
 import { type BucketConfig, createBucket, createS3Client, tenantPrefix } from "./bucket.ts";
 
@@ -55,6 +56,12 @@ export interface Blobs {
   put(ctx: TenantContext, blob: PutBlob): Promise<BlobRef>;
   /** Looks the id up in the context's own index first; an id from another tenant is simply not found. */
   get(ctx: TenantContext, blobId: string): Promise<BlobObject>;
+  /**
+   * Removes the blob's index row and then its object, so it no longer counts toward the tenant's stored bytes. An id
+   * from another tenant is simply not found. A key is one row (`put` on the same key overwrites it), so delete only
+   * what this caller wrote under a key nobody else can write; a row that other tables reference cannot be deleted.
+   */
+  delete(ctx: TenantContext, blobId: string): Promise<void>;
   /** Create the bucket if it does not exist (local stacks and tests; production buckets are provisioned). */
   ensureBucket(): Promise<void>;
 }
@@ -102,6 +109,18 @@ export function createBlobs(config: BucketConfig): Blobs {
         mediaType: row.media_type,
         size: Number(row.size),
       };
+    },
+
+    async delete(ctx, blobId) {
+      // The tenant's prefix is part of the delete: a context pairing one tenant's id with another's database must not
+      // remove across, and a row is never removed before the check.
+      const { rows } = await ctx.db.query<{ object_key: string }>(
+        "delete from blobs where id::text = $1 and starts_with(object_key, $2) returning object_key",
+        [blobId, tenantPrefix(ctx.tenantId)],
+      );
+      const row = rows[0];
+      if (!row) throw new BlobNotFoundError(`blob ${blobId} not found`);
+      await s3.send(new DeleteObjectCommand({ Bucket, Key: row.object_key }));
     },
 
     ensureBucket: () => createBucket(config).ensureBucket(),

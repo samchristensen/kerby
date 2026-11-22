@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@kerby/agent";
-import { tenantPrefix } from "@kerby/blobs";
+import { type Blobs, tenantPrefix } from "@kerby/blobs";
 import { createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import { createTenantExecutor, type RunContext } from "@kerby/durable";
 import { describe, expect, it } from "vitest";
@@ -58,6 +58,23 @@ async function conversationWithTurn(tenant: TestTenant) {
   return { blobs, conversation, posted };
 }
 
+/** What the tenant holds: blob index rows, their bytes, messages, and objects in the bucket. */
+async function stored(tenant: TestTenant) {
+  const { rows } = await tenant.db.query<{ blobs: number; bytes: string; messages: number }>(
+    `select (select count(*) from blobs)::int as blobs,
+            (select coalesce(sum(size), 0) from blobs)::text as bytes,
+            (select count(*) from messages)::int as messages`,
+  );
+  const bucket = await createTestBucket();
+  const objects = (await Array.fromAsync(bucket.list(tenantPrefix(tenant.tenantId)))).length;
+  return {
+    blobs: rows[0]?.blobs,
+    bytes: Number(rows[0]?.bytes),
+    messages: rows[0]?.messages,
+    objects,
+  };
+}
+
 describe("postUserMessage", () => {
   it("stores nothing when it refuses a post: a busy conversation, or a full one", async () => {
     await using tenant = await createTestTenant();
@@ -109,6 +126,50 @@ describe("postUserMessage", () => {
     expect((await tenant.db.query("select 1 from absurd.t_turns")).rowCount).toBe(1);
     await postUserMessage(tenant, blobs, other.id, [...text("hello")], { storageBytes: 2 * size });
     expect(await objects()).toBe(2);
+  });
+
+  it("leaves neither row nor object when the quota re-check refuses a post that raced another", async () => {
+    await using tenant = await createTestTenant();
+    const real = await createTestBlobs();
+    const first = await insertConversation(tenant.db, { model: "m", system: "" });
+    const second = await insertConversation(tenant.db, { model: "m", system: "" });
+    const size = new TextEncoder().encode(
+      JSON.stringify({ role: "user", content: [...text("hello")] }),
+    ).byteLength;
+    // The quota fits one message. Both posts pass the check before storing anything; the gate then holds each one
+    // after its body is indexed until the other's is, so each transaction sees both rows and the re-check refuses.
+    let arrived = 0;
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+    const racing: Blobs = {
+      ...real,
+      put: async (ctx, blob) => {
+        const ref = await real.put(ctx, blob);
+        if (++arrived === 2) release();
+        await gate;
+        return ref;
+      },
+    };
+    const results = await Promise.allSettled(
+      [first, second].map((conversation) =>
+        postUserMessage(tenant, racing, conversation.id, [...text("hello")], {
+          storageBytes: size,
+        }),
+      ),
+    );
+    const won = results.filter((r) => r.status === "fulfilled").length;
+    expect(won).toBeLessThanOrEqual(1);
+    expect(
+      results
+        .filter((r) => r.status === "rejected")
+        .every((r) => r.reason instanceof StorageQuotaExceededError),
+    ).toBe(true);
+    // The refused posts count toward nothing: what remains is exactly what was admitted.
+    expect(await stored(tenant)).toEqual({
+      blobs: won,
+      bytes: won * size,
+      messages: won,
+      objects: won,
+    });
   });
 
   it("appends the message and enqueues one turn, atomically visible", async () => {
@@ -176,8 +237,9 @@ describe("postUserMessage", () => {
         .filter((r) => r.status === "rejected")
         .every((r) => r.reason instanceof ConversationBusyError),
     ).toBe(true);
-    expect((await tenant.db.query("select 1 from messages")).rowCount).toBe(1);
     expect((await tenant.db.query("select 1 from absurd.t_turns")).rowCount).toBe(1);
+    // The four refused posts took their bodies back out of the index and the bucket.
+    expect(await stored(tenant)).toMatchObject({ blobs: 1, messages: 1, objects: 1 });
   });
 
   it("accepts the next message once the turn is over", async () => {

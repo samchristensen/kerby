@@ -20,6 +20,8 @@ export type WorkerDeps = {
     heartbeatEveryMs?: number | undefined;
     /** Used for a tenant whose limits do not set `maxConcurrentTurns`. */
     defaultMaxConcurrentTurns: number;
+    /** Turns this worker runs at once across every tenant (`MAX_RUNNING_TURNS`); bounds its tenant pools. */
+    maxRunningTurns: number;
     sweepIntervalMs: number;
     enableEchoTool: boolean;
     /** Bytes of message bodies a turn starts with; older whole turns past it are left out (`readHistory`). */

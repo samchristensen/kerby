@@ -84,6 +84,21 @@ const ExportResponseSchema = z.object({
 });
 export type ExportResponse = z.infer<typeof ExportResponseSchema>;
 
+/** Reissue the URLs of an export that exists: the tenant's newest, or the one stamped `stamp` (as in its file names). */
+export const ReissueExportRequestSchema = z.object({
+  stamp: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/)
+    .optional(),
+});
+
+/** Without `objectCount`: counting means downloading the listing, which can be large; `objectsUrl` has it. */
+const ReissueExportResponseSchema = ExportResponseSchema.omit({ objectCount: true }).extend({
+  /** When the export was made. */
+  exportedAt: z.iso.datetime(),
+});
+export type ReissueExportResponse = z.infer<typeof ReissueExportResponseSchema>;
+
 const BackupFailureSchema = z.object({ tenantId: z.uuid(), error: z.string() });
 
 /** One run of the bucket backup: changed objects of every live tenant copied, deleted tenants' copies removed. */

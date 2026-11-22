@@ -80,6 +80,7 @@ async function harness(options: Options = {}) {
       workerId: "test-worker",
       claimTimeoutSeconds: 30,
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
+      maxRunningTurns: 50,
       sweepIntervalMs: 200,
       enableEchoTool: options.echo ?? true,
       historyBudgetBytes: 8 * 1024 * 1024,
@@ -687,6 +688,48 @@ describe("scheduling", () => {
     );
     expect(rows).toEqual([{ state: "completed", runs: 5 }]);
   });
+
+  it("never runs more turns than its cap across tenants, and every turn finishes", async () => {
+    const h = await harness({ settings: { maxRunningTurns: 3 } });
+    const tenants = await Promise.all(["a", "b", "c", "d", "e", "f", "g"].map((n) => h.tenant(n)));
+    const conversations = await Promise.all(tenants.map((t) => h.conversation(t)));
+
+    let peak = 0;
+    const sampler = setInterval(() => {
+      const total = tenants.reduce((sum, t) => sum + h.scheduler.inFlight(t.id), 0);
+      peak = Math.max(peak, total);
+    }, 10);
+    cleanups.push(() => clearInterval(sampler));
+
+    for (const [i, t] of tenants.entries())
+      await h.post(t, conversations[i]?.id ?? "", "[slow:500] work");
+    for (const [i, t] of tenants.entries()) await h.settled(t, conversations[i]?.id ?? "", 2);
+    expect(peak).toBe(3);
+  });
+
+  it("serves a tenant that arrives when the worker is full before the tenant that just finished", async () => {
+    const h = await harness({ settings: { maxRunningTurns: 2 } });
+    const noisy = await h.tenant("noisy", { maxConcurrentTurns: 5 });
+    const quiet = await h.tenant("quiet");
+    const noisyConversations = await Promise.all([1, 2, 3, 4, 5].map(() => h.conversation(noisy)));
+    for (const c of noisyConversations) await h.post(noisy, c.id, "[slow:700] work");
+    await eventually(
+      "the noisy tenant to fill the worker",
+      async () => h.scheduler.inFlight(noisy.id) === 2,
+    );
+
+    const calm = await h.conversation(quiet);
+    await h.post(quiet, calm.id, "hi");
+    await h.settled(quiet, calm.id, 2);
+
+    // The quiet tenant got the first slot that freed, while the noisy tenant still had turns queued.
+    const unfinished = await Promise.all(
+      noisyConversations.map(async (c) => (await h.messages(noisy, c.id)).length < 2),
+    );
+    expect(unfinished.filter(Boolean).length).toBeGreaterThanOrEqual(2);
+
+    for (const c of noisyConversations) await h.settled(noisy, c.id, 2);
+  });
 });
 
 describe("worker config", () => {
@@ -718,5 +761,15 @@ describe("worker config", () => {
     const refused = workerConfigSchema.safeParse(base);
     expect(refused.success).toBe(false);
     expect(refused.error?.issues[0]?.path).toEqual(["secretsPrivateKeys"]);
+  });
+
+  it("refuses a worker-wide turn cap that is not a positive integer", () => {
+    const refused = workerConfigSchema.safeParse({
+      ...base,
+      secretsPrivateKeys: "a2V5",
+      maxRunningTurns: "0",
+    });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]?.path).toEqual(["maxRunningTurns"]);
   });
 });
