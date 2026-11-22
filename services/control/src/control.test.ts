@@ -1,17 +1,22 @@
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createTestBlobs } from "@kerby/blobs/testing";
+import { tenantPrefix } from "@kerby/blobs";
+import { createEmptyTestBucket, createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import type {
+  BackupResponse,
   CreateKeyResponse,
   CreateTenantResponse,
   ExportResponse,
+  RestoreResponse,
   Tenant,
 } from "@kerby/contracts";
 import { authenticateApiKey, getTenant, tenantDbUrl } from "@kerby/control-plane";
 import { createTestControlDb, type TestControlDb } from "@kerby/control-plane/testing";
-import { tenantMigrationDirs } from "@kerby/conversations";
+import {
+  insertConversation,
+  postUserMessage,
+  readMessages,
+  tenantMigrationDirs,
+} from "@kerby/conversations";
 import {
   type ClusterAdmin,
   createClusterAdmin,
@@ -24,6 +29,9 @@ import { configureLogging } from "@kerby/observability";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createControlApp } from "./index.ts";
+import { untilNext } from "./runtime/nightly.ts";
+import { BACKUP_LOCK_KEY } from "./service/backup.ts";
+import { deleteExpiredExports } from "./service/export.ts";
 import { ensureTemplate } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
@@ -49,8 +57,16 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   cleanups.push(() => realCluster.close());
   const cluster = wrap ? wrap(realCluster) : realCluster;
   const blobs = await createTestBlobs();
-  const exportDir = mkdtempSync(join(tmpdir(), "kerby-export-"));
-  cleanups.push(() => rmSync(exportDir, { recursive: true, force: true }));
+  const buckets = {
+    primary: await createTestBucket(),
+    exports: await createEmptyTestBucket(),
+    backup: await createEmptyTestBucket(),
+  };
+  // The real clock unless a test sets one.
+  let now: Date | undefined;
+  const setNow = (at: Date) => {
+    now = at;
+  };
   const pools = new TenantPools({
     async resolveUrl(tenantId) {
       const tenant = await getTenant(control.db, tenantId);
@@ -64,14 +80,14 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   const deps: ControlDeps = {
     control: control.db,
     cluster,
-    blobs,
+    buckets,
+    now: () => now ?? new Date(),
     pools,
     settings: {
       clusterHost: adminHost.hostname,
       clusterPort: Number(adminHost.port),
       tenantDbSecret: SECRET,
       templateDatabase,
-      exportDir,
       pgDumpPath: "pg_dump",
     },
   };
@@ -95,7 +111,23 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
     expect(response.status).toBe(201);
     return (await response.json()) as CreateTenantResponse;
   };
-  return { control, cluster: realCluster, blobs, deps, call, provision, exportDir };
+  const tenantDb = async (tenantId: string) => {
+    const row = (await getTenant(control.db, tenantId)) ?? expect.fail("no tenant row");
+    const db = createTenantDb(tenantDbUrl(row, SECRET));
+    cleanups.push(() => db.close());
+    return { tenantId, db };
+  };
+  return {
+    control,
+    cluster: realCluster,
+    blobs,
+    buckets,
+    deps,
+    call,
+    provision,
+    setNow,
+    tenantDb,
+  };
 }
 
 describe("operator API auth", () => {
@@ -230,7 +262,7 @@ describe("lifecycle", () => {
   });
 
   it("deletes everything: database, role, objects, keys; and frees the name", async () => {
-    const { call, provision, cluster, control, blobs } = await start();
+    const { call, provision, cluster, control, blobs, buckets } = await start();
     const { tenant, secret } = await provision("acme");
     const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
     const own = createTenantDb(tenantDbUrl(row, SECRET));
@@ -244,13 +276,14 @@ describe("lifecycle", () => {
       },
     );
     await own.close();
-    expect((await blobs.listPrefix(tenant.id)).length).toBe(1);
+    const objects = () => Array.fromAsync(buckets.primary.list(tenantPrefix(tenant.id)));
+    expect((await objects()).length).toBe(1);
 
     expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
 
     expect(await cluster.databaseExists(row.dbName)).toBe(false);
     expect(await cluster.roleExists(row.dbRole)).toBe(false);
-    expect(await blobs.listPrefix(tenant.id)).toEqual([]);
+    expect(await objects()).toEqual([]);
     expect(await authenticateApiKey(control.db, secret)).toBeUndefined();
     expect(
       (await control.db.query("select 1 from api_keys where tenant_id = $1", [tenant.id])).rowCount,
@@ -276,31 +309,157 @@ describe("lifecycle", () => {
 });
 
 describe("export", () => {
-  it("writes a pg_dump and the object listing", async () => {
-    const { call, provision, control, blobs, exportDir } = await start();
+  it("uploads a pg_dump and the object listing, downloadable by URL until it expires, and audits each URL", async () => {
+    const { call, provision, blobs, tenantDb, setNow, control } = await start();
     const { tenant } = await provision("acme");
-    const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
-    const own = createTenantDb(tenantDbUrl(row, SECRET));
-    await blobs.put(
-      { tenantId: tenant.id, db: own },
-      {
-        kind: "message",
-        key: "m/1.json",
-        body: new Uint8Array([1, 2, 3]),
-        mediaType: "application/octet-stream",
-      },
-    );
-    await own.close();
+    await blobs.put(await tenantDb(tenant.id), {
+      kind: "message",
+      key: "m/1.json",
+      body: new Uint8Array([1, 2, 3]),
+      mediaType: "application/octet-stream",
+    });
 
     const response = await call("POST", `/v1/operator/tenants/${tenant.id}/export`);
     expect(response.status).toBe(200);
     const exported = (await response.json()) as ExportResponse;
-    expect(exported.dumpFile.startsWith(exportDir)).toBe(true);
-    expect(readFileSync(exported.dumpFile).subarray(0, 5).toString()).toBe("PGDMP");
-    expect(JSON.parse(readFileSync(exported.objectsFile, "utf8"))).toEqual([
-      { key: "m/1.json", size: 3 },
-    ]);
     expect(exported).toMatchObject({ objectCount: 1, objectPrefix: `t/${tenant.id}/` });
+    expect(Date.parse(exported.expiresAt) - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
+    const dump = await fetch(exported.dumpUrl);
+    expect(dump.status).toBe(200);
+    expect(
+      Buffer.from(await dump.arrayBuffer())
+        .subarray(0, 5)
+        .toString(),
+    ).toBe("PGDMP");
+    expect(await (await fetch(exported.objectsUrl)).json()).toEqual([{ key: "m/1.json", size: 3 }]);
+    const { rows } = await control.db.query<{ action: string; key: string | null }>(
+      "select action, detail->>'key' as key from audit_log where tenant_id = $1 and action like '%export%' order by id",
+      [tenant.id],
+    );
+    expect(rows.map((r) => r.action)).toEqual([
+      "tenant.export",
+      "export.url_issued",
+      "export.url_issued",
+    ]);
+    expect(rows[1]?.key).toMatch(new RegExp(`^${tenant.id}/.*\\.dump$`));
+
+    // Exported a day and a minute ago: the URLs have expired.
+    setNow(new Date(Date.now() - (24 * 60 + 1) * 60 * 1000));
+    const old = (await (
+      await call("POST", `/v1/operator/tenants/${tenant.id}/export`)
+    ).json()) as ExportResponse;
+    const refused = await fetch(old.dumpUrl);
+    expect(refused.status).toBe(403);
+    await refused.body?.cancel();
+  });
+
+  it("retention deletes exports older than 30 days only, a deleted tenant's included", async () => {
+    const { call, provision, buckets, setNow, deps } = await start();
+    const { tenant } = await provision("acme");
+    const day = 24 * 60 * 60 * 1000;
+    const first = Date.parse("2026-01-01T00:00:00.000Z");
+    const exportAt = async (at: number) => {
+      setNow(new Date(at));
+      expect((await call("POST", `/v1/operator/tenants/${tenant.id}/export`)).status).toBe(200);
+    };
+    await exportAt(first);
+    await exportAt(first + 2 * day);
+    expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
+    const kept = async () =>
+      (await Array.fromAsync(buckets.exports.list(""))).map((o) => o.key.split("/")[1]).sort();
+
+    // 30 days after the first export: nothing is older than 30 days yet.
+    setNow(new Date(first + 30 * day));
+    expect(await deleteExpiredExports(deps)).toBe(0);
+    // A day later the first export (dump and listing) goes, and the second stays.
+    setNow(new Date(first + 31 * day));
+    expect(await deleteExpiredExports(deps)).toBe(2);
+    expect(await kept()).toEqual([
+      "2026-01-03T00-00-00-000Z.dump",
+      "2026-01-03T00-00-00-000Z.objects.json",
+    ]);
+  });
+});
+
+describe("bucket backup", () => {
+  it("copies new objects only, removes deleted tenants' copies, and a restore makes a conversation read again", async () => {
+    const { call, provision, blobs, buckets, tenantDb } = await start();
+    const kept = await provision("kept");
+    const gone = await provision("gone");
+    const ctx = await tenantDb(kept.tenant.id);
+    const conversation = await insertConversation(ctx.db, { model: "m", system: "" });
+    await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text: "hello" }]);
+    await blobs.put(await tenantDb(gone.tenant.id), {
+      kind: "message",
+      key: "m/1.json",
+      body: new Uint8Array([1]),
+      mediaType: "application/octet-stream",
+    });
+    const backup = async () => {
+      const response = await call("POST", "/v1/operator/backup");
+      expect(response.status).toBe(200);
+      return (await response.json()) as BackupResponse;
+    };
+    const backedUp = (id: string) => Array.fromAsync(buckets.backup.list(tenantPrefix(id)));
+
+    expect(await backup()).toMatchObject({
+      copied: 2,
+      unchanged: 0,
+      objectsDeleted: 0,
+      failed: [],
+    });
+    expect(await backup()).toMatchObject({ copied: 0, unchanged: 2, bytes: 0 });
+
+    // The deletion obligation: a deleted tenant's copy goes at the next run.
+    expect((await call("DELETE", `/v1/operator/tenants/${gone.tenant.id}`)).status).toBe(204);
+    expect((await backedUp(gone.tenant.id)).length).toBe(1);
+    expect(await backup()).toMatchObject({ copied: 0, deletedTenants: 1, objectsDeleted: 1 });
+    expect(await backedUp(gone.tenant.id)).toEqual([]);
+
+    // Lose the message body in the primary: the conversation no longer reads.
+    const [lost] = await Array.fromAsync(buckets.primary.list(tenantPrefix(kept.tenant.id)));
+    await buckets.primary.deleteKeys([lost?.key ?? expect.fail("no object")]);
+    await expect(readMessages(ctx, blobs, conversation.id)).rejects.toThrow();
+
+    const restore = async (body: object) =>
+      (await (await call("POST", "/v1/operator/backup/restore", body)).json()) as RestoreResponse;
+    expect(await restore({ tenantId: kept.tenant.id })).toMatchObject({
+      tenants: 1,
+      restored: 1,
+      failed: [],
+    });
+    const messages = await readMessages(ctx, blobs, conversation.id);
+    expect(messages.map((m) => m.message.content)).toEqual([[{ type: "text", text: "hello" }]]);
+    // Nothing is missing any more; a deleted tenant cannot be restored.
+    expect(await restore({})).toMatchObject({ restored: 0, failed: [] });
+    expect(
+      (await call("POST", "/v1/operator/backup/restore", { tenantId: gone.tenant.id })).status,
+    ).toBe(404);
+  });
+
+  it("lets one run at a time: a second caller gets a conflict", async () => {
+    const { call, deps } = await start();
+    // Hold the lock on another connection, as another control instance's run would.
+    const release = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const holder = deps.control.transaction(async (tx) => {
+      await tx.query("select pg_advisory_xact_lock($1)", [BACKUP_LOCK_KEY]);
+      held.resolve();
+      await release.promise;
+    });
+    await held.promise;
+    expect((await call("POST", "/v1/operator/backup")).status).toBe(409);
+    expect((await call("POST", "/v1/operator/backup/restore", {})).status).toBe(409);
+    release.resolve();
+    await holder;
+    expect((await call("POST", "/v1/operator/backup")).status).toBe(200);
+  });
+
+  it("runs nightly at the next fixed UTC hour", () => {
+    const hour = 60 * 60 * 1000;
+    expect(untilNext(new Date("2026-11-22T01:30:00Z"), 3)).toBe(1.5 * hour);
+    expect(untilNext(new Date("2026-11-22T03:00:00Z"), 3)).toBe(24 * hour);
+    expect(untilNext(new Date("2026-11-22T23:00:00Z"), 3)).toBe(4 * hour);
   });
 });
 

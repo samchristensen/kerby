@@ -1,11 +1,20 @@
-import type { Blobs } from "@kerby/blobs";
+import type { Bucket } from "@kerby/blobs";
 import type { ClusterAdmin, ControlDb, TenantPools } from "@kerby/db";
 
 /** Everything the operator commands need, built once in `src/index.ts` and passed down. */
 export type ControlDeps = {
   control: ControlDb;
   cluster: ClusterAdmin;
-  blobs: Blobs;
+  buckets: {
+    /** Every tenant's objects under `t/<tenantId>/`. */
+    primary: Bucket;
+    /** Tenant exports, `<tenantId>/<stamp>.dump` and `.objects.json`; only control holds its keys. */
+    exports: Bucket;
+    /** A copy of the primary's `t/`, in another region. */
+    backup: Bucket;
+  };
+  /** The clock: exports are stamped and expire by it. Tests inject one. */
+  now: () => Date;
   /** Opens tenant databases as their own roles (used to migrate them). */
   pools: TenantPools;
   settings: {
@@ -15,7 +24,6 @@ export type ControlDeps = {
     tenantDbSecret: string;
     tenantDbSslmode?: "disable" | "require" | "verify-full" | undefined;
     templateDatabase: string;
-    exportDir: string;
     pgDumpPath: string;
   };
 };

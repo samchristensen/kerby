@@ -50,6 +50,7 @@ const CONFINED = new Map<string, string>([
   ["pg", "db"],
   ["absurd-sdk", "durable"],
   ["@aws-sdk/client-s3", "blobs"],
+  ["@aws-sdk/s3-request-presigner", "blobs"],
   ["@earendil-works/pi-durable", "runtime-pi-durable"],
   ["@earendil-works/pi-ai", "runtime-pi-durable"],
   ["@earendil-works/chord", "runtime-pi-durable"],

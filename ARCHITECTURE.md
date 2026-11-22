@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -50,7 +50,7 @@ Each external system lives behind exactly one package; nothing else imports the 
 | ---------------------------- | -------------------- | --------------------------------------------------------------------------- |
 | Postgres (`pg`)              | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes) |
 | Absurd (`absurd-sdk`)        | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
-| S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put` / `get` taking a tenant context, writing the tenant's blob index      |
+| S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put` / `get` taking a tenant context; raw-key `Bucket` for control only    |
 | Pi Durable and its libraries | `runtime-pi-durable` | an `AgentRuntime`                                                           |
 | Tenant-supplied URLs         | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 
@@ -72,7 +72,9 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `TenantDb` comes only from a verified API key resolved in the control plane.
 - A tenant id reaches code only through that verified key, never through a request body. _review_
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
-- Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call.
+- Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
+  (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
+  nightly backup copy ([ADR 0013](docs/adr/0013-exports-and-bucket-backup.md)).
 - Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)); Kerby holds no provider key. A key is
   sealed by `packages/secrets` to a public key the api holds, stored in the control plane's `tenant_secrets`, and opened only by a
   worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the tenant id,
@@ -84,6 +86,8 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   template database (migrated at startup), creates a role that owns that database and may connect to no other tenant
   database, and derives the role's password as an HMAC of a cluster secret and the tenant id: no tenant credential is stored.
   Deleting drops the database and role, deletes the object prefix and purges keys; the row stays with status `deleted`.
+  Exporting uploads a `pg_dump` and the object listing to the export bucket and returns presigned URLs; exports are kept
+  30 days. Nightly, control copies new objects to the backup bucket and drops deleted tenants' copies (ADR 0013).
 
 ## Durability: the turn lifecycle
 
@@ -176,7 +180,7 @@ then provisions a `default` tenant through the operator API and prints its key. 
 ## Hosting
 
 Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket, and `control`, `api` and `worker` running the images CI builds from
+ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api` and `worker` running the images CI builds from
 the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
 [ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
 Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys. The secrets private key is

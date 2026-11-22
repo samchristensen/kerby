@@ -1,3 +1,4 @@
+import { tenantPrefix } from "@kerby/blobs";
 import {
   audit,
   createApiKey,
@@ -126,14 +127,14 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
  * is safe to repeat, so a failed delete is retried by calling it again. The row stays, status `deleted`.
  */
 export async function deleteTenant(deps: ControlDeps, id: string): Promise<void> {
-  const { control, cluster, blobs, pools } = deps;
+  const { control, cluster, buckets, pools } = deps;
   const tenant = await getTenant(control, id);
   if (!tenant || tenant.status === "deleted") throw new NotFoundError(`tenant ${id} not found`);
   await setTenantStatus(control, id, "deleting");
   await pools.evict(id);
   await cluster.dropDatabase(tenant.dbName);
   await cluster.dropRole(tenant.dbRole);
-  const objects = await blobs.deletePrefix(id);
+  const objects = await buckets.primary.deletePrefix(tenantPrefix(id));
   await control.transaction(async (tx) => {
     await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);

@@ -68,11 +68,41 @@ export const ListTenantsResponseSchema = z.object({ tenants: z.array(TenantSchem
 export type ListTenantsResponse = z.infer<typeof ListTenantsResponseSchema>;
 
 export const ExportResponseSchema = z.object({
-  /** A `pg_dump` custom-format file of the tenant's database, in the control service's export directory. */
-  dumpFile: z.string(),
-  /** The tenant's object keys and sizes, as JSON, next to the dump. */
-  objectsFile: z.string(),
+  /** Downloads a `pg_dump` custom-format file of the tenant's database, without credentials, until `expiresAt`. */
+  dumpUrl: z.url(),
+  /** Downloads the tenant's object keys and sizes, as JSON, until `expiresAt`. */
+  objectsUrl: z.url(),
+  expiresAt: z.iso.datetime(),
   objectPrefix: z.string(),
   objectCount: z.number().int().nonnegative(),
 });
 export type ExportResponse = z.infer<typeof ExportResponseSchema>;
+
+const BackupFailureSchema = z.object({ tenantId: z.uuid(), error: z.string() });
+
+/** One run of the bucket backup: changed objects of every live tenant copied, deleted tenants' copies removed. */
+export const BackupResponseSchema = z.object({
+  tenants: z.number().int().nonnegative(),
+  copied: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  unchanged: z.number().int().nonnegative(),
+  deletedTenants: z.number().int().nonnegative(),
+  objectsDeleted: z.number().int().nonnegative(),
+  failed: z.array(BackupFailureSchema),
+  durationMs: z.number().int().nonnegative(),
+});
+export type BackupResponse = z.infer<typeof BackupResponseSchema>;
+
+/** Restore one tenant's objects from the backup, or every live tenant's when `tenantId` is absent. */
+export const RestoreRequestSchema = z.object({ tenantId: z.uuid().optional() });
+export type RestoreRequest = z.infer<typeof RestoreRequestSchema>;
+
+/** Only objects missing from the primary bucket are copied back; nothing there is overwritten. */
+export const RestoreResponseSchema = z.object({
+  tenants: z.number().int().nonnegative(),
+  restored: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  failed: z.array(BackupFailureSchema),
+  durationMs: z.number().int().nonnegative(),
+});
+export type RestoreResponse = z.infer<typeof RestoreResponseSchema>;

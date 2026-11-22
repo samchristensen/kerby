@@ -27,6 +27,8 @@ import {
 const REGION = "us-east4-eqdc4a";
 const BUCKET_REGION = "iad";
 const REGISTRY = "ghcr.io/samchristensen";
+/** The backup copy lives in another region than the bucket it copies (ADR 0013). */
+const BACKUP_REGION = "sjc";
 
 export default defineRailway((ctx) => {
   const environment = ctx.environmentName ?? ctx.environment;
@@ -42,6 +44,9 @@ export default defineRailway((ctx) => {
     sizeMB: 50_000,
   });
   const storage = bucket("kerby", { region: BUCKET_REGION });
+  // Only control references these two: tenant exports, and the nightly copy of `kerby`'s `t/` (ADR 0013).
+  const exportsBucket = bucket("kerby-exports", { region: BUCKET_REGION });
+  const backupBucket = bucket("kerby-backup", { region: BACKUP_REGION });
 
   // References Railway resolves at deploy time. Strings, because they join into URLs.
   const variable = (resource: string, name: string) => `\${{${resource}.${name}}}`;
@@ -51,13 +56,15 @@ export default defineRailway((ctx) => {
   // The limited role api and worker connect as; control creates it and sets its password at startup.
   const limitedUrl = `postgresql://kerby_app:${variable("control", "APP_DATABASE_PASSWORD")}@${host}:${port}/${variable("Postgres", "PGDATABASE")}`;
 
-  const s3 = {
-    S3_ENDPOINT: ref(storage, "ENDPOINT"),
-    S3_REGION: ref(storage, "REGION"),
-    S3_BUCKET: ref(storage, "BUCKET"),
-    S3_ACCESS_KEY_ID: ref(storage, "ACCESS_KEY_ID"),
-    S3_SECRET_ACCESS_KEY: ref(storage, "SECRET_ACCESS_KEY"),
-  };
+  // A bucket's five variables, under `<prefix>S3_*`.
+  const s3Of = (resource: typeof storage, prefix: string) => ({
+    [`${prefix}S3_ENDPOINT`]: ref(resource, "ENDPOINT"),
+    [`${prefix}S3_REGION`]: ref(resource, "REGION"),
+    [`${prefix}S3_BUCKET`]: ref(resource, "BUCKET"),
+    [`${prefix}S3_ACCESS_KEY_ID`]: ref(resource, "ACCESS_KEY_ID"),
+    [`${prefix}S3_SECRET_ACCESS_KEY`]: ref(resource, "SECRET_ACCESS_KEY"),
+  });
+  const s3 = s3Of(storage, "");
 
   // Where every service posts its alerts (Slack, Discord or JSON); the operator's channel, never generated.
   const alerts = { ALERT_WEBHOOK_URL: preserve() };
@@ -70,6 +77,8 @@ export default defineRailway((ctx) => {
     env: {
       PORT: "8081",
       ...s3,
+      ...s3Of(exportsBucket, "EXPORT_"),
+      ...s3Of(backupBucket, "BACKUP_"),
       CONTROL_DATABASE_URL: db.env.DATABASE_URL,
       CLUSTER_ADMIN_URL: adminUrl,
       CLUSTER_HOST: host,
@@ -110,5 +119,7 @@ export default defineRailway((ctx) => {
     },
   });
 
-  return project("kerby", { resources: [control, api, worker, db, dbVolume, storage] });
+  return project("kerby", {
+    resources: [control, api, worker, db, dbVolume, storage, exportsBucket, backupBucket],
+  });
 });

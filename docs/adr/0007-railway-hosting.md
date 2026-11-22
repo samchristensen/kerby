@@ -20,8 +20,9 @@ already do.
   stage, `prod`) and pushes to GHCR ([ADR 0011](0011-images-from-ghcr.md), which replaced Railway building what `railway up`
   uploaded). `make deploy` deploys control first (it creates the limited `kerby_app` role that api and worker connect as),
   then the other two.
-- **One bucket per environment**, a Railway bucket (S3-compatible, `@kerby/blobs` unchanged). `S3_*` on each service are
-  references to the bucket's variables. Keys stay under `t/<tenantId>/`.
+- **One bucket per environment for tenant data**, a Railway bucket (S3-compatible, `@kerby/blobs` unchanged). `S3_*` on each
+  service are references to the bucket's variables. Keys stay under `t/<tenantId>/`. Two more buckets, exports and a backup
+  copy, are `control`'s alone ([ADR 0013](0013-exports-and-bucket-backup.md)).
 - **Networking.** Only `api` has a public domain. `control` (the operator API) and `worker` have none: operators reach
   control with `railway ssh`. Services reach Postgres over Railway's private network, which does not use TLS, so
   `TENANT_DB_SSLMODE` stays unset.
@@ -56,5 +57,4 @@ already do.
   structured JSON with tenant ids and no content (`make logs-query`).
 - Whoever holds the Railway login can read every variable, so every secret. There is no least-privilege agent role yet
   (tech debt): a project token (`RAILWAY_TOKEN`) is the starting point.
-- Tenant exports are written to the control container's disk, which a redeploy clears (tech debt, as before).
 - Not yet exercised here: Postgres `max_connections` at the template's default against the budget in docs/deploy.md.

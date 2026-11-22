@@ -2,6 +2,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   type ApiKey,
+  type BackupResponse,
   CreateKeyRequestSchema,
   type CreateKeyResponse,
   CreateTenantRequestSchema,
@@ -10,6 +11,8 @@ import {
   LimitsSchema,
   type ListKeysResponse,
   type ListTenantsResponse,
+  RestoreRequestSchema,
+  type RestoreResponse,
   type Tenant,
 } from "@kerby/contracts";
 import type { ApiKeyRecord, TenantRecord } from "@kerby/control-plane";
@@ -22,6 +25,7 @@ import {
   type Route,
   readJson,
 } from "@kerby/serve";
+import { backupBuckets, restoreFromBackup } from "../service/backup.ts";
 import { exportTenant } from "../service/export.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
@@ -197,6 +201,23 @@ export function createControlApp(deps: ControlDeps, operatorToken: string): Fetc
       "POST",
       "/v1/operator/migrate",
       authorized(async () => json(200, await migrateAllTenants(deps))),
+    ],
+    [
+      "POST",
+      "/v1/operator/backup",
+      authorized(async () => {
+        const response: BackupResponse = await backupBuckets(deps);
+        return json(200, response);
+      }),
+    ],
+    [
+      "POST",
+      "/v1/operator/backup/restore",
+      authorized(async (request) => {
+        const body = await readJson(request, RestoreRequestSchema);
+        const response: RestoreResponse = await restoreFromBackup(deps, body.tenantId);
+        return json(200, response);
+      }),
     ],
   ];
   return createRouter(routes);
