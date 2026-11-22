@@ -97,7 +97,9 @@ describe("postUserMessage", () => {
     await postUserMessage(tenant, blobs, conversation.id, [...text("hello")], {
       storageBytes: size,
     });
-    const objects = async () => (await blobs.listPrefix(tenant.tenantId)).length;
+    const bucket = await createTestBucket();
+    const objects = async () =>
+      (await Array.fromAsync(bucket.list(tenantPrefix(tenant.tenantId)))).length;
     // The quota is the tenant's, across conversations.
     await expect(
       postUserMessage(tenant, blobs, other.id, [...text("hello")], { storageBytes: 2 * size - 1 }),

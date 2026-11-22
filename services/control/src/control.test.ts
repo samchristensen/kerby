@@ -388,7 +388,9 @@ describe("bucket backup", () => {
     const gone = await provision("gone");
     const ctx = await tenantDb(kept.tenant.id);
     const conversation = await insertConversation(ctx.db, { model: "m", system: "" });
-    await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text: "hello" }]);
+    await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text: "hello" }], {
+      storageBytes: 1024 ** 3,
+    });
     await blobs.put(await tenantDb(gone.tenant.id), {
       kind: "message",
       key: "m/1.json",
@@ -419,7 +421,8 @@ describe("bucket backup", () => {
     // Lose the message body in the primary: the conversation no longer reads.
     const [lost] = await Array.fromAsync(buckets.primary.list(tenantPrefix(kept.tenant.id)));
     await buckets.primary.deleteKeys([lost?.key ?? expect.fail("no object")]);
-    await expect(readMessages(ctx, blobs, conversation.id)).rejects.toThrow();
+    const firstPage = { after: 0, limit: 100 };
+    await expect(readMessages(ctx, blobs, conversation.id, firstPage)).rejects.toThrow();
 
     const restore = async (body: object) =>
       (await (await call("POST", "/v1/operator/backup/restore", body)).json()) as RestoreResponse;
@@ -428,7 +431,7 @@ describe("bucket backup", () => {
       restored: 1,
       failed: [],
     });
-    const messages = await readMessages(ctx, blobs, conversation.id);
+    const { messages } = await readMessages(ctx, blobs, conversation.id, firstPage);
     expect(messages.map((m) => m.message.content)).toEqual([[{ type: "text", text: "hello" }]]);
     // Nothing is missing any more; a deleted tenant cannot be restored.
     expect(await restore({})).toMatchObject({ restored: 0, failed: [] });
