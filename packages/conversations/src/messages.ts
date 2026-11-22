@@ -8,6 +8,7 @@ import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, spawnInTx } from "@kerby/durable";
 import {
   ConversationBusyError,
+  ConversationFullError,
   ConversationNotFoundError,
   LeaseLostError,
   SeqConflictError,
@@ -46,6 +47,13 @@ async function putMessage(
 const MAX_POST_ATTEMPTS = 5;
 
 /**
+ * What one conversation may hold. Every turn and every read loads the whole history, so an unbounded conversation is
+ * a way to exhaust a worker's or the api's memory; a tenant that reaches these starts a new conversation.
+ */
+export const MAX_CONVERSATION_MESSAGES = 2000;
+export const MAX_CONVERSATION_BYTES = 64 * 1024 * 1024;
+
+/**
  * Append a user message and enqueue the turn that answers it, in one transaction in the tenant's database. A turn
  * is unique per message (`turn:<conversation>:<seq>`), and one runs at a time per conversation.
  */
@@ -56,6 +64,23 @@ export async function postUserMessage(
   content: ContentPart[],
 ): Promise<{ seq: number }> {
   const message: AgentMessage = { role: "user", content };
+  // Refuse before storing anything: a refused post must not leave an object in S3 and a row in the index.
+  const { rows: size } = await ctx.db.query<{ messages: number; bytes: string }>(
+    `select count(*)::int as messages, coalesce(sum(b.size), 0)::text as bytes
+       from messages m join blobs b on b.id = m.blob_id where m.conversation_id = $1`,
+    [conversationId],
+  );
+  if (
+    (size[0]?.messages ?? 0) >= MAX_CONVERSATION_MESSAGES ||
+    Number(size[0]?.bytes ?? 0) >= MAX_CONVERSATION_BYTES
+  ) {
+    throw new ConversationFullError(
+      `a conversation holds at most ${MAX_CONVERSATION_MESSAGES} messages and ${MAX_CONVERSATION_BYTES / 1024 / 1024} MiB: start a new one`,
+    );
+  }
+  if (await isBusy(ctx.db, conversationId)) {
+    throw new ConversationBusyError("a turn is already running for this conversation");
+  }
   for (let attempt = 0; attempt < MAX_POST_ATTEMPTS; attempt++) {
     const { rows } = await ctx.db.query<{ next: number }>(
       "select coalesce(max(seq), 0) + 1 as next from messages where conversation_id = $1",

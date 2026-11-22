@@ -2,14 +2,15 @@
 // the real adapters, including the agent harness behind the AgentRuntime port.
 import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
-import { getTenant, tenantDbUrl } from "@kerby/control-plane";
+import { getTenant, readModelKey, tenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { log } from "@kerby/observability";
 import {
   createFakeModels,
   createPiDurableRuntime,
-  createProviderModels,
+  createTenantModels,
 } from "@kerby/runtime-pi-durable";
+import { createOpener, splitKeys } from "@kerby/secrets";
 import { createRouter, json, serve } from "@kerby/serve";
 import { loadWorkerConfig, type WorkerConfig } from "./config/index.ts";
 import { createHandlers } from "./runtime/handlers.ts";
@@ -46,18 +47,20 @@ export async function startWorker(config: WorkerConfig): Promise<{
       return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
     },
   });
-  const models = config.kerbyFakeModel
-    ? createFakeModels()
-    : createProviderModels({
-        anthropicApiKey: config.anthropicApiKey,
-        openaiApiKey: config.openaiApiKey,
-      });
+  // Real runs use the tenant's own key for the model's provider; only the development fake model needs none.
+  const opener =
+    !config.kerbyFakeModel && config.secretsPrivateKeys
+      ? createOpener(splitKeys(config.secretsPrivateKeys))
+      : undefined;
   const deps: WorkerDeps = {
     control,
     pools,
     blobs,
+    modelKeys: opener
+      ? (tenantId, provider) => readModelKey(control, opener, tenantId, provider)
+      : undefined,
     runtime: createPiDurableRuntime({
-      models,
+      models: config.kerbyFakeModel ? createFakeModels() : createTenantModels,
       onReport: (type) => log("debug", "harness report", { type }),
     }),
     settings: {

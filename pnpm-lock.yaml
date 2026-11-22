@@ -56,6 +56,9 @@ importers:
       '@kerby/control-plane':
         specifier: workspace:*
         version: link:packages/control-plane
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:packages/secrets
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -106,6 +109,9 @@ importers:
       '@kerby/observability':
         specifier: workspace:*
         version: link:../observability
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../secrets
 
   packages/conversations:
     dependencies:
@@ -170,6 +176,8 @@ importers:
         specifier: workspace:*
         version: link:../agent
 
+  packages/secrets: {}
+
   packages/serve:
     dependencies:
       '@kerby/observability':
@@ -205,6 +213,9 @@ importers:
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secrets
       '@kerby/serve':
         specifier: workspace:*
         version: link:../../packages/serve
@@ -274,6 +285,9 @@ importers:
       '@kerby/runtime-pi-durable':
         specifier: workspace:*
         version: link:../../packages/runtime-pi-durable
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secrets
       '@kerby/serve':
         specifier: workspace:*
         version: link:../../packages/serve

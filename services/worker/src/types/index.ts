@@ -8,6 +8,11 @@ export type WorkerDeps = {
   blobs: Blobs;
   /** The agent harness behind the port: only `src/index.ts` knows which one. */
   runtime: AgentRuntime;
+  /**
+   * A tenant's own model key for a provider, opened (bring your own key). Undefined only for the development fake
+   * model, which needs no key; every real run requires one.
+   */
+  modelKeys: ((tenantId: string, provider: string) => Promise<string | undefined>) | undefined;
   settings: {
     workerId: string;
     claimTimeoutSeconds: number;

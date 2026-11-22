@@ -7,11 +7,18 @@ import type {
   GetConversationResponse,
   PostMessageResponse,
 } from "@kerby/contracts";
-import { createApiKey, insertTenant, revokeApiKey, setTenantStatus } from "@kerby/control-plane";
+import {
+  createApiKey,
+  insertTenant,
+  readModelKey,
+  revokeApiKey,
+  setTenantStatus,
+} from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import { notifyLive } from "@kerby/conversations";
 import { completeTurnWith, createTestTenant, type TestTenant } from "@kerby/conversations/testing";
 import { TenantPools } from "@kerby/db";
+import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApiApp } from "./index.ts";
@@ -24,8 +31,12 @@ afterEach(async () => {
 });
 
 type Harness = Awaited<ReturnType<typeof harness>>;
+type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
 
-async function harness(options: { authCacheMs?: number } = {}) {
+async function harness(
+  options: { authCacheMs?: number; keyless?: string[]; maxStreams?: number } = {},
+) {
+  const keys = generateSecretsKeyPair();
   const control = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
   const blobs = await createTestBlobs();
@@ -38,10 +49,14 @@ async function harness(options: { authCacheMs?: number } = {}) {
     control: control.db,
     pools,
     blobs,
+    sealer: createSealer(keys.publicKey),
     settings: {
-      models: ["faux/faux-1", "faux/other"],
+      defaultModel: "faux/faux-1",
+      keylessProviders: options.keyless ?? ["faux"],
       defaultSystem: "Be helpful.",
       authCacheMs: options.authCacheMs ?? 0,
+      maxStreamsPerTenant: options.maxStreams ?? 20,
+      streamRecheckMs: 100,
     },
   };
   const server = await serve(createApiApp(deps), { host: "127.0.0.1", port: 0 });
@@ -75,7 +90,7 @@ async function harness(options: { authCacheMs?: number } = {}) {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  return { control, blobs, deps, base, tenant, call };
+  return { control, blobs, deps, base, tenant, call, keys };
 }
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
@@ -359,5 +374,163 @@ describe("event stream", () => {
     controller.abort();
     for (let i = 0; i < 40 && (await listening()) !== 0; i++) await sleep(50);
     expect(await listening()).toBe(0);
+  });
+});
+
+describe("event stream limits", () => {
+  const open = (h: Harness, secret: string, id: string, signal?: AbortSignal) =>
+    fetch(`${h.base}/v1/conversations/${id}/events`, {
+      headers: { authorization: `Bearer ${secret}` },
+      ...(signal ? { signal } : {}),
+    });
+
+  it("caps open streams per tenant and frees a slot when one closes", async () => {
+    const h = await harness({ maxStreams: 2 });
+    const t = await h.tenant("acme");
+    const other = await h.tenant("other");
+    const { id } = await newConversation(h, t.secret);
+    const { id: otherId } = await newConversation(h, other.secret);
+    const first = new AbortController();
+    const a = await open(h, t.secret, id, first.signal);
+    const b = await open(h, t.secret, id);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const refused = await open(h, t.secret, id);
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({ error: { code: "too_many_streams" } });
+    // another tenant is not affected
+    expect((await open(h, other.secret, otherId)).status).toBe(200);
+
+    first.abort();
+    await a.body?.cancel().catch(() => {});
+    let status = 429;
+    for (let i = 0; i < 40 && status === 429; i++) {
+      await sleep(50);
+      const retry = await open(h, t.secret, id);
+      status = retry.status;
+      await retry.body?.cancel().catch(() => {});
+    }
+    expect(status).toBe(200);
+    await b.body?.cancel().catch(() => {});
+  });
+
+  it.each([
+    ["its key is revoked", (h: Harness, t: Tenant) => revokeApiKey(h.control.db, t.id, t.key.id)],
+    [
+      "its tenant is suspended",
+      (h: Harness, t: Tenant) => setTenantStatus(h.control.db, t.id, "suspended"),
+    ],
+  ])("ends an open stream when %s", async (_name, stop) => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    const response = await open(h, t.secret, id);
+    expect(response.status).toBe(200);
+    const reader = response.body?.getReader();
+    await reader?.read(); // open
+    await stop(h, t);
+    const ended = await Promise.race([
+      (async () => {
+        for (;;) if ((await reader?.read())?.done !== false) return true;
+      })(),
+      sleep(5000).then(() => false),
+    ]);
+    expect(ended).toBe(true);
+  });
+});
+
+describe("model keys (bring your own key)", () => {
+  const KEY = "sk-ant-api03-0123456789abcdef";
+
+  it("stores a key sealed, lists providers without the key, and removes it", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    const put = await h.call(t.secret, "PUT", "/v1/model-keys/anthropic", { apiKey: KEY });
+    expect(put.status).toBe(204);
+
+    const list = await h.call(t.secret, "GET", "/v1/model-keys");
+    const body = await list.text();
+    expect(JSON.parse(body)).toMatchObject({ keys: [{ provider: "anthropic" }] });
+    expect(body).not.toContain(KEY);
+
+    const stored = await h.control.db.query<{ ciphertext: Buffer }>(
+      "select ciphertext from tenant_secrets",
+    );
+    expect(stored.rows[0]?.ciphertext.includes(Buffer.from(KEY))).toBe(false);
+    const opener = createOpener([h.keys.privateKey]);
+    expect(await readModelKey(h.control.db, opener, t.id, "anthropic")).toBe(KEY);
+
+    const audit = await h.control.db.query("select actor, action, detail from audit_log");
+    expect(audit.rows).toEqual([
+      {
+        actor: expect.stringMatching(/^key:/),
+        action: "model_key.set",
+        detail: { provider: "anthropic" },
+      },
+    ]);
+    expect(JSON.stringify(audit.rows)).not.toContain(KEY);
+
+    expect((await h.call(t.secret, "DELETE", "/v1/model-keys/anthropic")).status).toBe(204);
+    expect((await h.call(t.secret, "DELETE", "/v1/model-keys/anthropic")).status).toBe(404);
+    expect(await (await h.call(t.secret, "GET", "/v1/model-keys")).json()).toEqual({ keys: [] });
+  });
+
+  it("keeps one tenant's keys invisible to another", async () => {
+    const h = await harness({ keyless: [] });
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    await h.call(a.secret, "PUT", "/v1/model-keys/openai", { apiKey: KEY });
+    expect(await (await h.call(b.secret, "GET", "/v1/model-keys")).json()).toEqual({ keys: [] });
+    expect((await h.call(b.secret, "DELETE", "/v1/model-keys/openai")).status).toBe(404);
+    expect(await (await h.call(a.secret, "GET", "/v1/model-keys")).json()).toMatchObject({
+      keys: [{ provider: "openai" }],
+    });
+  });
+
+  it("requires a valid API key and a well-formed provider and key", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    expect((await h.call(null, "PUT", "/v1/model-keys/openai", { apiKey: KEY })).status).toBe(401);
+    expect((await h.call(null, "GET", "/v1/model-keys")).status).toBe(401);
+    expect((await h.call(t.secret, "PUT", "/v1/model-keys/Open_AI", { apiKey: KEY })).status).toBe(
+      404,
+    );
+    for (const apiKey of ["short", "has space in it", "line\nbreak-key-123", "é".repeat(20)]) {
+      expect((await h.call(t.secret, "PUT", "/v1/model-keys/openai", { apiKey })).status).toBe(400);
+    }
+    expect(await (await h.call(t.secret, "GET", "/v1/model-keys")).json()).toEqual({ keys: [] });
+  });
+
+  it("refuses a conversation on a provider the tenant has no key for, until it adds one", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    const refused = await h.call(t.secret, "POST", "/v1/conversations", { model: "anthropic/x" });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        code: "invalid_model",
+        message: expect.stringContaining("PUT /v1/model-keys/anthropic"),
+      },
+    });
+    await h.call(t.secret, "PUT", "/v1/model-keys/anthropic", { apiKey: KEY });
+    expect(
+      (await h.call(t.secret, "POST", "/v1/conversations", { model: "anthropic/x" })).status,
+    ).toBe(201);
+    // another provider is still refused
+    expect(
+      (await h.call(t.secret, "POST", "/v1/conversations", { model: "openai/x" })).status,
+    ).toBe(400);
+  });
+
+  it("caps how many providers one tenant can store", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    for (let i = 0; i < 32; i++) {
+      expect((await h.call(t.secret, "PUT", `/v1/model-keys/p${i}`, { apiKey: KEY })).status).toBe(
+        204,
+      );
+    }
+    expect((await h.call(t.secret, "PUT", "/v1/model-keys/extra", { apiKey: KEY })).status).toBe(
+      409,
+    );
   });
 });

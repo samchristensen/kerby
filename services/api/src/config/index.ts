@@ -15,19 +15,24 @@ export const apiConfigSchema = z.object({
   s3Bucket: z.string().min(1),
   s3AccessKeyId: z.string().min(1),
   s3SecretAccessKey: z.string().min(1),
-  /** Model ids a conversation may use, comma separated; the first is the default. */
-  models: z
+  /** Public key tenants' model keys are sealed to (base64); the private half stays with the workers. `make secrets-key` makes a pair. */
+  secretsPublicKey: z.string().min(1),
+  /** Model for a conversation whose request names none, `<provider>/<modelId>`. Optional: without it a request names its model. */
+  defaultModel: z.string().min(1).optional(),
+  /** Providers that need no tenant key, comma separated: only `fake`, in development. */
+  keylessProviders: z
     .string()
-    .min(1)
+    .default("")
     .transform((value) =>
       value
         .split(",")
-        .map((m) => m.trim())
+        .map((p) => p.trim())
         .filter(Boolean),
-    )
-    .pipe(z.array(z.string()).min(1)),
+    ),
   defaultSystem: z.string().default("You are a helpful assistant."),
   /** How long a verified key is trusted: also how long suspension and revocation take to bite. */
+  /** Event streams one tenant may hold open on this process (each keeps a database connection). */
+  maxStreamsPerTenant: z.coerce.number().int().positive().default(20),
   authCacheSeconds: z.coerce.number().int().min(0).default(30),
 });
 

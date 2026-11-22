@@ -20,3 +20,11 @@ One line each: what, why it matters, what fixes it. Remove the line in the commi
 - Every tenant role's password derives from one shared secret held by api, worker and control. Store per-tenant credentials, with a rotation path, in `packages/secrets`.
 - Tenant exports are written to the control container's disk, which a redeploy clears. Upload them to a separate, access-logged bucket location and return a presigned URL.
 - Ephemeral environments are created and deleted by whoever runs `make railway-setup` and `make env-down`; CI cannot do it yet.
+- Model keys (ADR 0008): the api accepts a key for any well-formed provider id; an unknown one fails at the first turn, not at `PUT`. Tenants set keys only by API; the console is M9. No automated re-seal after a secrets key rotation (re-`PUT`, or write a script when the first rotation happens).
+- Secrets private key: lives only as a Railway variable on `worker`. Back it up outside Railway before real tenants store keys; there is no recovery otherwise.
+- The tenant-role connection limit (`TENANT_ROLE_CONNECTION_LIMIT`, 50) is a guess; each api process also caps one tenant's open event streams (`MAX_STREAMS_PER_TENANT`, 20). Measure under load and set both from data, with `max_connections` (hosting line above).
+- A tenant's concurrent-turn limit is counted per worker process, not per tenant: K workers allow K times `maxConcurrentTurns`. Count running tasks in the tenant database before claiming.
+- No per-tenant request rate limit and no storage quota: a tenant can store up to 64 MiB in each of unboundedly many conversations. Meter and cap storage with usage in M8.
+- A conversation is capped at 2000 messages and 64 MiB so a read or a turn cannot exhaust memory, but both still load the whole history. Page reads and give the worker a history budget (with the N-requests line above).
+- Deleting a tenant keeps its export files on the control volume (they may be the hand-over copy). Decide a retention period and delete expired exports; see the export-bucket line above.
+- Not built: `egress` (plan 0001, M2). Nothing calls a tenant-supplied URL yet (model providers are a fixed list, tools are M7); build it before the first tool or custom provider base URL.

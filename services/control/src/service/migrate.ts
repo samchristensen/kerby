@@ -17,6 +17,8 @@ export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun
   const tenants = (await listTenants(deps.control)).filter(
     (t) => t.status === "active" || t.status === "suspended",
   );
+  // Roles made before connection limits existed get theirs now (idempotent).
+  for (const tenant of tenants) await deps.cluster.limitRoleConnections(tenant.dbRole);
   const result = await migrateTenants(
     deps.pools,
     tenants.map((t) => t.id),

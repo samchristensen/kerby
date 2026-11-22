@@ -3,6 +3,7 @@ import { createBlobs } from "@kerby/blobs";
 import { getTenant, tenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { log } from "@kerby/observability";
+import { createSealer } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { type ApiConfig, loadApiConfig } from "./config/index.ts";
 import { createApiApp } from "./runtime/http.ts";
@@ -31,10 +32,14 @@ export async function startApi(config: ApiConfig) {
     control,
     pools,
     blobs,
+    sealer: createSealer(config.secretsPublicKey),
     settings: {
-      models: config.models,
+      defaultModel: config.defaultModel,
+      keylessProviders: config.keylessProviders,
       defaultSystem: config.defaultSystem,
       authCacheMs: config.authCacheSeconds * 1000,
+      maxStreamsPerTenant: config.maxStreamsPerTenant,
+      streamRecheckMs: 5000,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

@@ -19,6 +19,16 @@ export {
   revokeApiKey,
 } from "./keys.ts";
 export {
+  deleteModelKey,
+  hasModelKey,
+  isProviderId,
+  listModelKeys,
+  MAX_MODEL_KEYS_PER_TENANT,
+  ModelKeyLimitError,
+  putModelKey,
+  readModelKey,
+} from "./secrets.ts";
+export {
   deleteTenantRow,
   getTenant,
   insertTenant,

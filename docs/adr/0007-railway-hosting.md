@@ -29,7 +29,8 @@ already do.
   what the template ships, so Compose, the test containers and `pg_dump` in the control image are 18 too.
 - **Secrets** are generated once by the setup script (24 random bytes, hex), stored as service variables, and kept on
   every later run. `TENANT_DB_SECRET` is never regenerated on a live system: every tenant role's password derives from it.
-  Provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) are passed from the operator's shell when set.
+  The secrets key pair ([ADR 0008](0008-byok-sealed-secrets.md)) is made once the same way: the private key on `worker`, the public
+  key on `api`. Kerby holds no model provider keys: tenants bring theirs.
 - **Provisioning is a script, not declarative state.** `scripts/railway.ts` (`setup`, `deploy`) drives the CLI and is safe
   to run again. Rejected: Terraform (a third-party Railway provider plus a state backend to hold four services and their
   passwords is more than 250 lines of script); Git-connected auto-deploys (needs a remote the repo does not have yet).

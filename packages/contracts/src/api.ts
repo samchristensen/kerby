@@ -12,7 +12,7 @@ export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export const CreateConversationRequestSchema = z.object({
   /** The tenant's own name for the end user. Kerby does not authenticate end users. */
   externalUserId: Id.optional(),
-  /** A Kerby model id. Defaults to the tenant's default. */
+  /** A Kerby model id, `<provider>/<modelId>`; the tenant must hold a key for the provider. Defaults to the deployment default. */
   model: z.string().min(1).max(200).optional(),
   system: z.string().max(100_000).optional(),
 });

@@ -2,6 +2,7 @@
 // tenant's index, run through the AgentRuntime port, and persist every `message_end` before pulling the next event,
 // which is what makes the runtime's "no tool before its message is stored" gate hold.
 import type { AgentEvent, AgentRun, ToolResult } from "@kerby/agent";
+import { parseModelId } from "@kerby/contracts";
 import { recordUsage } from "@kerby/control-plane";
 import {
   findConversation,
@@ -96,9 +97,31 @@ export async function runTurn(
   let nextSeq = (stored.at(-1)?.seq ?? 0) + 1;
   const tools = tenantTools({ enableEcho: deps.settings.enableEchoTool });
 
+  // Bring your own key: the tenant's key for the model's provider, opened for this run only.
+  let apiKey: string | undefined;
+  if (deps.modelKeys) {
+    const provider = parseModelId(conversation.model)?.provider;
+    apiKey = provider ? await deps.modelKeys(ctx.tenantId, provider) : undefined;
+    if (!apiKey) {
+      // The same turn gets the same answer until the tenant adds a key: no retry.
+      await setLastError(
+        ctx.db,
+        conversationId,
+        provider
+          ? `no model key for provider "${provider}": PUT /v1/model-keys/${provider}, then post a message`
+          : `model "${conversation.model}" must look like <provider>/<modelId>`,
+      );
+      log("warn", "turn refused: no model key", { provider: provider ?? "invalid" });
+      return;
+    }
+  }
+  /** A provider's error can quote the key it rejected; nothing that leaves this function may. */
+  const scrub = (text: string): string => (apiKey ? text.replaceAll(apiKey, "[redacted]") : text);
+
   const agentRun: AgentRun = {
     system: conversation.system,
     model: conversation.model,
+    ...(apiKey === undefined ? {} : { apiKey }),
     history: stored.map((s) => s.message),
     tools: tools.specs(),
     // The only way a tool runs: an Absurd step keyed by the call id, so a retried turn gets the stored result and
@@ -116,9 +139,13 @@ export async function runTurn(
   try {
     for await (const event of deps.runtime.run(agentRun)) {
       if (event.type !== "message_end") {
-        await live.send(event);
-        if (event.type === "run_end" && event.reason === "refused") {
-          await setLastError(ctx.db, conversationId, event.error ?? "the request was refused");
+        const safe =
+          event.type === "run_end" && event.error !== undefined
+            ? { ...event, error: scrub(event.error) }
+            : event;
+        await live.send(safe);
+        if (safe.type === "run_end" && safe.reason === "refused") {
+          await setLastError(ctx.db, conversationId, safe.error ?? "the request was refused");
         }
         continue;
       }
@@ -150,7 +177,11 @@ export async function runTurn(
       messages: persisted,
       attempt: run.attempt,
     });
-  } catch (error) {
+  } catch (caught) {
+    const error =
+      caught instanceof Error && apiKey && caught.message.includes(apiKey)
+        ? new Error(scrub(caught.message))
+        : caught;
     if (error instanceof LeaseLostError) {
       // Another worker owns this turn now; it will rehydrate from what is persisted. Write nothing more.
       log("warn", "lease lost; abandoning the run", { taskId: run.taskId });

@@ -12,7 +12,7 @@ import {
   readMessages,
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
-import { TenantPools } from "@kerby/db";
+import { type TenantDb, TenantPools } from "@kerby/db";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerConfigSchema } from "./config/index.ts";
 import {
@@ -46,6 +46,7 @@ type Options = {
   maxConcurrent?: number;
   echo?: boolean;
   settings?: Partial<WorkerDeps["settings"]>;
+  modelKeys?: WorkerDeps["modelKeys"];
 };
 
 async function harness(options: Options = {}) {
@@ -63,6 +64,7 @@ async function harness(options: Options = {}) {
     pools,
     blobs,
     runtime,
+    modelKeys: options.modelKeys,
     settings: {
       workerId: "test-worker",
       claimTimeoutSeconds: 30,
@@ -328,6 +330,109 @@ describe("recovery", () => {
   });
 });
 
+describe("bring your own key", () => {
+  const lastError = async (t: { ctx: { db: TenantDb } }) =>
+    (await t.ctx.db.query<{ last_error: string | null }>("select last_error from conversations"))
+      .rows[0]?.last_error;
+
+  it("hands the run the tenant's own key, looked up by tenant and provider", async () => {
+    const seen: { apiKey: string | undefined; model: string }[] = [];
+    const runtime: AgentRuntime = {
+      name: "spy",
+      async *run(run) {
+        seen.push({ apiKey: run.apiKey, model: run.model });
+        yield { type: "run_start" };
+        yield { type: "run_end", reason: "done" };
+      },
+    };
+    const lookups: string[] = [];
+    const h = await harness({
+      runtime,
+      modelKeys: async (tenantId, provider) => {
+        lookups.push(`${tenantId}:${provider}`);
+        return `key-for-${provider}`;
+      },
+    });
+    const t = await h.tenant("acme");
+    const conversation = await insertConversation(t.ctx.db, {
+      model: "acme-ai/big-1",
+      system: "s",
+    });
+    await h.post(t, conversation.id, "hello");
+    await eventually("turn", async () => seen.length > 0);
+    expect(seen).toEqual([{ apiKey: "key-for-acme-ai", model: "acme-ai/big-1" }]);
+    expect(lookups).toEqual([`${t.id}:acme-ai`]);
+  });
+
+  it("refuses a turn when the tenant has no key, without running the harness or retrying", async () => {
+    let ran = false;
+    const runtime: AgentRuntime = {
+      name: "spy",
+      async *run() {
+        ran = true;
+        yield { type: "run_end", reason: "done" };
+      },
+    };
+    const h = await harness({ runtime, modelKeys: async () => undefined });
+    const t = await h.tenant("acme");
+    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    await h.post(t, conversation.id, "hello");
+    await eventually("last_error", () => lastError(t).then((e) => e ?? false));
+    await eventually("turn done", async () => !(await isBusy(t.ctx.db, conversation.id)));
+    expect(await lastError(t)).toMatch(/no model key for provider "anthropic"/);
+    expect(ran).toBe(false);
+    expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
+      { attempts: 1 },
+    ]);
+  });
+
+  it("never lets the key reach the conversation, the live stream, or a thrown error", async () => {
+    const secret = "sk-live-0123456789abcdef";
+    const runtime: AgentRuntime = {
+      name: "leaky",
+      async *run() {
+        yield { type: "run_start" };
+        yield { type: "run_end", reason: "refused", error: `401 invalid key ${secret}` };
+      },
+    };
+    const h = await harness({ runtime, modelKeys: async () => secret });
+    const t = await h.tenant("acme");
+    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const notices: string[] = [];
+    const subscription = await t.ctx.db.listen(conversationChannel(conversation.id), (p) =>
+      notices.push(p),
+    );
+    cleanups.push(() => subscription.close());
+    await h.post(t, conversation.id, "hello");
+    const stored = await eventually("last_error", () => lastError(t).then((e) => e ?? false));
+    expect(stored).toBe("401 invalid key [redacted]");
+    await eventually("run_end notice", async () => notices.some((n) => n.includes('"run_end"')));
+    expect(notices.join("\n")).not.toContain(secret);
+  });
+
+  it("keeps the key out of the failure Absurd records when the harness throws it", async () => {
+    const secret = "sk-live-0123456789abcdef";
+    const failing: AgentRuntime = {
+      name: "leaky",
+      // biome-ignore lint/correctness/useYield: it fails before producing anything
+      async *run(): AsyncGenerator<AgentEvent> {
+        throw new Error(`connect failed for key ${secret}`);
+      },
+    };
+    const h = await harness({ runtime: failing, modelKeys: async () => secret });
+    const t = await h.tenant("acme");
+    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    await h.post(t, conversation.id, "hello", false);
+    await retryFast(t, 2);
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await eventually("the turn to fail", () => lastError(t).then((e) => e ?? false));
+    const runs = await t.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
+    expect(runs.rows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(runs.rows)).toContain("[redacted]");
+    expect(JSON.stringify(runs.rows)).not.toContain(secret);
+  });
+});
+
 describe("fencing", () => {
   it("a worker whose lease lapsed cannot write a divergent message after another worker took over", async () => {
     const release = Promise.withResolvers<void>();
@@ -470,6 +575,14 @@ describe("worker config", () => {
         kerbyEnvironment: "development",
       }).success,
     ).toBe(true);
-    expect(workerConfigSchema.parse(base).kerbyFakeModel).toBe(false);
+    expect(workerConfigSchema.parse({ ...base, secretsPrivateKeys: "a2V5" }).kerbyFakeModel).toBe(
+      false,
+    );
+  });
+
+  it("requires a secrets private key unless it runs the fake model", () => {
+    const refused = workerConfigSchema.safeParse(base);
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]?.path).toEqual(["secretsPrivateKeys"]);
   });
 });

@@ -1,3 +1,5 @@
+import { connect } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -135,5 +137,68 @@ describe("serve", () => {
       headers: { authorization: "Bearer abc123" },
     });
     expect(await response.json()).toEqual({ body: "hello", token: "abc123" });
+  });
+});
+
+describe("hostile requests", () => {
+  const raw = (port: number, request: string) =>
+    new Promise<string>((resolve) => {
+      const socket = connect(port, "127.0.0.1", () => socket.write(request));
+      let received = "";
+      socket.on("data", (chunk) => {
+        received += chunk.toString();
+      });
+      socket.on("close", () => resolve(received));
+      socket.setTimeout(2000, () => socket.destroy());
+    });
+
+  it("answers a method or Host header Fetch cannot represent, and keeps serving", async () => {
+    const server = await serve(createRouter([["GET", "/ok", () => json(200, { ok: true })]]), {
+      host: "127.0.0.1",
+      port: 0,
+    });
+    servers.push(server);
+    const trace = await raw(
+      server.port,
+      "TRACE /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    expect(trace).toMatch(/^HTTP\/1\.1 400/);
+    const host = await raw(
+      server.port,
+      "GET /ok HTTP/1.1\r\nHost: a@b c\r\nConnection: close\r\n\r\n",
+    );
+    expect(host).toMatch(/^HTTP\/1\.1 200/);
+    const target = await raw(
+      server.port,
+      "GET http://evil.example/ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    expect(target).toMatch(/^HTTP\/1\.1 400/);
+    expect((await fetch(`http://127.0.0.1:${server.port}/ok`)).status).toBe(200);
+  });
+
+  it("releases a stream whose client left while its writes were blocked", async () => {
+    const cancelled = Promise.withResolvers<void>();
+    const chunk = new Uint8Array(64 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull: (controller) => controller.enqueue(chunk),
+      cancel: () => cancelled.resolve(),
+    });
+    const server = await serve(createRouter([["GET", "/stream", () => new Response(body)]]), {
+      host: "127.0.0.1",
+      port: 0,
+    });
+    servers.push(server);
+    const socket = connect(server.port, "127.0.0.1", () =>
+      socket.write("GET /stream HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+    socket.pause();
+    await sleep(500); // the kernel buffers fill and the server blocks on drain
+    socket.destroy();
+    await Promise.race([
+      cancelled.promise,
+      sleep(5000).then(() => {
+        throw new Error("the stream was never released");
+      }),
+    ]);
   });
 });

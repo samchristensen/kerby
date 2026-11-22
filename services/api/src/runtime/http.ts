@@ -1,6 +1,17 @@
 // The tenant-facing API. Every route but /healthz authenticates a bearer API key and runs as that key's tenant.
-import { CreateConversationRequestSchema, PostMessageRequestSchema } from "@kerby/contracts";
-import { ConversationBusyError, findConversation, isConversationId } from "@kerby/conversations";
+import {
+  CreateConversationRequestSchema,
+  ModelProviderSchema,
+  PostMessageRequestSchema,
+  PutModelKeyRequestSchema,
+} from "@kerby/contracts";
+import { ModelKeyLimitError } from "@kerby/control-plane";
+import {
+  ConversationBusyError,
+  ConversationFullError,
+  findConversation,
+  isConversationId,
+} from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { log, withTenant } from "@kerby/observability";
 import {
@@ -21,6 +32,7 @@ import {
   postMessage,
   type StreamItem,
 } from "../service/conversations.ts";
+import { listTenantModelKeys, removeModelKey, setModelKey } from "../service/model-keys.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -120,8 +132,12 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           } catch (error) {
             if (error instanceof NotFoundError)
               throw new HttpError(404, "not_found", error.message);
+            if (error instanceof ConversationFullError)
+              throw new HttpError(413, "conversation_full", error.message);
             if (error instanceof ConversationBusyError)
               throw new HttpError(409, "conversation_busy", error.message);
+            if (error instanceof ModelKeyLimitError)
+              throw new HttpError(409, "model_key_limit", error.message);
             if (error instanceof InvalidModelError)
               throw new HttpError(400, "invalid_model", error.message);
             throw error;
@@ -152,8 +168,43 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     return id;
   };
 
+  /** Open event streams per tenant in this process: each holds a database connection for as long as it lives. */
+  const openStreams = new Map<string, number>();
+
+  const providerParam = (params: Record<string, string>): string => {
+    const parsed = ModelProviderSchema.safeParse(params.provider);
+    if (!parsed.success) throw new HttpError(404, "not_found", "model key not found");
+    return parsed.data;
+  };
+
   const routes: Route[] = [
     ["GET", "/healthz", () => json(200, { ok: true })],
+    [
+      "GET",
+      "/v1/model-keys",
+      authed("GET /v1/model-keys", async (_request, _params, principal) =>
+        json(200, await listTenantModelKeys(deps, principal)),
+      ),
+    ],
+    [
+      "PUT",
+      "/v1/model-keys/:provider",
+      authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
+        const provider = providerParam(params);
+        const body = await readJson(request, PutModelKeyRequestSchema, { maxBytes: 16_384 });
+        await setModelKey(deps, principal, provider, body.apiKey);
+        return new Response(null, { status: 204 });
+      }),
+    ],
+    [
+      "DELETE",
+      "/v1/model-keys/:provider",
+      authed("DELETE /v1/model-keys/:provider", async (_request, params, principal) => {
+        if (!(await removeModelKey(deps, principal, providerParam(params))))
+          throw new NotFoundError("model key not found");
+        return new Response(null, { status: 204 });
+      }),
+    ],
     [
       "POST",
       "/v1/conversations",
@@ -191,15 +242,35 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const after = header === null ? 0 : Number(header);
         if (!Number.isInteger(after) || after < 0)
           throw new HttpError(400, "invalid_request", "Last-Event-ID must be a sequence number");
-        // The pool stays leased for as long as the stream is open.
-        const lease = await deps.pools.acquire(principal.tenantId);
+        const open = openStreams.get(principal.tenantId) ?? 0;
+        if (open >= deps.settings.maxStreamsPerTenant)
+          throw new HttpError(
+            429,
+            "too_many_streams",
+            `at most ${deps.settings.maxStreamsPerTenant} event streams may be open at once`,
+          );
+        openStreams.set(principal.tenantId, open + 1);
         let released = false;
+        let lease: Awaited<ReturnType<typeof deps.pools.acquire>> | undefined;
         const release = async () => {
           if (released) return;
           released = true;
-          await lease.release();
+          const left = (openStreams.get(principal.tenantId) ?? 1) - 1;
+          if (left > 0) openStreams.set(principal.tenantId, left);
+          else openStreams.delete(principal.tenantId);
+          await lease?.release();
         };
+        const presented = bearerToken(request) ?? "";
+        // A stream outlives the check that opened it: look again, so revoking a key or suspending a tenant ends it
+        // within the same window as for a request.
+        const stillAllowed = () =>
+          auth.authenticate(presented).then(
+            () => true,
+            () => false,
+          );
         try {
+          // The pool stays leased for as long as the stream is open.
+          lease = await deps.pools.acquire(principal.tenantId);
           // Look the conversation up before sending headers, so a wrong id is a 404 and not an empty stream.
           if (!(await findConversation(lease.db, id)))
             throw new NotFoundError("conversation not found");
@@ -209,6 +280,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
             id,
             after,
             request.signal,
+            stillAllowed,
           );
           return sse(events, release);
         } catch (error) {

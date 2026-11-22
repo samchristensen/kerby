@@ -1,15 +1,24 @@
 import type { Blobs } from "@kerby/blobs";
 import type { ControlDb, TenantPools } from "@kerby/db";
+import type { Sealer } from "@kerby/secrets";
 
 export type ApiDeps = {
   control: ControlDb;
   pools: TenantPools;
   blobs: Blobs;
+  /** Seals tenants' model keys to the platform public key; it cannot open them. */
+  sealer: Sealer;
   settings: {
-    /** Models a conversation may use; the first is the default. */
-    models: readonly string[];
+    /** The model a conversation gets when the request names none; without one, a request must name its model. */
+    defaultModel: string | undefined;
+    /** Providers whose runs need no tenant key (the development fake model). Empty in production. */
+    keylessProviders: readonly string[];
     defaultSystem: string;
     authCacheMs: number;
+    /** Open event streams one tenant may hold on one api process; each keeps a database connection. */
+    maxStreamsPerTenant: number;
+    /** How often an open event stream confirms its key and tenant are still allowed. */
+    streamRecheckMs: number;
   };
 };
 

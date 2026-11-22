@@ -6,11 +6,11 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 
 const PRODUCTION = "production";
 const BUCKET = "kerby";
 const BUCKET_REGION = "iad";
-const MODELS = "anthropic/claude-sonnet-4-5";
 const APP_ROLE = "kerby_app";
 const SERVICES = ["control", "api", "worker"] as const;
 type Service = (typeof SERVICES)[number];
@@ -110,6 +110,8 @@ function ensureResources(environment: string): Map<string, string> {
 /**
  * Secrets already on the control service are kept: the tenant secret in particular must never change on a live system.
  * A copy of production starts with production's secrets, which it must not share: those are replaced.
+ * The secrets private key lives on the worker, the only service that opens tenants' model keys. Replacing it on a live
+ * system would strand every key sealed to it, so it is kept like the tenant secret and is only made when there is none.
  */
 function secretsFor(environment: string) {
   const existing = variablesOf("control", environment);
@@ -118,7 +120,11 @@ function secretsFor(environment: string) {
     existing.TENANT_DB_SECRET !== undefined &&
     existing.TENANT_DB_SECRET === variablesOf("control", PRODUCTION).TENANT_DB_SECRET;
   const keep = copied ? {} : existing;
+  const secretsPrivateKeys =
+    (copied ? undefined : variablesOf("worker", environment).SECRETS_PRIVATE_KEYS) ??
+    generateSecretsKeyPair().privateKey;
   return {
+    secretsPrivateKeys,
     operatorToken: keep.OPERATOR_TOKEN ?? secret(),
     tenantDbSecret: keep.TENANT_DB_SECRET ?? secret(),
     appDatabasePassword: keep.APP_DATABASE_PASSWORD ?? secret(),
@@ -134,7 +140,8 @@ async function setup(environment: string): Promise<void> {
     return found;
   };
 
-  const { operatorToken, tenantDbSecret, appDatabasePassword } = secretsFor(environment);
+  const { operatorToken, tenantDbSecret, appDatabasePassword, secretsPrivateKeys } =
+    secretsFor(environment);
   const bucket = record(
     railwayJson(["bucket", "credentials", "--bucket", BUCKET, "--environment", environment]),
     "bucket credentials",
@@ -163,16 +170,17 @@ async function setup(environment: string): Promise<void> {
       OPERATOR_TOKEN: operatorToken,
       APP_DATABASE_PASSWORD: appDatabasePassword,
     },
-    api: { ...shared, CONTROL_DATABASE_URL: limitedUrl, MODELS },
+    // The api seals tenants' model keys to the public half and cannot open them.
+    api: {
+      ...shared,
+      CONTROL_DATABASE_URL: limitedUrl,
+      SECRETS_PUBLIC_KEY: publicKeyOf(secretsPrivateKeys.split(",")[0] ?? ""),
+    },
     worker: {
       ...shared,
       CONTROL_DATABASE_URL: limitedUrl,
       HEALTH_PORT: String(PORTS.worker),
-      // Provider keys come from your shell when set, and are otherwise left as they are.
-      ...(process.env.ANTHROPIC_API_KEY
-        ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }
-        : {}),
-      ...(process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {}),
+      SECRETS_PRIVATE_KEYS: secretsPrivateKeys,
     },
   };
 

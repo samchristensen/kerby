@@ -1,4 +1,9 @@
-export { type ClusterAdmin, createClusterAdmin, dumpDatabase } from "./cluster.ts";
+export {
+  type ClusterAdmin,
+  createClusterAdmin,
+  dumpDatabase,
+  TENANT_ROLE_CONNECTION_LIMIT,
+} from "./cluster.ts";
 export { isConnectionError, withConnectRetry } from "./connect-retry.ts";
 export {
   type ClosableControlDb,

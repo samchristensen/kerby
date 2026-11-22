@@ -1,13 +1,21 @@
 import { createControlDb } from "@kerby/db";
+import { createOpener, createSealer, generateSecretsKeyPair, SecretsError } from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
   authenticateApiKey,
   createApiKey,
+  deleteModelKey,
   getTenant,
+  hasModelKey,
   insertTenant,
   listApiKeys,
+  listModelKeys,
   listTenants,
+  MAX_MODEL_KEYS_PER_TENANT,
+  ModelKeyLimitError,
   parseApiKey,
+  putModelKey,
+  readModelKey,
   recordUsage,
   revokeApiKey,
   setAppRolePassword,
@@ -146,19 +154,74 @@ describe("the limited app role (what api and worker connect as)", () => {
 
       // operator-only data and writes are refused
       for (const sql of [
-        "select * from tenant_secrets",
         "select * from audit_log",
         "insert into tenants (name, db_host, db_port, db_name, db_role) values ('x', 'h', 1, 'd', 'r')",
         "update tenants set status = 'suspended'",
         "update api_keys set revoked_at = null",
         "update api_keys set key_hash = '\\x00'",
         "delete from usage",
-        "insert into audit_log (actor, action) values ('a', 'b')",
+        "update audit_log set actor = 'x'",
+        "delete from audit_log",
       ]) {
         await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
       }
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("model keys", () => {
+  it("seals per tenant, replaces, lists providers without keys, and deletes", async () => {
+    await using control = await createTestControlDb();
+    const pair = generateSecretsKeyPair();
+    const sealer = createSealer(pair.publicKey);
+    const opener = createOpener([pair.privateKey]);
+    const a = await insertTenant(control.db, newTenant("a"));
+    const b = await insertTenant(control.db, newTenant("b"));
+
+    await putModelKey(control.db, sealer, a.id, "anthropic", "sk-a-1");
+    await putModelKey(control.db, sealer, a.id, "anthropic", "sk-a-2");
+    await putModelKey(control.db, sealer, b.id, "anthropic", "sk-b");
+
+    expect(await readModelKey(control.db, opener, a.id, "anthropic")).toBe("sk-a-2");
+    expect(await readModelKey(control.db, opener, b.id, "anthropic")).toBe("sk-b");
+    expect(await readModelKey(control.db, opener, a.id, "openai")).toBeUndefined();
+    expect((await listModelKeys(control.db, a.id)).map((k) => k.provider)).toEqual(["anthropic"]);
+    const raw = await control.db.query<{ ciphertext: Buffer }>(
+      "select ciphertext from tenant_secrets where tenant_id = $1",
+      [a.id],
+    );
+    expect(raw.rows[0]?.ciphertext.includes(Buffer.from("sk-a-2"))).toBe(false);
+
+    // a ciphertext copied into another tenant's row does not open there
+    await control.db.query(
+      `update tenant_secrets set ciphertext = (select ciphertext from tenant_secrets where tenant_id = $1)
+        where tenant_id = $2`,
+      [a.id, b.id],
+    );
+    await expect(readModelKey(control.db, opener, b.id, "anthropic")).rejects.toBeInstanceOf(
+      SecretsError,
+    );
+    expect(await deleteModelKey(control.db, b.id, "anthropic")).toBe(true);
+    expect(await hasModelKey(control.db, b.id, "anthropic")).toBe(false);
+    expect(await deleteModelKey(control.db, b.id, "anthropic")).toBe(false);
+  });
+
+  it("refuses an invalid provider id and a tenant past the key limit", async () => {
+    await using control = await createTestControlDb();
+    const sealer = createSealer(generateSecretsKeyPair().publicKey);
+    const tenant = await insertTenant(control.db, newTenant("a"));
+    await expect(putModelKey(control.db, sealer, tenant.id, "../x", "k")).rejects.toThrow(
+      /provider id/,
+    );
+    for (let i = 0; i < MAX_MODEL_KEYS_PER_TENANT; i++) {
+      await putModelKey(control.db, sealer, tenant.id, `p${i}`, "k");
+    }
+    await expect(
+      putModelKey(control.db, sealer, tenant.id, "one-more", "k"),
+    ).rejects.toBeInstanceOf(ModelKeyLimitError);
+    // replacing an existing one still works at the limit
+    await putModelKey(control.db, sealer, tenant.id, "p0", "k2");
   });
 });

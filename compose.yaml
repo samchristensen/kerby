@@ -2,6 +2,11 @@
 # Local values only: the tokens and secrets below are for development and must never be used elsewhere.
 name: ${KERBY_PROJECT:-kerby-stack}
 
+# Kerby's own processes need no Linux capability and never gain privilege.
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 x-tenant-env: &tenant-env
   CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
   TENANT_DB_SECRET: ${KERBY_TENANT_DB_SECRET:-local-dev-tenant-db-secret-0123456789}
@@ -41,6 +46,7 @@ services:
       retries: 20
 
   control:
+    <<: *hardened
     build:
       context: .
       dockerfile: services/control/Dockerfile
@@ -59,13 +65,19 @@ services:
       rustfs: { condition: service_healthy }
 
   api:
+    <<: *hardened
     build:
       context: .
       dockerfile: services/api/Dockerfile
       target: ${KERBY_IMAGE_TARGET:-prod}
     environment:
       <<: *tenant-env
-      MODELS: ${KERBY_MODELS:-fake/fake-1}
+      # The default model for a conversation that names none. Tenants bring their own key per provider
+      # (PUT /v1/model-keys/<provider>); `fake` needs none and only exists with KERBY_FAKE_MODEL=1 on the worker.
+      DEFAULT_MODEL: ${KERBY_DEFAULT_MODEL:-fake/fake-1}
+      KEYLESS_PROVIDERS: ${KERBY_KEYLESS_PROVIDERS:-fake}
+      # A development key pair (the private half is on the worker below): never use it anywhere real.
+      SECRETS_PUBLIC_KEY: "y4c7+AJM8aN76nrweWjLR0gShtooDI7uI0ay8mTDHR0="
       # Short, so suspension and key revocation show within seconds locally (the default is 30).
       AUTH_CACHE_SECONDS: "3"
       PORT: "8080"
@@ -76,6 +88,7 @@ services:
       control: { condition: service_healthy }
 
   worker:
+    <<: *hardened
     build:
       context: .
       dockerfile: services/worker/Dockerfile
@@ -89,9 +102,7 @@ services:
       SWEEP_INTERVAL_SECONDS: "3"
       # Short, so a killed worker's turn moves to another worker in seconds (the default is two minutes).
       CLAIM_TIMEOUT_SECONDS: "10"
-      # Passed through from your shell only when set (platform provider keys, for real models).
-      ANTHROPIC_API_KEY:
-      OPENAI_API_KEY:
+      SECRETS_PRIVATE_KEYS: "oLJooOTi5uJQL4lbxdJoXNIFChaniiOI87/7rlz341o="
     depends_on:
       control: { condition: service_healthy }
 

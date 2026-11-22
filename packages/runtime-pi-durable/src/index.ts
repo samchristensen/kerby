@@ -41,11 +41,15 @@ import { seedHistory } from "./seed.ts";
 import { TextForwarder } from "./text.ts";
 
 export { createFakeModels, FAKE_MODEL } from "./fake.ts";
-export { createProviderModels, type ProviderKeys } from "./providers.ts";
+export { createTenantModels, SUPPORTED_PROVIDERS } from "./providers.ts";
 
 export type PiDurableOptions = {
-  /** The model catalog and credentials. The composition root builds it; tests pass a faux provider. */
-  models: Models;
+  /**
+   * The model catalog and credentials. A fixed `Models` (the development fake, a test's faux provider) serves every
+   * run; a function builds one per run from the provider and the caller's own key, or returns undefined when the
+   * provider is unknown or no key was given.
+   */
+  models: Models | ((provider: string, apiKey: string | undefined) => Models | undefined);
   /** Kerby model id to Pi's provider and model id. Default: `<provider>/<modelId>`, split at the first slash. */
   resolveModel?: (kerbyModel: string) => { provider: string; modelId: string };
   /** Retry policy for failed model requests inside a run. Default: 2 retries, 1 s base delay. */
@@ -123,8 +127,12 @@ async function* runPi(
 
   // 2. A fresh harness with Kerby's tools, continuing from history.
   const ref = resolve(run.model);
-  const model = options.models.getModel(ref.provider, ref.modelId);
-  if (!model) {
+  const models =
+    typeof options.models === "function"
+      ? options.models(ref.provider, run.apiKey)
+      : options.models;
+  const model = models?.getModel(ref.provider, ref.modelId);
+  if (!models || !model) {
     // The same request gets the same answer: no retry.
     yield { type: "run_end", reason: "refused", error: `model ${run.model} is not available` };
     return;
@@ -172,7 +180,7 @@ async function* runPi(
   const harness = await Harness.open(
     new MemoryStorage(),
     {
-      models: options.models,
+      models,
       registry,
       onReport: (_error, info) => options.onReport?.(info.type),
       settings: { retry: options.modelRetry ?? { maxRetries: 2, baseDelayMs: 1000 } },

@@ -72,8 +72,10 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 - A tenant id reaches code only through that verified key, never through a request body. _review_
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call.
-- Tenant model keys and tool credentials are encrypted in the control plane and decrypted only inside a run. Logs carry the
-  tenant id, never message content or secrets. _review_
+- Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)); Kerby holds no provider key. A key is
+  sealed by `packages/secrets` to a public key the api holds, stored in the control plane's `tenant_secrets`, and opened only by a
+  worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the tenant id,
+  never message content or secrets; the worker scrubs the key from provider errors. _review_
 - No tenant code runs in Kerby's processes. Tools are remote MCP servers reached through an egress guard (no private
   ranges, no redirects into them). _review_
 - Lifecycle is an operator command in `services/control`: provision, suspend, export, delete. Provisioning copies the
@@ -149,8 +151,10 @@ then provisions a `default` tenant through the operator API and prints its key. 
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
 - The worker runs the scripted fake model and the `echo` tool (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`); the
-  worker refuses `KERBY_FAKE_MODEL` outside development. Put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your shell and
-  `KERBY_FAKE_MODEL=0`, `KERBY_MODELS=<provider>/<model>` to use a real model.
+  worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
+  `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
+  `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
+  key pair; `make secrets-key` makes a real one.
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
@@ -164,7 +168,8 @@ then provisions a `default` tenant through the operator API and prints its key. 
 Railway, driven by `scripts/railway.ts` (`make railway-setup`, `make deploy`): one project, a `production` environment (any other name is an
 ephemeral copy), and per environment a `Postgres` service, a bucket, and `control`, `api` and `worker` built from the Dockerfiles Compose
 runs: [ADR 0007](docs/adr/0007-railway-hosting.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
-Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys.
+Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys. The secrets private key is
+a variable on `worker` only; the api gets the public half.
 
 ## Dependencies
 

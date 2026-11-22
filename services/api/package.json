@@ -14,6 +14,7 @@
     "@kerby/conversations": "workspace:*",
     "@kerby/db": "workspace:*",
     "@kerby/observability": "workspace:*",
+    "@kerby/secrets": "workspace:*",
     "@kerby/serve": "workspace:*",
     "zod": "catalog:"
   }

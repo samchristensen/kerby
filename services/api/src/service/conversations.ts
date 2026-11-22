@@ -7,7 +7,8 @@ import type {
   PostMessageRequest,
   PostMessageResponse,
 } from "@kerby/contracts";
-import { PublicMessageSchema } from "@kerby/contracts";
+import { PublicMessageSchema, parseModelId } from "@kerby/contracts";
+import { hasModelKey } from "@kerby/control-plane";
 import {
   ConversationNotFoundError,
   conversationChannel,
@@ -48,9 +49,19 @@ export async function createConversation(
   ctx: TenantContext,
   request: CreateConversationRequest,
 ): Promise<Conversation> {
-  const model = request.model ?? deps.settings.models[0];
-  if (!model || !deps.settings.models.includes(model)) {
-    throw new InvalidModelError(`model must be one of: ${deps.settings.models.join(", ")}`);
+  const model = request.model ?? deps.settings.defaultModel;
+  if (!model) throw new InvalidModelError("model is required: <provider>/<modelId>");
+  const parsed = parseModelId(model);
+  if (!parsed) throw new InvalidModelError(`model "${model}" must look like <provider>/<modelId>`);
+  // Bring your own key: a conversation needs the tenant's key for its provider, so a missing one fails here and
+  // not on the first turn.
+  if (
+    !deps.settings.keylessProviders.includes(parsed.provider) &&
+    !(await hasModelKey(deps.control, ctx.tenantId, parsed.provider))
+  ) {
+    throw new InvalidModelError(
+      `no model key for provider "${parsed.provider}": PUT /v1/model-keys/${parsed.provider} first`,
+    );
   }
   const record = await insertConversation(ctx.db, {
     externalUserId: request.externalUserId,
@@ -133,6 +144,7 @@ export async function* conversationEvents(
   conversationId: string,
   afterSeq: number,
   signal: AbortSignal,
+  stillAllowed: () => Promise<boolean>,
 ): AsyncGenerator<StreamItem> {
   if (!(await findConversation(ctx.db, conversationId)))
     throw new NotFoundError("conversation not found");
@@ -163,8 +175,14 @@ export async function* conversationEvents(
   let lastSeq = afterSeq;
   let lastActivity = Date.now();
   let lastPoll = 0;
+  let lastCheck = Date.now();
   try {
     while (!signal.aborted) {
+      // Ends the stream when the key was revoked or the tenant suspended since it opened.
+      if (Date.now() - lastCheck >= deps.settings.streamRecheckMs) {
+        lastCheck = Date.now();
+        if (!(await stillAllowed())) return;
+      }
       if (dirty || Date.now() - lastPoll >= POLL_MS) {
         dirty = false;
         lastPoll = Date.now();
@@ -198,7 +216,10 @@ export async function* conversationEvents(
       }
       wake = Promise.withResolvers<void>();
       if (dirty || live.length > 0 || signal.aborted) continue;
-      const timer = setTimeout(poke, Math.min(POLL_MS, KEEP_ALIVE_MS));
+      const timer = setTimeout(
+        poke,
+        Math.min(POLL_MS, KEEP_ALIVE_MS, deps.settings.streamRecheckMs),
+      );
       await wake.promise;
       clearTimeout(timer);
     }

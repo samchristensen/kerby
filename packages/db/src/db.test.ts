@@ -11,6 +11,7 @@ import {
   createTenantDb,
   migrate,
   migrateTenants,
+  TENANT_ROLE_CONNECTION_LIMIT,
   type TenantDb,
   TenantPools,
 } from "./index.ts";
@@ -263,6 +264,18 @@ describe("ClusterAdmin as a non-superuser", () => {
     const role = `r_${suffix}`;
     const name = `t_${suffix}`;
     await cluster.createRole(role, "tenant-pw");
+    const limit = async () =>
+      (
+        await root.query<{ rolconnlimit: number }>(
+          "select rolconnlimit from pg_roles where rolname = $1",
+          [role],
+        )
+      ).rows[0]?.rolconnlimit;
+    expect(await limit()).toBe(TENANT_ROLE_CONNECTION_LIMIT);
+    // a role made before the limit existed gets it when asked
+    await root.query(`alter role ${role} connection limit -1`);
+    await cluster.limitRoleConnections(role);
+    expect(await limit()).toBe(TENANT_ROLE_CONNECTION_LIMIT);
     await cluster.createDatabase(name, { template, owner: role });
     await cluster.reassignOwned(name, role);
     await cluster.restrictDatabase(name, role);

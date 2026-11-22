@@ -138,19 +138,38 @@ export function createRouter(routes: readonly Route[]): FetchHandler {
 
 export type Server = { port: number; close(): Promise<void> };
 
+/**
+ * The Fetch `Request` for a Node request. The URL's host is fixed: nothing here routes by Host, and a hostile Host
+ * header must not be able to make the URL invalid. Throws for what the Fetch standard cannot represent (a TRACE
+ * method, a request target that is not a path); the caller answers those with a status, never an exception.
+ */
 function toRequest(incoming: IncomingMessage, signal: AbortSignal): Request {
-  const host = incoming.headers.host ?? "localhost";
+  const target = incoming.url ?? "/";
+  if (!target.startsWith("/")) throw new RangeError("the request target must be a path");
   const headers = new Headers();
   for (const [name, value] of Object.entries(incoming.headers)) {
     if (Array.isArray(value)) for (const v of value) headers.append(name, v);
     else if (value !== undefined) headers.set(name, value);
   }
   const hasBody = incoming.method !== "GET" && incoming.method !== "HEAD";
-  return new Request(`http://${host}${incoming.url ?? "/"}`, {
+  return new Request(`http://localhost${target}`, {
     method: incoming.method ?? "GET",
     headers,
     signal,
     ...(hasBody ? { body: Readable.toWeb(incoming) as ReadableStream, duplex: "half" } : {}),
+  });
+}
+
+/** Resolves when the response drained or the client went away, whichever comes first. */
+function drained(outgoing: ServerResponse): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      outgoing.off("drain", done);
+      outgoing.off("close", done);
+      resolve();
+    };
+    outgoing.once("drain", done);
+    outgoing.once("close", done);
   });
 }
 
@@ -167,9 +186,13 @@ async function send(response: Response, outgoing: ServerResponse): Promise<void>
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      // Honour backpressure: a slow client must not make us buffer a stream without bound.
-      if (!outgoing.write(value))
-        await new Promise<void>((resolve) => outgoing.once("drain", resolve));
+      // Honour backpressure: a slow client must not make us buffer a stream without bound. A client that left
+      // while we waited never drains: stop, so the stream's resources (a database connection) are released.
+      if (!outgoing.write(value)) await drained(outgoing);
+      if (outgoing.destroyed) {
+        await reader.cancel().catch(() => {});
+        return;
+      }
     }
   } finally {
     outgoing.end();
@@ -185,7 +208,15 @@ export function serve(
   const server = createServer((incoming, outgoing) => {
     const aborted = new AbortController();
     outgoing.on("close", () => aborted.abort());
-    handler(toRequest(incoming, aborted.signal))
+    Promise.resolve()
+      .then(() => {
+        try {
+          return handler(toRequest(incoming, aborted.signal));
+        } catch {
+          // A request Fetch cannot represent: refuse it, and stay up.
+          return json(400, { error: { code: "invalid_request", message: "unsupported request" } });
+        }
+      })
       .then((response) => send(response, outgoing))
       .catch((error: unknown) => {
         log("error", "writing a response failed", errorFields(error));

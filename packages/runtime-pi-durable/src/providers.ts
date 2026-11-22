@@ -1,61 +1,63 @@
-import {
-  type Credential,
-  type CredentialInfo,
-  type CredentialStore,
-  createModels,
-  type Models,
-} from "@earendil-works/pi-ai";
+import { type Credential, createModels, type Models, type Provider } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { cerebrasProvider } from "@earendil-works/pi-ai/providers/cerebras";
+import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
+import { fireworksProvider } from "@earendil-works/pi-ai/providers/fireworks";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import { groqProvider } from "@earendil-works/pi-ai/providers/groq";
+import { mistralProvider } from "@earendil-works/pi-ai/providers/mistral";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { togetherProvider } from "@earendil-works/pi-ai/providers/together";
+import { xaiProvider } from "@earendil-works/pi-ai/providers/xai";
 
-export type ProviderKeys = {
-  anthropicApiKey?: string | undefined;
-  openaiApiKey?: string | undefined;
+type AnyProvider = Provider;
+
+// Providers a tenant can bring a plain API key for. Cloud-account providers (Bedrock, Vertex, Azure) and OAuth
+// logins are left out on purpose: their credentials are not one string, and a tenant's cloud identity is not
+// something to hold. Adding a provider is one line here.
+const PROVIDERS: Record<string, () => AnyProvider> = {
+  anthropic: anthropicProvider,
+  cerebras: cerebrasProvider,
+  deepseek: deepseekProvider,
+  fireworks: fireworksProvider,
+  google: googleProvider,
+  groq: groqProvider,
+  mistral: mistralProvider,
+  openai: openaiProvider,
+  openrouter: openrouterProvider,
+  together: togetherProvider,
+  xai: xaiProvider,
 };
 
-/** A credential store over a fixed map: the platform's own provider keys, read-only after construction. */
-class FixedCredentials implements CredentialStore {
-  readonly #credentials: Map<string, Credential>;
-  constructor(credentials: Map<string, Credential>) {
-    this.#credentials = credentials;
-  }
-  async read(providerId: string) {
-    return this.#credentials.get(providerId);
-  }
-  async list(): Promise<readonly CredentialInfo[]> {
-    return [...this.#credentials].map(([providerId, credential]) => ({
-      providerId,
-      type: credential.type,
-    }));
-  }
-  async modify(
-    providerId: string,
-    fn: (current: Credential | undefined) => Promise<Credential | undefined>,
-  ) {
-    const next = await fn(this.#credentials.get(providerId));
-    if (next) this.#credentials.set(providerId, next);
-    return this.#credentials.get(providerId);
-  }
-  async delete(providerId: string) {
-    this.#credentials.delete(providerId);
-  }
-}
+export const SUPPORTED_PROVIDERS: readonly string[] = Object.keys(PROVIDERS);
 
-/** Models for the providers whose platform keys are configured. Tenant keys (bring your own) are plan 0001, M9. */
-export function createProviderModels(keys: ProviderKeys): Models {
-  const credentials = new Map<string, Credential>();
-  const providers = [];
-  if (keys.anthropicApiKey) {
-    const provider = anthropicProvider();
-    credentials.set(provider.id, { type: "api_key", key: keys.anthropicApiKey });
-    providers.push(provider);
-  }
-  if (keys.openaiApiKey) {
-    const provider = openaiProvider();
-    credentials.set(provider.id, { type: "api_key", key: keys.openaiApiKey });
-    providers.push(provider);
-  }
-  const models = createModels({ credentials: new FixedCredentials(credentials) });
-  for (const provider of providers) models.setProvider(provider);
+/**
+ * Models for one run: a single provider, authenticated with the tenant's own key. The key lives in this object
+ * only; nothing is shared between runs or tenants. `undefined` for a provider this adapter does not know.
+ */
+export function createTenantModels(
+  provider: string,
+  apiKey: string | undefined,
+): Models | undefined {
+  const factory = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
+  if (!factory || !apiKey) return undefined;
+  const instance = factory();
+  const credentials = new Map<string, Credential>([
+    [instance.id, { type: "api_key", key: apiKey }],
+  ]);
+  const models = createModels({
+    credentials: {
+      read: async (providerId) => credentials.get(providerId),
+      list: async () => [...credentials].map(([providerId, c]) => ({ providerId, type: c.type })),
+      async modify(providerId, fn) {
+        const next = await fn(credentials.get(providerId));
+        if (next) credentials.set(providerId, next);
+        return credentials.get(providerId);
+      },
+      delete: async (providerId) => void credentials.delete(providerId),
+    },
+  });
+  models.setProvider(instance);
   return models;
 }

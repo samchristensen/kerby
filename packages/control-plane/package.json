@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@kerby/db": "workspace:*",
-    "@kerby/observability": "workspace:*"
+    "@kerby/observability": "workspace:*",
+    "@kerby/secrets": "workspace:*"
   }
 }

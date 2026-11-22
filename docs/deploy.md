@@ -24,13 +24,15 @@ You need the Railway CLI, signed in (`railway login`), and Node (the scripts run
 
 ```sh
 railway init --name kerby                  # creates the project and links this checkout to it
-ANTHROPIC_API_KEY=... make railway-setup   # Postgres, bucket, the three services, every variable, a domain for api
+make railway-setup                         # Postgres, bucket, the three services, every variable, a domain for api
 make deploy                                # control first, then api and worker; waits for each to report SUCCESS
 ```
 
 `railway-setup` is safe to run again: it creates only what is missing, keeps the secrets it generated, and refreshes the
-bucket's endpoint and keys. Provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) are copied to the worker only when set
-in your shell; changing a variable redeploys that service. Models tenants may use are `MODELS` in `scripts/railway.ts`.
+bucket's endpoint and keys; changing a variable redeploys that service. Kerby holds no model provider keys: each tenant
+stores its own (`PUT /v1/model-keys/<provider>`, [ADR 0008](adr/0008-byok-sealed-secrets.md)). The setup makes a secrets key
+pair once: the private key is `SECRETS_PRIVATE_KEYS` on `worker`, the public half `SECRETS_PUBLIC_KEY` on `api`. Never delete
+the private key from `worker`: every stored tenant key is sealed to it. Back it up somewhere other than Railway.
 
 The api's address is in `railway service list --json` (`url`). A custom domain: `railway domain api.example.com
 --service api`, then add the DNS records it prints.

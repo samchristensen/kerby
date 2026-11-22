@@ -16,11 +16,22 @@ function identifier(name: string, what: string): string {
   return `"${name}"`;
 }
 
+/**
+ * Connections one tenant's role may hold across every api and worker process: the pools (2 each), live event streams
+ * and the worker's listeners. The cluster's `max_connections` is shared by all tenants.
+ */
+export const TENANT_ROLE_CONNECTION_LIMIT = 50;
+
 export interface ClusterAdmin {
   databaseExists(name: string): Promise<boolean>;
   roleExists(name: string): Promise<boolean>;
-  /** A login role with no rights beyond what is granted to it later. */
+  /**
+   * A login role with no rights beyond what is granted to it later, and a connection limit: one tenant must not
+   * be able to use up the connections every other tenant and the control database share.
+   */
   createRole(role: string, password: string): Promise<void>;
+  /** Set (again) the connection limit of an existing tenant role; roles made before the limit existed get it. */
+  limitRoleConnections(role: string): Promise<void>;
   /**
    * A new database, copied from `template` (which must have no open connections: a brief wait is retried) and
    * owned by `owner`. Objects in the copy keep the creating role as owner until `reassignOwned`.
@@ -63,13 +74,18 @@ export function createClusterAdmin(url: string): ClusterAdmin {
       const quoted = identifier(role, "role name");
       // %L quotes the password as a literal; DDL cannot take bind parameters.
       const { rows } = await db.query<{ sql: string }>(
-        "select format('create role %s login password %L', $1::text, $2::text) as sql",
-        [quoted, password],
+        "select format('create role %s login connection limit %s password %L', $1::text, $2::text, $3::text) as sql",
+        [quoted, String(TENANT_ROLE_CONNECTION_LIMIT), password],
       );
       await exec(rows[0]?.sql ?? "");
       // A non-superuser admin (a managed Postgres without superuser access) may only create a database owned by, and
       // move objects to, a role it is a member of.
       await exec(`grant ${quoted} to current_user`);
+    },
+    async limitRoleConnections(role) {
+      await exec(
+        `alter role ${identifier(role, "role name")} connection limit ${TENANT_ROLE_CONNECTION_LIMIT}`,
+      );
     },
     async createDatabase(name, options = {}) {
       const sql = [

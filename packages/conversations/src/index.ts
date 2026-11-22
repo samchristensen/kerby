@@ -14,12 +14,15 @@ export const tenantMigrationDirs: readonly string[] = [
 
 export {
   ConversationBusyError,
+  ConversationFullError,
   ConversationNotFoundError,
   LeaseLostError,
   SeqConflictError,
 } from "./errors.ts";
 export { type ConversationNotice, conversationChannel, notifyLive, parseNotice } from "./events.ts";
 export {
+  MAX_CONVERSATION_BYTES,
+  MAX_CONVERSATION_MESSAGES,
   messageKey,
   type PersistInput,
   persistMessage,

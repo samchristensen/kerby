@@ -58,8 +58,14 @@ export type ToolResult = { content: ContentPart[]; isError: boolean };
  */
 export type AgentRun = {
   system: string;
-  /** A Kerby model id; the adapter maps it to its provider. */
+  /** A Kerby model id, `<provider>/<modelId>`; the adapter maps it to its provider. */
   model: string;
+  /**
+   * The caller's own API key for the model's provider (bring your own key), opened for this run only. Absent for a
+   * model that needs none. An adapter hands it to the provider client and nowhere else: not to a log, an event, a
+   * message, or an error.
+   */
+  apiKey?: string;
   /**
    * Everything before this run, in order. Empty for a new conversation. A new process given only this
    * continues the conversation: a runtime keeps no state Kerby cannot rebuild from `history`.

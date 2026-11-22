@@ -25,8 +25,11 @@ export const workerConfigSchema = z
     kerbyFakeModel: z.stringbool().default(false),
     /** Offer the built-in `echo` tool to every conversation (development). */
     enableEchoTool: z.stringbool().default(false),
-    anthropicApiKey: z.string().min(1).optional(),
-    openaiApiKey: z.string().min(1).optional(),
+    /**
+     * Private key(s) that open tenants' sealed model keys, base64, comma separated: the key new secrets are sealed
+     * to first, older ones after it while a rotation finishes. Not needed with the fake model.
+     */
+    secretsPrivateKeys: z.string().min(1).optional(),
     /** Port of the liveness endpoint (`GET /healthz`) for the container health check. */
     healthPort: z.coerce.number().int().min(0).default(8082),
     /** How often to look at every active tenant for work a notification missed. */
@@ -35,6 +38,11 @@ export const workerConfigSchema = z
     claimTimeoutSeconds: z.coerce.number().int().positive().default(120),
     /** Turns one tenant may run at once on this worker when its limits do not say. */
     defaultMaxConcurrentTurns: z.coerce.number().int().positive().default(4),
+  })
+  .refine((config) => config.kerbyFakeModel || config.secretsPrivateKeys !== undefined, {
+    message:
+      "SECRETS_PRIVATE_KEYS is required: tenants bring their own model keys and only a worker can open them",
+    path: ["secretsPrivateKeys"],
   })
   .refine((config) => !(config.kerbyFakeModel && config.kerbyEnvironment === "production"), {
     message: "KERBY_FAKE_MODEL is only allowed with KERBY_ENVIRONMENT=development",

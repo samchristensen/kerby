@@ -4,11 +4,13 @@ import { createTenantExecutor, type RunContext } from "@kerby/durable";
 import { describe, expect, it } from "vitest";
 import {
   ConversationBusyError,
+  ConversationFullError,
   ConversationNotFoundError,
   conversationChannel,
   insertConversation,
   isBusy,
   LeaseLostError,
+  MAX_CONVERSATION_BYTES,
   parseNotice,
   persistMessage,
   postUserMessage,
@@ -51,6 +53,30 @@ async function conversationWithTurn(tenant: TestTenant) {
 }
 
 describe("postUserMessage", () => {
+  it("stores nothing when it refuses a post: a busy conversation, or a full one", async () => {
+    await using tenant = await createTestTenant();
+    const { blobs, conversation } = await conversationWithTurn(tenant);
+    const objects = async () => (await blobs.listPrefix(tenant.tenantId)).length;
+    const indexed = async () =>
+      Number(
+        (await tenant.db.query<{ n: string }>("select count(*)::text as n from blobs")).rows[0]?.n,
+      );
+    const before = { objects: await objects(), indexed: await indexed() };
+
+    await expect(
+      postUserMessage(tenant, blobs, conversation.id, [...text("while busy")]),
+    ).rejects.toBeInstanceOf(ConversationBusyError);
+    expect({ objects: await objects(), indexed: await indexed() }).toEqual(before);
+
+    // finish the turn, then claim the conversation already holds as many bytes as it may
+    await withRun(tenant, async () => {});
+    await tenant.db.query("update blobs set size = $1", [MAX_CONVERSATION_BYTES]);
+    await expect(
+      postUserMessage(tenant, blobs, conversation.id, [...text("one more")]),
+    ).rejects.toBeInstanceOf(ConversationFullError);
+    expect({ objects: await objects(), indexed: await indexed() }).toEqual(before);
+  });
+
   it("appends the message and enqueues one turn, atomically visible", async () => {
     await using tenant = await createTestTenant();
     const { blobs, conversation, posted } = await conversationWithTurn(tenant);
