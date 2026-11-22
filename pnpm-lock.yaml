@@ -227,6 +227,9 @@ importers:
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@kerby/runtime-pi-durable':
+        specifier: workspace:*
+        version: link:../../packages/runtime-pi-durable
       '@kerby/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets

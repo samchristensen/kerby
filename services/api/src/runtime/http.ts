@@ -190,7 +190,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       "PUT",
       "/v1/model-keys/:provider",
       authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
-        const provider = providerParam(params);
+        // The harness adapter's list (ADR 0008): a key for a provider no run can use would fail only at the first turn.
+        const provider = params.provider ?? "";
+        if (!deps.settings.modelProviders.includes(provider))
+          throw new HttpError(
+            400,
+            "unknown_provider",
+            `unknown model provider; supported: ${deps.settings.modelProviders.join(", ")}`,
+          );
         const body = await readJson(request, PutModelKeyRequestSchema, { maxBytes: 16_384 });
         await setModelKey(deps, principal, provider, body.apiKey);
         return new Response(null, { status: 204 });

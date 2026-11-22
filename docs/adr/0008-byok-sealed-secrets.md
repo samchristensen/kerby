@@ -18,7 +18,9 @@ leak of the control database, of the internet-facing api, and of any log.
   only the development fake model runs without one.
 - **The adapter, not Kerby, knows providers.** `AgentRun.apiKey` carries the opened key for one run; the Pi Durable adapter
   builds a `Models` for that one provider and key per run (`createTenantModels`), so nothing is shared across runs or tenants.
-  Adding a provider is one line in the adapter. Cloud-account providers (Bedrock, Vertex, Azure) and OAuth logins are out:
+  Adding a provider is one line in the adapter. The adapter also exports the bare id list from a subpath that loads no
+  harness code (`@kerby/runtime-pi-durable/providers`); the api's composition root injects it, and `PUT` for any other id
+  is a 400 `unknown_provider` naming the supported ones. Cloud-account providers (Bedrock, Vertex, Azure) and OAuth logins are out:
   their credentials are not one string. A different harness brings its own provider list; the port is unchanged.
 - **Sealed to a public key.** [`packages/secrets`](../../packages/secrets/src/index.ts) seals a secret with an ephemeral X25519
   agreement, HKDF-SHA256 and AES-256-GCM (Node's `crypto`, no dependency): every secret has its own data key. The platform

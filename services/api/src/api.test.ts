@@ -34,7 +34,12 @@ type Harness = Awaited<ReturnType<typeof harness>>;
 type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
 
 async function harness(
-  options: { authCacheMs?: number; keyless?: string[]; maxStreams?: number } = {},
+  options: {
+    authCacheMs?: number;
+    keyless?: string[];
+    maxStreams?: number;
+    providers?: string[];
+  } = {},
 ) {
   const keys = generateSecretsKeyPair();
   const control = await createTestControlDb();
@@ -52,6 +57,7 @@ async function harness(
     sealer: createSealer(keys.publicKey),
     settings: {
       defaultModel: "faux/faux-1",
+      modelProviders: options.providers ?? ["anthropic", "openai"],
       keylessProviders: options.keyless ?? ["faux"],
       defaultSystem: "Be helpful.",
       authCacheMs: options.authCacheMs ?? 0,
@@ -491,9 +497,6 @@ describe("model keys (bring your own key)", () => {
     const t = await h.tenant("acme");
     expect((await h.call(null, "PUT", "/v1/model-keys/openai", { apiKey: KEY })).status).toBe(401);
     expect((await h.call(null, "GET", "/v1/model-keys")).status).toBe(401);
-    expect((await h.call(t.secret, "PUT", "/v1/model-keys/Open_AI", { apiKey: KEY })).status).toBe(
-      404,
-    );
     for (const apiKey of ["short", "has space in it", "line\nbreak-key-123", "é".repeat(20)]) {
       expect((await h.call(t.secret, "PUT", "/v1/model-keys/openai", { apiKey })).status).toBe(400);
     }
@@ -521,16 +524,31 @@ describe("model keys (bring your own key)", () => {
     ).toBe(400);
   });
 
-  it("caps how many providers one tenant can store", async () => {
+  it("refuses a provider the harness does not support, naming the supported ones", async () => {
     const h = await harness({ keyless: [] });
     const t = await h.tenant("acme");
-    for (let i = 0; i < 32; i++) {
-      expect((await h.call(t.secret, "PUT", `/v1/model-keys/p${i}`, { apiKey: KEY })).status).toBe(
-        204,
-      );
+    for (const provider of ["nope", "Open_AI"]) {
+      const refused = await h.call(t.secret, "PUT", `/v1/model-keys/${provider}`, { apiKey: KEY });
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({
+        error: {
+          code: "unknown_provider",
+          message: "unknown model provider; supported: anthropic, openai",
+        },
+      });
     }
-    expect((await h.call(t.secret, "PUT", "/v1/model-keys/extra", { apiKey: KEY })).status).toBe(
-      409,
-    );
+    expect(await (await h.call(t.secret, "GET", "/v1/model-keys")).json()).toEqual({ keys: [] });
+  });
+
+  it("caps how many providers one tenant can store", async () => {
+    const providers = Array.from({ length: 33 }, (_, i) => `p${i}`);
+    const h = await harness({ keyless: [], providers });
+    const t = await h.tenant("acme");
+    for (const provider of providers.slice(0, 32)) {
+      expect(
+        (await h.call(t.secret, "PUT", `/v1/model-keys/${provider}`, { apiKey: KEY })).status,
+      ).toBe(204);
+    }
+    expect((await h.call(t.secret, "PUT", "/v1/model-keys/p32", { apiKey: KEY })).status).toBe(409);
   });
 });
