@@ -87,6 +87,8 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 - Lifecycle is an operator command in `services/control`: provision, suspend, export, delete. Provisioning copies the
   template database (migrated at startup), creates a role that owns that database and may connect to no other tenant
   database, and derives the role's password as an HMAC of a cluster secret and the tenant id: no tenant credential is stored.
+  At startup control also closes the maintenance databases (`postgres`, `template1`) and the template to everyone but
+  its admin role, as it does the control database: a tenant role can open its own database and nothing else.
   Deleting drops the database and role, deletes the object prefix and purges keys; the row stays with status `deleted`.
   Exporting uploads a `pg_dump` and the object listing to the export bucket and returns presigned URLs; exports are kept
   30 days. Nightly, control copies new objects to the backup bucket and drops deleted tenants' copies (ADR 0013).

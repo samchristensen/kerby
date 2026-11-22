@@ -32,7 +32,7 @@ import { createControlApp } from "./index.ts";
 import { untilNext } from "./runtime/nightly.ts";
 import { BACKUP_LOCK_KEY } from "./service/backup.ts";
 import { deleteExpiredExports } from "./service/export.ts";
-import { ensureTemplate } from "./service/template.ts";
+import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
 const TOKEN = "operator-token-for-tests";
@@ -92,6 +92,7 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
     },
   };
   await ensureTemplate(deps);
+  await restrictClusterDatabases(deps);
   cleanups.push(() => realCluster.dropDatabase(templateDatabase));
   const server = await serve(createControlApp(deps, TOKEN), { host: "127.0.0.1", port: 0 });
   cleanups.push(() => server.close());
@@ -171,6 +172,27 @@ describe("provisioning", () => {
     await expect(intruder.query("select 1")).rejects.toThrow(/permission denied|not allowed/);
 
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(200);
+  });
+
+  it("refuses a tenant role on the maintenance databases and the template, and still provisions from it", async () => {
+    const { provision, control, cluster, deps } = await start();
+    const created = await provision("acme");
+    const tenant = (await getTenant(control.db, created.tenant.id)) ?? expect.fail("no tenant row");
+    // Over the network address with the role's own password, as a tenant would try.
+    for (const database of ["postgres", "template1", deps.settings.templateDatabase]) {
+      const url = new URL(tenantDbUrl(tenant, SECRET));
+      url.pathname = `/${database}`;
+      const intruder = createTenantDb(url.toString(), { max: 1 });
+      cleanups.push(() => intruder.close());
+      await expect(intruder.query("select 1"), database).rejects.toThrow(
+        `permission denied for database "${database}"`,
+      );
+    }
+    // Copying the closed template works, and so does the admin URL, which connects to `postgres`.
+    const other = await provision("globex");
+    const otherTenant =
+      (await getTenant(control.db, other.tenant.id)) ?? expect.fail("no tenant row");
+    expect(await cluster.databaseExists(otherTenant.dbName)).toBe(true);
   });
 
   it("rejects a duplicate or malformed name", async () => {

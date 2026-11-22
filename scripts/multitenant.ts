@@ -161,6 +161,13 @@ async function crossTenantSuite(a: Tenant, b: Tenant): Promise<void> {
     /permission denied|not allowed/.test(connectAs(b.dbRole, b.id, a.dbName)),
     "B's role cannot open A's database",
   );
+  // ...nor the maintenance databases or the template every tenant database is copied from.
+  for (const database of ["postgres", "template1", "kerby_tenant_template"]) {
+    check(
+      connectAs(a.dbRole, a.id, database).includes(`permission denied for database "${database}"`),
+      `A's role cannot open ${database}`,
+    );
+  }
   check(
     /password authentication failed/.test(connectAs(a.dbRole, b.id, a.dbName)),
     "a role with another tenant's derived password is refused",

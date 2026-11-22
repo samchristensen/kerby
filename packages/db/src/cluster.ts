@@ -39,6 +39,11 @@ export interface ClusterAdmin {
   createDatabase(name: string, options?: { template?: string; owner?: string }): Promise<void>;
   /** `public` may no longer connect to `database`; `role` and the admin role may, and no one else. */
   restrictDatabase(database: string, role: string): Promise<void>;
+  /**
+   * Only the admin role (and superusers) may connect to `database`: for the maintenance databases and the tenant
+   * template. Revoking from a database the admin does not own only warns, so check the result with a refused login.
+   */
+  restrictToAdmin(database: string): Promise<void>;
   /** Hand every object in `database` owned by the admin role to `role` (so the tenant owns its schema). */
   reassignOwned(database: string, role: string): Promise<void>;
   /** The admin URL pointed at another database of the cluster. */
@@ -112,6 +117,12 @@ export function createClusterAdmin(url: string): ClusterAdmin {
       await exec(
         `grant connect on database ${quotedDb} to ${identifier(role, "role name")}, current_user`,
       );
+    },
+    async restrictToAdmin(database) {
+      const quotedDb = identifier(database, "database name");
+      // Grant first: a non-superuser admin must not lock itself out of its own maintenance database.
+      await exec(`grant connect on database ${quotedDb} to current_user`);
+      await exec(`revoke connect on database ${quotedDb} from public`);
     },
     async reassignOwned(database, role) {
       // `quoted` is a validated, double-quoted identifier, so it is safe inside the statement text below.

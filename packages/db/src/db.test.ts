@@ -244,7 +244,10 @@ describe("ClusterAdmin as a non-superuser", () => {
     const suffix = Math.random().toString(16).slice(2, 10);
     const admin = `adm_${suffix}`;
     await root.query(`create role ${admin} login createdb createrole password 'pw'`);
+    // Control closes the maintenance database to `public` (restrictToAdmin): whoever makes a non-superuser admin grants it.
+    await root.query(`grant connect on database postgres to ${admin}`);
     cleanups.push(async () => {
+      await root.query(`revoke connect on database postgres from ${admin}`);
       await root.query(`drop role if exists ${admin}`);
       await root.close();
     });
@@ -260,6 +263,8 @@ describe("ClusterAdmin as a non-superuser", () => {
     const inTemplate = createTenantDb(cluster.urlFor(template), { max: 1 });
     await inTemplate.query("create table things (id int)");
     await inTemplate.close();
+    // The admin owns the template: closing it to `public` leaves the admin able to copy and open it.
+    await cluster.restrictToAdmin(template);
 
     const role = `r_${suffix}`;
     const name = `t_${suffix}`;
@@ -312,6 +317,16 @@ describe("ClusterAdmin as a non-superuser", () => {
     const intruder = createTenantDb(outsiderUrl.toString(), { max: 1 });
     cleanups.push(() => intruder.close());
     await expect(intruder.query("select 1")).rejects.toThrow(/permission denied|not allowed/);
+
+    // The tenant's own role cannot open the template; the admin still can.
+    const templateUrl = new URL(tenantUrl);
+    templateUrl.pathname = `/${template}`;
+    const inClosedTemplate = createTenantDb(templateUrl.toString(), { max: 1 });
+    cleanups.push(() => inClosedTemplate.close());
+    await expect(inClosedTemplate.query("select 1")).rejects.toThrow(/permission denied/);
+    const asAdmin = createTenantDb(cluster.urlFor(template), { max: 1 });
+    cleanups.push(() => asAdmin.close());
+    expect((await asAdmin.query("select 1 as one")).rows).toEqual([{ one: 1 }]);
   });
 });
 

@@ -13,7 +13,7 @@ import { serve } from "@kerby/serve";
 import { type ControlConfig, loadControlConfig } from "./config/index.ts";
 import { createControlApp } from "./runtime/http.ts";
 import { startNightly } from "./runtime/nightly.ts";
-import { ensureTemplate } from "./service/template.ts";
+import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
 export { createControlApp } from "./runtime/http.ts";
@@ -83,6 +83,7 @@ export async function startControl(config: ControlConfig) {
     },
   };
   await ensureTemplate(deps);
+  await restrictClusterDatabases(deps);
   const server = await serve(createControlApp(deps, config.operatorToken), {
     host: config.host,
     port: config.port,

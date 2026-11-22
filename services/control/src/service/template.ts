@@ -19,3 +19,15 @@ export async function ensureTemplate(deps: ControlDeps): Promise<string[]> {
     await handle.close();
   }
 }
+
+/**
+ * Close the maintenance databases and the template to everyone but the admin role. A tenant role has no grants there,
+ * but `public` may connect by default, and a session held in the template makes provisioning fail (`55006`).
+ * Idempotent; run at startup after `ensureTemplate`.
+ */
+export async function restrictClusterDatabases(deps: ControlDeps): Promise<void> {
+  const { cluster, settings } = deps;
+  for (const database of ["postgres", "template1", settings.templateDatabase]) {
+    if (await cluster.databaseExists(database)) await cluster.restrictToAdmin(database);
+  }
+}
