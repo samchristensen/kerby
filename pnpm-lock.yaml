@@ -115,6 +115,9 @@ importers:
 
   packages/control-plane:
     dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@kerby/db':
         specifier: workspace:*
         version: link:../db
@@ -227,6 +230,9 @@ importers:
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@kerby/runtime-pi-durable':
+        specifier: workspace:*
+        version: link:../../packages/runtime-pi-durable
       '@kerby/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets

@@ -35,7 +35,7 @@ export function createAuthenticator(
       if (entry.tenant.status !== "active") {
         throw new TenantUnavailableError(`tenant is ${entry.tenant.status}`);
       }
-      return { tenantId: entry.tenant.id, keyId: entry.keyId };
+      return { tenantId: entry.tenant.id, keyId: entry.keyId, limits: entry.tenant.limits };
     },
   };
 }

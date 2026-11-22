@@ -41,7 +41,7 @@ import { seedHistory } from "./seed.ts";
 import { TextForwarder } from "./text.ts";
 
 export { createFakeModels, FAKE_MODEL } from "./fake.ts";
-export { createTenantModels, SUPPORTED_PROVIDERS } from "./providers.ts";
+export { createTenantModels } from "./providers.ts";
 
 export type PiDurableOptions = {
   /**

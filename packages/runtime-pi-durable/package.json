@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./providers": "./src/provider-ids.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "catalog:",

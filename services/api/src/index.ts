@@ -3,6 +3,7 @@ import { createBlobs } from "@kerby/blobs";
 import { getTenant, tenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
+import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
 import { createSealer } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { type ApiConfig, loadApiConfig } from "./config/index.ts";
@@ -40,11 +41,17 @@ export async function startApi(config: ApiConfig) {
     sealer: createSealer(config.secretsPublicKey),
     settings: {
       defaultModel: config.defaultModel,
+      // The harness adapter owns the provider list (ADR 0008); its `providers` subpath loads no harness code.
+      modelProviders: SUPPORTED_PROVIDERS,
       keylessProviders: config.keylessProviders,
       defaultSystem: config.defaultSystem,
       authCacheMs: config.authCacheSeconds * 1000,
       maxStreamsPerTenant: config.maxStreamsPerTenant,
       streamRecheckMs: 5000,
+      defaultRequestsPerMinute: config.defaultRequestsPerMinute,
+      defaultStorageBytes: config.defaultStorageBytes,
+      failedAuthPerMinute: config.failedAuthPerMinute,
+      trustProxy: config.trustProxy,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

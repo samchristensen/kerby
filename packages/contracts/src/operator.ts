@@ -1,9 +1,23 @@
 // The operator API (services/control), behind the operator token. Never exposed to tenants.
 import { z } from "zod";
 
+/**
+ * Per-tenant limits. An absent key takes the deployment default (the worker's or the api's config); the numbers are
+ * defaults until pricing (plan 0001, M9).
+ */
 export const LimitsSchema = z.object({
-  /** Turns running at once for this tenant. */
+  /** Turns running at once for this tenant (default: the worker's `DEFAULT_MAX_CONCURRENT_TURNS`, 4). */
   maxConcurrentTurns: z.number().int().positive().optional(),
+  /**
+   * Authenticated requests per minute, per api process (default `DEFAULT_REQUESTS_PER_MINUTE`, 600): a token bucket
+   * that bursts up to a minute's worth. Approximate: with N api processes a tenant gets up to N times this.
+   */
+  requestsPerMinute: z.number().int().positive().optional(),
+  /**
+   * Bytes of stored objects (the tenant's blob index), checked when a message is posted (default
+   * `DEFAULT_STORAGE_BYTES`, 1 GiB). A turn already admitted finishes even if its answer goes over.
+   */
+  storageBytes: z.number().int().positive().optional(),
 });
 export type Limits = z.infer<typeof LimitsSchema>;
 

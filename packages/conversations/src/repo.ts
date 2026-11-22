@@ -74,23 +74,39 @@ type MessageRow = {
   created_at: Date;
 };
 
-/** The message index of a conversation after `afterSeq`, oldest first. Bodies live in S3: see `readMessages`. */
+const fromMessageRow = (row: MessageRow): MessageRowRecord => ({
+  seq: row.seq,
+  role: row.role,
+  blobId: row.blob_id,
+  runId: row.run_id,
+  createdAt: row.created_at,
+});
+
+/** Up to `limit` index rows of a conversation after seq `after`, oldest first. Bodies live in S3: see `readMessages`. */
 export async function listMessageRows(
   db: TenantQueryable,
   conversationId: string,
-  afterSeq = 0,
+  page: { after: number; limit: number },
 ): Promise<MessageRowRecord[]> {
   const { rows } = await db.query<MessageRow>(
-    "select seq, role, blob_id, run_id, created_at from messages where conversation_id = $1 and seq > $2 order by seq",
-    [conversationId, afterSeq],
+    "select seq, role, blob_id, run_id, created_at from messages where conversation_id = $1 and seq > $2 order by seq limit $3",
+    [conversationId, page.after, page.limit],
   );
-  return rows.map((row) => ({
-    seq: row.seq,
-    role: row.role,
-    blobId: row.blob_id,
-    runId: row.run_id,
-    createdAt: row.created_at,
-  }));
+  return rows.map(fromMessageRow);
+}
+
+/** Every index row of a conversation with its body's size, newest first: what a history budget is cut from. */
+export async function listMessageRowsNewestFirst(
+  db: TenantQueryable,
+  conversationId: string,
+): Promise<(MessageRowRecord & { size: number })[]> {
+  const { rows } = await db.query<MessageRow & { size: string }>(
+    `select m.seq, m.role, m.blob_id, m.run_id, m.created_at, b.size::text as size
+       from messages m join blobs b on b.id = m.blob_id
+      where m.conversation_id = $1 order by m.seq desc`,
+    [conversationId],
+  );
+  return rows.map((row) => ({ ...fromMessageRow(row), size: Number(row.size) }));
 }
 
 /** Is a turn for this conversation queued, running or sleeping? */

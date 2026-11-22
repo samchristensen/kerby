@@ -14,6 +14,7 @@ import {
   type ContentPartSchema,
   CreateTenantRequestSchema,
   EventEnvelopeSchema,
+  GetConversationQuerySchema,
   GetConversationResponseSchema,
   PostMessageRequestSchema,
   type ToolCallSchema,
@@ -81,6 +82,7 @@ describe("conversation response", () => {
         createdAt: "2026-11-21T10:00:00.000Z",
       },
       messages: [{ seq: 1, message: assistant, createdAt: "2026-11-21T10:00:01.000Z" }],
+      nextAfter: null,
       busy: false,
       lastError: null,
     });
@@ -98,6 +100,16 @@ describe("requests", () => {
     expect(PostMessageRequestSchema.safeParse({ content: "" }).success).toBe(false);
     expect(PostMessageRequestSchema.safeParse({ content: [] }).success).toBe(false);
     expect(PostMessageRequestSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("pages a conversation read: after 0 or more, limit 1 to 500, default 100", () => {
+    expect(GetConversationQuerySchema.parse({})).toEqual({ after: 0, limit: 100 });
+    expect(GetConversationQuerySchema.parse({ after: "7", limit: "500" })).toEqual({
+      after: 7,
+      limit: 500,
+    });
+    for (const bad of [{ after: "-1" }, { limit: "0" }, { limit: "501" }, { after: "1.5" }])
+      expect(GetConversationQuerySchema.safeParse(bad).success).toBe(false);
   });
 
   it("only takes slug-like tenant names", () => {

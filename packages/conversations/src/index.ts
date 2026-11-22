@@ -18,15 +18,20 @@ export {
   ConversationNotFoundError,
   LeaseLostError,
   SeqConflictError,
+  StorageQuotaExceededError,
 } from "./errors.ts";
 export { type ConversationNotice, conversationChannel, notifyLive, parseNotice } from "./events.ts";
 export {
+  type History,
   MAX_CONVERSATION_BYTES,
   MAX_CONVERSATION_MESSAGES,
+  MAX_PAGE_MESSAGES,
+  type MessagePage,
   messageKey,
   type PersistInput,
   persistMessage,
   postUserMessage,
+  readHistory,
   readMessages,
   type StoredMessage,
 } from "./messages.ts";

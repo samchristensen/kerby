@@ -30,6 +30,14 @@ async function start(routes: Parameters<typeof createRouter>[0]) {
 }
 
 describe("router", () => {
+  it("hands a route the connection's peer address, never a header's", async () => {
+    const base = await start([
+      ["GET", "/who", (_req, _params, client) => json(200, { address: client.address })],
+    ]);
+    const response = await fetch(`${base}/who`, { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(await response.json()).toEqual({ address: "127.0.0.1" });
+  });
+
   it("matches methods and path params, and answers 404 and 405", async () => {
     const base = await start([
       ["GET", "/v1/things/:id", (_req, params) => json(200, { id: params.id })],

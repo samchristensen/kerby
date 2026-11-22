@@ -79,7 +79,7 @@ flowchart LR
   if the Postgres template takes one, else `ALTER SYSTEM` once per environment, written down); then measure.
   Proof: `make multitenant` with two api replicas and a stream-saturation phase records peak `pg_stat_activity`;
   `TENANT_ROLE_CONNECTION_LIMIT` and `MAX_STREAMS_PER_TENANT` are set from those numbers and logged here.
-- [ ] **B4 Unknown model provider at `PUT`** ("Model keys (ADR 0008): the api accepts a key for any well-formed provider
+- [x] **B4 Unknown model provider at `PUT`** ("Model keys (ADR 0008): the api accepts a key for any well-formed provider
   id"). S. Pays the first sentence; the rest is parked below.
   Now: `ModelProviderSchema` checks the format only; `SUPPORTED_PROVIDERS` lives in the adapter, whose `providers.ts`
   imports every Pi provider module.
@@ -130,7 +130,7 @@ flowchart LR
   development), debounced per kind, for `turn failed for good`, `lease lost`, a failed provisioning and a failed migration
   fan-out. Tenant ids only, never content. Proof: a test against a local receiver; one alert seen at the destination
   from a scratch environment.
-- [ ] **D3 Edge and synthetic check** ("Hosting: no edge rate limiting or WAF"). M, **human**: the edge and monitor.
+- [x] **D3 Edge and synthetic check** ("Hosting: no edge rate limiting or WAF"). M, **human**: the edge and monitor.
   Fix: the chosen edge in front of a custom api domain, rate limiting there; in `services/api`, a per-address limit on
   failed authentications (the only pre-auth path); an external monitor on `GET /healthz` plus an authenticated read by a
   canary tenant, alerting through D2.
@@ -150,7 +150,7 @@ flowchart LR
 
 ## F. Bounded data paths
 
-- [ ] **F1 Paged reads and a history budget** ("A conversation is capped at 2000 messages", and the paging half of "A
+- [x] **F1 Paged reads and a history budget** ("A conversation is capped at 2000 messages", and the paging half of "A
   conversation read fetches every message body"). M.
   Now: `readMessages` (`packages/conversations/src/messages.ts:193`) loads every message, eight S3 gets at a time, for
   `GET` conversation, SSE replay and the worker's rehydrate; the contract has no paging.
@@ -179,7 +179,7 @@ flowchart LR
   lookup, so no DNS rebinding); follow redirects by hand, re-checking each hop, with a hop limit; time and size limits
   on request and response; a `fetch`-shaped function, since MCP and provider clients take one. Tests inject the block
   list so a loopback server can serve the success path. A row in ARCHITECTURE.md#providers.
-- [ ] **G2 Request rate and storage quota** ("No per-tenant request rate limit and no storage quota"). L. Plan 0001 M8.
+- [x] **G2 Request rate and storage quota** ("No per-tenant request rate limit and no storage quota"). L. Plan 0001 M8.
   Fix: a per-tenant token bucket in each api process from `limits.requestsPerMinute` (approximate across processes,
   stated in docs); `limits.storageBytes` checked against `sum(size)` of the tenant's `blobs` index in
   `postUserMessage`'s transaction (413 `storage_quota_exceeded`; an admitted turn finishes); stored bytes reported to
@@ -256,3 +256,10 @@ No work until the trigger; the debt line stays and names it.
   advisory lock, changed objects only, deleted tenants' prefixes removed; `POST /v1/operator/backup` and
   `/backup/restore` (missing objects only). RustFS presigning verified (download, 403 after expiry); local smoke deleted
   an object, the read failed, restore brought it back. Production proof waits for the first release.
+- 2026-11-22 B4, F1, G2, D3 (PR #7): unknown provider is 400 `unknown_provider` at `PUT` (id list from the adapter's
+  Pi-free subpath `@kerby/runtime-pi-durable/providers`); `GET` conversation pages with `after`/`limit`/`nextAfter`
+  (default 100, max 500; a breaking change for clients), SSE replays in pages, the worker rehydrates newest-first within
+  `HISTORY_BUDGET_BYTES` (8 MiB) cutting before a user message; per-tenant request bucket (600/min per api process, 429
+  with `Retry-After`), per-address failed-auth limit (30/min, left-most `X-Forwarded-For` with `TRUST_PROXY` on
+  Railway), storage quota (1 GiB, 413). No edge proxy yet (owner); `uptime` is the external check. New debts: usage
+  metering of stored bytes, a quota race leaving an object, no endpoint to change limits, no canary read.

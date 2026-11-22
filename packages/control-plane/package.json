@@ -7,6 +7,7 @@
     "./testing": "./src/testing.ts"
   },
   "dependencies": {
+    "@kerby/contracts": "workspace:*",
     "@kerby/db": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/secrets": "workspace:*"

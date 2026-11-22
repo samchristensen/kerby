@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { AgentMessage, ContentPart } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { AgentMessageSchema } from "@kerby/contracts";
-import type { TenantContext } from "@kerby/db";
+import type { TenantContext, TenantQueryable } from "@kerby/db";
 import { holdsRun, type RunContext, spawnInTx } from "@kerby/durable";
 import {
   ConversationBusyError,
@@ -12,9 +12,15 @@ import {
   ConversationNotFoundError,
   LeaseLostError,
   SeqConflictError,
+  StorageQuotaExceededError,
 } from "./errors.ts";
 import { conversationChannel } from "./events.ts";
-import { isBusy, listMessageRows } from "./repo.ts";
+import {
+  isBusy,
+  listMessageRows,
+  listMessageRowsNewestFirst,
+  type MessageRowRecord,
+} from "./repo.ts";
 
 /**
  * The object key of a message: position and a prefix of the content hash. Identical content at a position is the
@@ -25,14 +31,16 @@ export function messageKey(conversationId: string, seq: number, sha256: string):
   return `conversations/${conversationId}/messages/${String(seq).padStart(8, "0")}-${sha256.slice(0, 16)}.json`;
 }
 
+const encodeMessage = (message: AgentMessage): Uint8Array =>
+  new TextEncoder().encode(JSON.stringify(message));
+
 async function putMessage(
   ctx: TenantContext,
   blobs: Blobs,
   conversationId: string,
   seq: number,
-  message: AgentMessage,
+  body: Uint8Array,
 ): Promise<string> {
-  const body = new TextEncoder().encode(JSON.stringify(message));
   const sha256 = createHash("sha256").update(body).digest("hex");
   const { blobId } = await blobs.put(ctx, {
     kind: "message",
@@ -44,26 +52,46 @@ async function putMessage(
   return blobId;
 }
 
+/** Bytes the tenant stores: the sum of its blob index, leaving out `exceptBlobId` (an object just written). */
+async function storedBytes(db: TenantQueryable, exceptBlobId?: string): Promise<number> {
+  const { rows } = await db.query<{ bytes: string }>(
+    "select coalesce(sum(size), 0)::text as bytes from blobs where id is distinct from $1",
+    [exceptBlobId ?? null],
+  );
+  return Number(rows[0]?.bytes ?? 0);
+}
+
+function refuseOverQuota(stored: number, adding: number, quota: number): void {
+  if (stored + adding <= quota) return;
+  throw new StorageQuotaExceededError(
+    `the tenant stores ${stored} bytes and this message adds ${adding}, past its storage quota of ${quota} bytes; ask the operator to raise limits.storageBytes`,
+  );
+}
+
 const MAX_POST_ATTEMPTS = 5;
 
 /**
- * What one conversation may hold. Every turn and every read loads the whole history, so an unbounded conversation is
- * a way to exhaust a worker's or the api's memory; a tenant that reaches these starts a new conversation.
+ * What one conversation may hold. Reads are paged and a turn reads its history within a byte budget, so these bound
+ * storage and the index rows a rehydrate scans, not memory; a tenant that reaches them starts a new conversation.
  */
 export const MAX_CONVERSATION_MESSAGES = 2000;
 export const MAX_CONVERSATION_BYTES = 64 * 1024 * 1024;
 
 /**
  * Append a user message and enqueue the turn that answers it, in one transaction in the tenant's database. A turn
- * is unique per message (`turn:<conversation>:<seq>`), and one runs at a time per conversation.
+ * is unique per message (`turn:<conversation>:<seq>`), and one runs at a time per conversation. Refused with
+ * `StorageQuotaExceededError` when the tenant's stored bytes plus this message would pass `limits.storageBytes`; the
+ * turn's own answer is not counted against it (an admitted turn finishes).
  */
 export async function postUserMessage(
   ctx: TenantContext,
   blobs: Blobs,
   conversationId: string,
   content: ContentPart[],
+  limits: { storageBytes: number },
 ): Promise<{ seq: number }> {
   const message: AgentMessage = { role: "user", content };
+  const body = encodeMessage(message);
   // Refuse before storing anything: a refused post must not leave an object in S3 and a row in the index.
   const { rows: size } = await ctx.db.query<{ messages: number; bytes: string }>(
     `select count(*)::int as messages, coalesce(sum(b.size), 0)::text as bytes
@@ -78,6 +106,7 @@ export async function postUserMessage(
       `a conversation holds at most ${MAX_CONVERSATION_MESSAGES} messages and ${MAX_CONVERSATION_BYTES / 1024 / 1024} MiB: start a new one`,
     );
   }
+  refuseOverQuota(await storedBytes(ctx.db), body.byteLength, limits.storageBytes);
   if (await isBusy(ctx.db, conversationId)) {
     throw new ConversationBusyError("a turn is already running for this conversation");
   }
@@ -88,7 +117,7 @@ export async function postUserMessage(
     );
     const predicted = rows[0]?.next ?? 1;
     // The object goes first: its key needs the seq, which the transaction below re-checks under a row lock.
-    const blobId = await putMessage(ctx, blobs, conversationId, predicted, message);
+    const blobId = await putMessage(ctx, blobs, conversationId, predicted, body);
     const result = await ctx.db.transaction(async (tx) => {
       const locked = await tx.query("select 1 from conversations where id = $1 for update", [
         conversationId,
@@ -104,6 +133,8 @@ export async function postUserMessage(
       );
       const seq = next.rows[0]?.next ?? 1;
       if (seq !== predicted) return undefined; // another writer got in between: retry with the new position
+      // Again under the lock, with what other conversations stored meanwhile; the object just written is left out.
+      refuseOverQuota(await storedBytes(tx, blobId), body.byteLength, limits.storageBytes);
       await tx.query("update conversations set last_error = null where id = $1", [conversationId]);
       await tx.query(
         "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
@@ -150,7 +181,7 @@ export async function persistMessage(
   input: PersistInput,
 ): Promise<"inserted" | "exists"> {
   const { conversationId, seq, message, run } = input;
-  const blobId = await putMessage(ctx, blobs, conversationId, seq, message);
+  const blobId = await putMessage(ctx, blobs, conversationId, seq, encodeMessage(message));
   return ctx.db.transaction(async (tx) => {
     if (!(await holdsRun(tx, run)))
       throw new LeaseLostError(`run ${run.runId} no longer owns task ${run.taskId}`);
@@ -189,14 +220,12 @@ export type StoredMessage = {
   createdAt: Date;
 };
 
-/** Messages after `afterSeq` with their bodies, oldest first. Bodies are fetched concurrently and validated. */
-export async function readMessages(
+/** Bodies for index rows, eight S3 gets at a time, validated, in the rows' order. */
+async function withBodies(
   ctx: TenantContext,
   blobs: Blobs,
-  conversationId: string,
-  afterSeq = 0,
+  rows: readonly MessageRowRecord[],
 ): Promise<StoredMessage[]> {
-  const rows = await listMessageRows(ctx.db, conversationId, afterSeq);
   const out: StoredMessage[] = new Array(rows.length);
   let next = 0;
   const worker = async () => {
@@ -210,4 +239,83 @@ export async function readMessages(
   };
   await Promise.all(Array.from({ length: Math.min(8, rows.length) }, worker));
   return out;
+}
+
+/** The most messages one page may hold (`GET /v1/conversations/:id?limit=`). */
+export const MAX_PAGE_MESSAGES = 500;
+
+export type MessagePage = {
+  messages: StoredMessage[];
+  /** The `after` of the next page; null when this page reaches the newest message. */
+  nextAfter: number | null;
+};
+
+/** Up to `limit` messages after seq `after`, oldest first, with their bodies. */
+export async function readMessages(
+  ctx: TenantContext,
+  blobs: Blobs,
+  conversationId: string,
+  page: { after: number; limit: number },
+): Promise<MessagePage> {
+  if (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > MAX_PAGE_MESSAGES)
+    throw new RangeError(`a page holds 1 to ${MAX_PAGE_MESSAGES} messages, not ${page.limit}`);
+  // One row more than asked says whether another page follows.
+  const rows = await listMessageRows(ctx.db, conversationId, {
+    after: page.after,
+    limit: page.limit + 1,
+  });
+  const more = rows.length > page.limit;
+  const kept = more ? rows.slice(0, page.limit) : rows;
+  return {
+    messages: await withBodies(ctx, blobs, kept),
+    nextAfter: more ? (kept.at(-1)?.seq ?? null) : null,
+  };
+}
+
+export type History = {
+  /** The newest whole turns that fit the budget, oldest first. */
+  messages: StoredMessage[];
+  /** The conversation's last seq (0 when empty): the next message is this plus one. */
+  lastSeq: number;
+  bytes: number;
+  /** Older messages left out to stay within the budget. */
+  dropped: { messages: number; bytes: number };
+};
+
+/**
+ * A turn's history: the newest messages whose bodies fit `budgetBytes` (sizes from the blob index, so nothing over
+ * the budget is fetched). It is cut only before a user message, so it starts a turn and never separates a tool call
+ * from its result. The newest turn is always whole, even past the budget: it is the one being answered.
+ */
+export async function readHistory(
+  ctx: TenantContext,
+  blobs: Blobs,
+  conversationId: string,
+  budgetBytes: number,
+): Promise<History> {
+  const rows = await listMessageRowsNewestFirst(ctx.db, conversationId);
+  let keep = 0;
+  let bytes = 0;
+  let pending = 0;
+  for (const [i, row] of rows.entries()) {
+    pending += row.size;
+    if (row.role !== "user") continue;
+    // rows[keep..i] is one whole turn, newest first.
+    if (keep > 0 && bytes + pending > budgetBytes) break;
+    bytes += pending;
+    pending = 0;
+    keep = i + 1;
+  }
+  if (keep === 0) {
+    // No user message to cut before (not a conversation the api writes): keep it all.
+    keep = rows.length;
+    bytes = pending;
+  }
+  const total = rows.reduce((sum, row) => sum + row.size, 0);
+  return {
+    messages: await withBodies(ctx, blobs, rows.slice(0, keep).reverse()),
+    lastSeq: rows[0]?.seq ?? 0,
+    bytes,
+    dropped: { messages: rows.length - keep, bytes: total - bytes },
+  };
 }

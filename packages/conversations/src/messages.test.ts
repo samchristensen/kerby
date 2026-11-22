@@ -15,8 +15,10 @@ import {
   parseNotice,
   persistMessage,
   postUserMessage,
+  readHistory,
   readMessages,
   SeqConflictError,
+  StorageQuotaExceededError,
 } from "./index.ts";
 import { createTestTenant, type TestTenant } from "./testing.ts";
 
@@ -27,6 +29,9 @@ const assistant = (value: string): AgentMessage => ({
   stopReason: "end",
   content: [...text(value)],
 });
+
+/** A quota no test reaches unless it means to. */
+const QUOTA = { storageBytes: 1024 ** 3 };
 
 /** Claim the conversation's turn and hand its RunContext to `fn`: a real attempt, as a worker would hold it. */
 async function withRun<T>(tenant: TestTenant, fn: (run: RunContext) => Promise<T>): Promise<T> {
@@ -49,7 +54,7 @@ async function withRun<T>(tenant: TestTenant, fn: (run: RunContext) => Promise<T
 async function conversationWithTurn(tenant: TestTenant) {
   const blobs = await createTestBlobs();
   const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
-  const posted = await postUserMessage(tenant, blobs, conversation.id, [...text("hello")]);
+  const posted = await postUserMessage(tenant, blobs, conversation.id, [...text("hello")], QUOTA);
   return { blobs, conversation, posted };
 }
 
@@ -67,7 +72,7 @@ describe("postUserMessage", () => {
     const before = { objects: await objects(), indexed: await indexed() };
 
     await expect(
-      postUserMessage(tenant, blobs, conversation.id, [...text("while busy")]),
+      postUserMessage(tenant, blobs, conversation.id, [...text("while busy")], QUOTA),
     ).rejects.toBeInstanceOf(ConversationBusyError);
     expect({ objects: await objects(), indexed: await indexed() }).toEqual(before);
 
@@ -75,9 +80,35 @@ describe("postUserMessage", () => {
     await withRun(tenant, async () => {});
     await tenant.db.query("update blobs set size = $1", [MAX_CONVERSATION_BYTES]);
     await expect(
-      postUserMessage(tenant, blobs, conversation.id, [...text("one more")]),
+      postUserMessage(tenant, blobs, conversation.id, [...text("one more")], QUOTA),
     ).rejects.toBeInstanceOf(ConversationFullError);
     expect({ objects: await objects(), indexed: await indexed() }).toEqual(before);
+  });
+
+  it("refuses a post that would pass the tenant's storage quota, storing nothing", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const conversation = await insertConversation(tenant.db, { model: "m", system: "" });
+    const other = await insertConversation(tenant.db, { model: "m", system: "" });
+    const size = new TextEncoder().encode(
+      JSON.stringify({ role: "user", content: [...text("hello")] }),
+    ).byteLength;
+    // Exactly at the quota is allowed.
+    await postUserMessage(tenant, blobs, conversation.id, [...text("hello")], {
+      storageBytes: size,
+    });
+    const bucket = await createTestBucket();
+    const objects = async () =>
+      (await Array.fromAsync(bucket.list(tenantPrefix(tenant.tenantId)))).length;
+    // The quota is the tenant's, across conversations.
+    await expect(
+      postUserMessage(tenant, blobs, other.id, [...text("hello")], { storageBytes: 2 * size - 1 }),
+    ).rejects.toBeInstanceOf(StorageQuotaExceededError);
+    expect(await objects()).toBe(1);
+    expect((await tenant.db.query("select 1 from messages")).rowCount).toBe(1);
+    expect((await tenant.db.query("select 1 from absurd.t_turns")).rowCount).toBe(1);
+    await postUserMessage(tenant, blobs, other.id, [...text("hello")], { storageBytes: 2 * size });
+    expect(await objects()).toBe(2);
   });
 
   it("appends the message and enqueues one turn, atomically visible", async () => {
@@ -85,8 +116,11 @@ describe("postUserMessage", () => {
     const { blobs, conversation, posted } = await conversationWithTurn(tenant);
     expect(posted.seq).toBe(1);
     expect(await isBusy(tenant.db, conversation.id)).toBe(true);
-    const stored = await readMessages(tenant, blobs, conversation.id);
-    expect(stored.map((m) => m.message)).toEqual([{ role: "user", content: [...text("hello")] }]);
+    const stored = await readMessages(tenant, blobs, conversation.id, { after: 0, limit: 10 });
+    expect(stored).toMatchObject({ nextAfter: null });
+    expect(stored.messages.map((m) => m.message)).toEqual([
+      { role: "user", content: [...text("hello")] },
+    ]);
     const tasks = await tenant.db.query<{ params: unknown; idempotency_key: string }>(
       "select params, idempotency_key from absurd.t_turns",
     );
@@ -107,7 +141,7 @@ describe("postUserMessage", () => {
       notices.push(p),
     );
     try {
-      await postUserMessage(tenant, blobs, conversation.id, [...text("hi")]);
+      await postUserMessage(tenant, blobs, conversation.id, [...text("hi")], QUOTA);
       for (let i = 0; i < 50 && notices.length === 0; i++)
         await new Promise((r) => setTimeout(r, 50));
       expect(notices.map(parseNotice)).toEqual([{ persisted: 1 }]);
@@ -120,10 +154,10 @@ describe("postUserMessage", () => {
     await using tenant = await createTestTenant();
     const { blobs, conversation } = await conversationWithTurn(tenant);
     await expect(
-      postUserMessage(tenant, blobs, conversation.id, [...text("again")]),
+      postUserMessage(tenant, blobs, conversation.id, [...text("again")], QUOTA),
     ).rejects.toBeInstanceOf(ConversationBusyError);
     await expect(
-      postUserMessage(tenant, blobs, "6f1c1d0e-9d38-4d9e-8c8e-0d6a4d4f1b11", [...text("x")]),
+      postUserMessage(tenant, blobs, "6f1c1d0e-9d38-4d9e-8c8e-0d6a4d4f1b11", [...text("x")], QUOTA),
     ).rejects.toBeInstanceOf(ConversationNotFoundError);
   });
 
@@ -133,7 +167,7 @@ describe("postUserMessage", () => {
     const conversation = await insertConversation(tenant.db, { model: "m", system: "" });
     const results = await Promise.allSettled(
       Array.from({ length: 5 }, (_, i) =>
-        postUserMessage(tenant, blobs, conversation.id, [...text(`m${i}`)]),
+        postUserMessage(tenant, blobs, conversation.id, [...text(`m${i}`)], QUOTA),
       ),
     );
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -158,7 +192,9 @@ describe("postUserMessage", () => {
       });
     });
     expect(await isBusy(tenant.db, conversation.id)).toBe(false);
-    expect((await postUserMessage(tenant, blobs, conversation.id, [...text("more")])).seq).toBe(3);
+    expect(
+      (await postUserMessage(tenant, blobs, conversation.id, [...text("more")], QUOTA)).seq,
+    ).toBe(3);
   });
 });
 
@@ -185,9 +221,11 @@ describe("persistMessage", () => {
     } finally {
       await subscription.close();
     }
-    expect((await readMessages(tenant, blobs, conversation.id, 1)).map((m) => m.message)).toEqual([
-      assistant("hi"),
-    ]);
+    expect(
+      (await readMessages(tenant, blobs, conversation.id, { after: 1, limit: 10 })).messages.map(
+        (m) => m.message,
+      ),
+    ).toEqual([assistant("hi")]);
   });
 
   it("refuses different content at a taken position, leaving the stored bytes alone", async () => {
@@ -209,9 +247,11 @@ describe("persistMessage", () => {
         }),
       ).rejects.toBeInstanceOf(SeqConflictError);
     });
-    expect((await readMessages(tenant, blobs, conversation.id, 1)).map((m) => m.message)).toEqual([
-      assistant("first"),
-    ]);
+    expect(
+      (await readMessages(tenant, blobs, conversation.id, { after: 1, limit: 10 })).messages.map(
+        (m) => m.message,
+      ),
+    ).toEqual([assistant("first")]);
   });
 
   it("refuses a position that would leave a gap", async () => {
@@ -253,5 +293,99 @@ describe("parseNotice", () => {
     expect(parseNotice("not json")).toBeUndefined();
     expect(parseNotice('{"live":{"v":2}}')).toBeUndefined();
     expect(parseNotice('{"other":1}')).toBeUndefined();
+  });
+});
+
+/** Post `user`, then persist `answers` as that turn's messages; returns nothing, the index is the record. */
+async function turn(
+  tenant: TestTenant,
+  blobs: Awaited<ReturnType<typeof createTestBlobs>>,
+  conversationId: string,
+  user: string,
+  answers: AgentMessage[],
+) {
+  const { seq } = await postUserMessage(tenant, blobs, conversationId, [...text(user)], QUOTA);
+  await withRun(tenant, async (run) => {
+    for (const [i, message] of answers.entries())
+      await persistMessage(tenant, blobs, { conversationId, seq: seq + 1 + i, message, run });
+  });
+}
+
+describe("readMessages", () => {
+  it("reads one page at a time and says where the next one starts", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const { id } = await insertConversation(tenant.db, { model: "m", system: "" });
+    await turn(tenant, blobs, id, "q", [
+      assistant("a"),
+      assistant("b"),
+      assistant("c"),
+      assistant("d"),
+    ]);
+    const page = async (after: number, limit: number) => {
+      const read = await readMessages(tenant, blobs, id, { after, limit });
+      return { seqs: read.messages.map((m) => m.seq), nextAfter: read.nextAfter };
+    };
+    expect(await page(0, 2)).toEqual({ seqs: [1, 2], nextAfter: 2 });
+    expect(await page(2, 2)).toEqual({ seqs: [3, 4], nextAfter: 4 });
+    expect(await page(4, 2)).toEqual({ seqs: [5], nextAfter: null });
+    expect(await page(0, 5)).toEqual({ seqs: [1, 2, 3, 4, 5], nextAfter: null });
+    expect(await page(0, 4)).toEqual({ seqs: [1, 2, 3, 4], nextAfter: 4 });
+    expect(await page(5, 100)).toEqual({ seqs: [], nextAfter: null });
+    await expect(page(0, 0)).rejects.toBeInstanceOf(RangeError);
+    await expect(page(0, 501)).rejects.toBeInstanceOf(RangeError);
+  });
+});
+
+describe("readHistory", () => {
+  const call = { type: "tool_call", id: "call-1", name: "echo", input: { text: "x" } } as const;
+  const asksForTool: AgentMessage = {
+    role: "assistant",
+    model: "faux/faux-1",
+    stopReason: "tool_use",
+    content: [call],
+  };
+  const toolResult: AgentMessage = {
+    role: "tool",
+    toolCallId: "call-1",
+    content: [...text("x".repeat(500))],
+    isError: false,
+  };
+
+  it("keeps the newest whole turns within the budget, cutting only before a user message", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const { id } = await insertConversation(tenant.db, { model: "m", system: "" });
+    await turn(tenant, blobs, id, "one", [asksForTool, toolResult, assistant("done")]); // seq 1-4
+    await turn(tenant, blobs, id, "two", [asksForTool, toolResult, assistant("done")]); // seq 5-8
+    await postUserMessage(tenant, blobs, id, [...text("three")], QUOTA); // seq 9, the turn being answered
+    const { rows } = await tenant.db.query<{ seq: number; size: string }>(
+      "select m.seq, b.size::text as size from messages m join blobs b on b.id = m.blob_id order by m.seq",
+    );
+    const size = (from: number, to: number) =>
+      rows.filter((r) => r.seq >= from && r.seq <= to).reduce((n, r) => n + Number(r.size), 0);
+    const history = async (budget: number) => {
+      const read = await readHistory(tenant, blobs, id, budget);
+      return { seqs: read.messages.map((m) => m.seq), ...read };
+    };
+
+    const all = await history(size(1, 9));
+    expect(all.seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(all).toMatchObject({
+      lastSeq: 9,
+      bytes: size(1, 9),
+      dropped: { messages: 0, bytes: 0 },
+    });
+
+    // One byte short of everything: the whole first turn goes, its tool call and result together.
+    const cut = await history(size(1, 9) - 1);
+    expect(cut.seqs).toEqual([5, 6, 7, 8, 9]);
+    expect(cut).toMatchObject({ lastSeq: 9, dropped: { messages: 4, bytes: size(1, 4) } });
+    expect(cut.messages[0]?.message.role).toBe("user");
+
+    // The turn being answered is kept even when it alone is over the budget.
+    const newest = await history(1);
+    expect(newest.seqs).toEqual([9]);
+    expect(newest).toMatchObject({ lastSeq: 9, dropped: { messages: 8, bytes: size(1, 8) } });
   });
 });

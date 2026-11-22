@@ -5,6 +5,7 @@ import type {
   Conversation,
   EventEnvelope,
   GetConversationResponse,
+  Limits,
   PostMessageResponse,
 } from "@kerby/contracts";
 import {
@@ -23,6 +24,7 @@ import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApiApp } from "./index.ts";
 import { createAuthenticator } from "./service/auth.ts";
+import { TokenBuckets } from "./service/rate-limit.ts";
 import type { ApiDeps } from "./types/index.ts";
 
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
@@ -34,7 +36,14 @@ type Harness = Awaited<ReturnType<typeof harness>>;
 type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
 
 async function harness(
-  options: { authCacheMs?: number; keyless?: string[]; maxStreams?: number } = {},
+  options: {
+    authCacheMs?: number;
+    keyless?: string[];
+    maxStreams?: number;
+    providers?: string[];
+    failedAuthPerMinute?: number;
+    trustProxy?: boolean;
+  } = {},
 ) {
   const keys = generateSecretsKeyPair();
   const control = await createTestControlDb();
@@ -52,11 +61,16 @@ async function harness(
     sealer: createSealer(keys.publicKey),
     settings: {
       defaultModel: "faux/faux-1",
+      modelProviders: options.providers ?? ["anthropic", "openai"],
       keylessProviders: options.keyless ?? ["faux"],
       defaultSystem: "Be helpful.",
       authCacheMs: options.authCacheMs ?? 0,
       maxStreamsPerTenant: options.maxStreams ?? 20,
       streamRecheckMs: 100,
+      defaultRequestsPerMinute: 10_000,
+      defaultStorageBytes: 1024 ** 3,
+      failedAuthPerMinute: options.failedAuthPerMinute ?? 1000,
+      trustProxy: options.trustProxy ?? false,
     },
   };
   const server = await serve(createApiApp(deps), { host: "127.0.0.1", port: 0 });
@@ -64,8 +78,8 @@ async function harness(
   const base = `http://127.0.0.1:${server.port}`;
 
   /** A tenant: a control-plane row, a key, and its own migrated database. */
-  async function tenant(name: string) {
-    const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1 });
+  async function tenant(name: string, limits: Limits = {}) {
+    const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
     const { key, secret } = await createApiKey(control.db, row.id);
     const database: TestTenant = await createTestTenant();
@@ -140,7 +154,11 @@ describe("authentication", () => {
     const t = await h.tenant("acme");
     let clock = 1_000;
     const auth = createAuthenticator(h.control.db, 30_000, () => clock);
-    await expect(auth.authenticate(t.secret)).resolves.toEqual({ tenantId: t.id, keyId: t.key.id });
+    await expect(auth.authenticate(t.secret)).resolves.toEqual({
+      tenantId: t.id,
+      keyId: t.key.id,
+      limits: {},
+    });
 
     await setTenantStatus(h.control.db, t.id, "suspended");
     clock += 29_999;
@@ -491,9 +509,6 @@ describe("model keys (bring your own key)", () => {
     const t = await h.tenant("acme");
     expect((await h.call(null, "PUT", "/v1/model-keys/openai", { apiKey: KEY })).status).toBe(401);
     expect((await h.call(null, "GET", "/v1/model-keys")).status).toBe(401);
-    expect((await h.call(t.secret, "PUT", "/v1/model-keys/Open_AI", { apiKey: KEY })).status).toBe(
-      404,
-    );
     for (const apiKey of ["short", "has space in it", "line\nbreak-key-123", "é".repeat(20)]) {
       expect((await h.call(t.secret, "PUT", "/v1/model-keys/openai", { apiKey })).status).toBe(400);
     }
@@ -521,16 +536,183 @@ describe("model keys (bring your own key)", () => {
     ).toBe(400);
   });
 
-  it("caps how many providers one tenant can store", async () => {
+  it("refuses a provider the harness does not support, naming the supported ones", async () => {
     const h = await harness({ keyless: [] });
     const t = await h.tenant("acme");
-    for (let i = 0; i < 32; i++) {
-      expect((await h.call(t.secret, "PUT", `/v1/model-keys/p${i}`, { apiKey: KEY })).status).toBe(
-        204,
-      );
+    for (const provider of ["nope", "Open_AI"]) {
+      const refused = await h.call(t.secret, "PUT", `/v1/model-keys/${provider}`, { apiKey: KEY });
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({
+        error: {
+          code: "unknown_provider",
+          message: "unknown model provider; supported: anthropic, openai",
+        },
+      });
     }
-    expect((await h.call(t.secret, "PUT", "/v1/model-keys/extra", { apiKey: KEY })).status).toBe(
-      409,
+    expect(await (await h.call(t.secret, "GET", "/v1/model-keys")).json()).toEqual({ keys: [] });
+  });
+
+  it("caps how many providers one tenant can store", async () => {
+    const providers = Array.from({ length: 33 }, (_, i) => `p${i}`);
+    const h = await harness({ keyless: [], providers });
+    const t = await h.tenant("acme");
+    for (const provider of providers.slice(0, 32)) {
+      expect(
+        (await h.call(t.secret, "PUT", `/v1/model-keys/${provider}`, { apiKey: KEY })).status,
+      ).toBe(204);
+    }
+    expect((await h.call(t.secret, "PUT", "/v1/model-keys/p32", { apiKey: KEY })).status).toBe(409);
+  });
+});
+
+describe("paged reads", () => {
+  /** A conversation of `count` messages: one question and its answers. */
+  async function longConversation(h: Harness, t: Tenant, count: number) {
+    const { id } = await newConversation(h, t.secret);
+    await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, { content: "go" });
+    await completeTurnWith(
+      t.ctx,
+      h.blobs,
+      id,
+      Array.from({ length: count - 1 }, (_, i) => assistant(`answer ${i + 2}`)),
     );
+    return id;
+  }
+
+  it("pages a conversation with after and limit, and says where the next page starts", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const id = await longConversation(h, t, 250);
+    const page = async (query: string) => {
+      const response = await h.call(t.secret, "GET", `/v1/conversations/${id}${query}`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as GetConversationResponse;
+      return { seqs: body.messages.map((m) => m.seq), nextAfter: body.nextAfter };
+    };
+    const first = await page("");
+    expect(first.seqs).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
+    expect(first.nextAfter).toBe(100);
+    const rest = await page("?after=100&limit=500");
+    expect(rest.seqs).toEqual(Array.from({ length: 150 }, (_, i) => i + 101));
+    expect(rest.nextAfter).toBeNull();
+    expect(await page("?after=248&limit=2")).toEqual({ seqs: [249, 250], nextAfter: null });
+    expect(await page("?after=247&limit=2")).toEqual({ seqs: [248, 249], nextAfter: 249 });
+    expect(await page("?after=250")).toEqual({ seqs: [], nextAfter: null });
+    for (const bad of ["?limit=0", "?limit=501", "?after=-1", "?after=x", "?limit=1.5"]) {
+      const response = await h.call(t.secret, "GET", `/v1/conversations/${id}${bad}`);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+    }
+  });
+
+  it("replays a conversation longer than one page over the event stream, in order", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const id = await longConversation(h, t, 250);
+    const response = await h.call(t.secret, "GET", `/v1/conversations/${id}/events`, undefined, {
+      "last-event-id": "20",
+    });
+    const events = await readEvents(response, 230);
+    expect(events.map((e) => Number(e.id))).toEqual(Array.from({ length: 230 }, (_, i) => i + 21));
+  });
+});
+
+describe("request rate limit", () => {
+  it("refuses a tenant's requests with 429 once its bucket is empty, without touching another tenant", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme", { requestsPerMinute: 3 });
+    const other = await h.tenant("other", { requestsPerMinute: 3 });
+    for (let i = 0; i < 3; i++)
+      expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(200);
+    const refused = await h.call(t.secret, "GET", "/v1/model-keys");
+    expect(refused.status).toBe(429);
+    // One token comes back every 20 s at 3 a minute.
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(Number(refused.headers.get("retry-after"))).toBeLessThanOrEqual(20);
+    expect(await refused.json()).toMatchObject({ error: { code: "rate_limited" } });
+    expect((await h.call(other.secret, "GET", "/v1/model-keys")).status).toBe(200);
+  });
+
+  it("refills continuously, up to a minute's worth", () => {
+    let clock = 0;
+    const buckets = new TokenBuckets({ maxKeys: 10, now: () => clock });
+    for (let i = 0; i < 60; i++) expect(buckets.take("t", 60)).toBe(0);
+    expect(buckets.take("t", 60)).toBe(1);
+    clock += 999;
+    expect(buckets.take("t", 60)).toBe(1);
+    clock += 1;
+    expect(buckets.take("t", 60)).toBe(0);
+    expect(buckets.take("t", 60)).toBe(1);
+    clock += 10 * 60_000; // a long pause refills to a minute's worth, not more
+    for (let i = 0; i < 60; i++) expect(buckets.take("t", 60)).toBe(0);
+    expect(buckets.take("t", 60)).toBe(1);
+  });
+
+  it("forgets the least recently used key past its bound", () => {
+    const buckets = new TokenBuckets({ maxKeys: 2, now: () => 0 });
+    expect(buckets.take("a", 1)).toBe(0);
+    expect(buckets.take("a", 1)).toBe(60);
+    buckets.take("b", 1);
+    buckets.take("c", 1); // evicts "a"
+    expect(buckets.take("a", 1)).toBe(0);
+  });
+});
+
+describe("failed authentication limit", () => {
+  it("refuses an address that keeps failing, before any key lookup", async () => {
+    const h = await harness({ failedAuthPerMinute: 3 });
+    const t = await h.tenant("acme");
+    for (const key of [null, "garbage", `kb_000000000000_${"A".repeat(43)}`])
+      expect((await h.call(key, "GET", "/v1/model-keys")).status).toBe(401);
+    // Even a valid key from that address is refused now: the address is what is limited.
+    const refused = await h.call(t.secret, "GET", "/v1/model-keys");
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await refused.json()).toMatchObject({ error: { code: "rate_limited" } });
+    // Without TRUST_PROXY a forwarded address is ignored: anyone can send the header.
+    const spoofed = await h.call(t.secret, "GET", "/v1/model-keys", undefined, {
+      "x-forwarded-for": "198.51.100.7",
+    });
+    expect(spoofed.status).toBe(429);
+  });
+
+  it("behind a trusted proxy, limits the left-most X-Forwarded-For address", async () => {
+    const h = await harness({ failedAuthPerMinute: 2, trustProxy: true });
+    const t = await h.tenant("acme");
+    const from = (address: string) => ({ "x-forwarded-for": `${address}, 10.0.0.1` });
+    for (let i = 0; i < 2; i++)
+      expect(
+        (await h.call("garbage", "GET", "/v1/model-keys", undefined, from("203.0.113.1"))).status,
+      ).toBe(401);
+    expect(
+      (await h.call(t.secret, "GET", "/v1/model-keys", undefined, from("203.0.113.1"))).status,
+    ).toBe(429);
+    expect(
+      (await h.call(t.secret, "GET", "/v1/model-keys", undefined, from("203.0.113.2"))).status,
+    ).toBe(200);
+  });
+});
+
+describe("storage quota", () => {
+  it("refuses a message past the tenant's quota with 413; an admitted turn still finishes", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme", { storageBytes: 200 });
+    const { id } = await newConversation(h, t.secret);
+    expect(
+      (await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hello" }))
+        .status,
+    ).toBe(202);
+    // The answer takes the tenant past its quota: it is stored all the same.
+    await completeTurnWith(t.ctx, h.blobs, id, [assistant("x".repeat(300))]);
+    const view = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${id}`)
+    ).json()) as GetConversationResponse;
+    expect(view.messages).toHaveLength(2);
+    const refused = await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, {
+      content: "more",
+    });
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({ error: { code: "storage_quota_exceeded" } });
+    expect((await t.database.db.query("select 1 from messages")).rowCount).toBe(2);
   });
 });

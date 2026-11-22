@@ -91,6 +91,8 @@ services:
       SECRETS_PUBLIC_KEY: "y4c7+AJM8aN76nrweWjLR0gShtooDI7uI0ay8mTDHR0="
       # Short, so suspension and key revocation show within seconds locally (the default is 30).
       AUTH_CACHE_SECONDS: "3"
+      # Clients reach the api directly here, so X-Forwarded-For is not trusted (TRUST_PROXY is on only on Railway).
+      TRUST_PROXY: "false"
       PORT: "8080"
     ports:
       # The only published port: the tenant-facing API, on loopback. There is no shared proxy locally.

@@ -1,4 +1,5 @@
 import type { Blobs } from "@kerby/blobs";
+import type { Limits } from "@kerby/contracts";
 import type { ControlDb, TenantPools } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
 
@@ -11,6 +12,8 @@ export type ApiDeps = {
   settings: {
     /** The model a conversation gets when the request names none; without one, a request must name its model. */
     defaultModel: string | undefined;
+    /** Providers a tenant may store a key for: the harness adapter's list, injected by the composition root. */
+    modelProviders: readonly string[];
     /** Providers whose runs need no tenant key (the development fake model). Empty in production. */
     keylessProviders: readonly string[];
     defaultSystem: string;
@@ -19,11 +22,19 @@ export type ApiDeps = {
     maxStreamsPerTenant: number;
     /** How often an open event stream confirms its key and tenant are still allowed. */
     streamRecheckMs: number;
+    /** Requests per minute for a tenant whose limits do not set `requestsPerMinute`; counted per api process. */
+    defaultRequestsPerMinute: number;
+    /** Stored bytes for a tenant whose limits do not set `storageBytes`. */
+    defaultStorageBytes: number;
+    /** Failed authentications one client address may make per minute before it is refused without a lookup. */
+    failedAuthPerMinute: number;
+    /** Take the client address from the left-most `X-Forwarded-For` entry (behind Railway's proxy) instead of the socket. */
+    trustProxy: boolean;
   };
 };
 
 /** Who is calling: established from a verified API key, never from a request body. */
-export type Principal = { tenantId: string; keyId: string };
+export type Principal = { tenantId: string; keyId: string; limits: Limits };
 
 /** No valid key. */
 export class UnauthorizedError extends Error {

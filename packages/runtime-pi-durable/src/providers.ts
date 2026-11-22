@@ -10,13 +10,14 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { togetherProvider } from "@earendil-works/pi-ai/providers/together";
 import { xaiProvider } from "@earendil-works/pi-ai/providers/xai";
+import { isSupportedProvider, type SupportedProvider } from "./provider-ids.ts";
 
 type AnyProvider = Provider;
 
 // Providers a tenant can bring a plain API key for. Cloud-account providers (Bedrock, Vertex, Azure) and OAuth
 // logins are left out on purpose: their credentials are not one string, and a tenant's cloud identity is not
-// something to hold. Adding a provider is one line here.
-const PROVIDERS: Record<string, () => AnyProvider> = {
+// something to hold. Adding a provider is its id in `provider-ids.ts` and one line here; the type keeps them equal.
+export const PROVIDERS: Record<SupportedProvider, () => AnyProvider> = {
   anthropic: anthropicProvider,
   cerebras: cerebrasProvider,
   deepseek: deepseekProvider,
@@ -30,8 +31,6 @@ const PROVIDERS: Record<string, () => AnyProvider> = {
   xai: xaiProvider,
 };
 
-export const SUPPORTED_PROVIDERS: readonly string[] = Object.keys(PROVIDERS);
-
 /**
  * Models for one run: a single provider, authenticated with the tenant's own key. The key lives in this object
  * only; nothing is shared between runs or tenants. `undefined` for a provider this adapter does not know.
@@ -40,7 +39,7 @@ export function createTenantModels(
   provider: string,
   apiKey: string | undefined,
 ): Models | undefined {
-  const factory = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
+  const factory = isSupportedProvider(provider) ? PROVIDERS[provider] : undefined;
   if (!factory || !apiKey) return undefined;
   const instance = factory();
   const credentials = new Map<string, Credential>([

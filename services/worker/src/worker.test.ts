@@ -1,12 +1,14 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { AgentEvent, AgentMessage, AgentRuntime } from "@kerby/agent";
 import { createTestBlobs } from "@kerby/blobs/testing";
+import type { Limits } from "@kerby/contracts";
 import { createApiKey, insertTenant, setTenantStatus } from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import {
   conversationChannel,
   insertConversation,
   isBusy,
+  MAX_PAGE_MESSAGES,
   parseNotice,
   postUserMessage,
   readMessages,
@@ -80,6 +82,7 @@ async function harness(options: Options = {}) {
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
       sweepIntervalMs: 200,
       enableEchoTool: options.echo ?? true,
+      historyBudgetBytes: 8 * 1024 * 1024,
       ...options.settings,
     },
   };
@@ -87,7 +90,7 @@ async function harness(options: Options = {}) {
   await scheduler.start();
   cleanups.push(() => scheduler.stop(0));
 
-  async function tenant(name: string, limits: Record<string, unknown> = {}) {
+  async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
     await createApiKey(control.db, row.id);
@@ -104,7 +107,9 @@ async function harness(options: Options = {}) {
     text: string,
     notify = true,
   ) {
-    const posted = await postUserMessage(t.ctx, blobs, conversationId, [{ type: "text", text }]);
+    const posted = await postUserMessage(t.ctx, blobs, conversationId, [{ type: "text", text }], {
+      storageBytes: 1024 ** 3,
+    });
     if (notify) await control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
     return posted.seq;
   }
@@ -114,7 +119,9 @@ async function harness(options: Options = {}) {
   }
 
   const messages = async (t: Awaited<ReturnType<typeof tenant>>, conversationId: string) =>
-    (await readMessages(t.ctx, blobs, conversationId)).map((m) => m.message);
+    (
+      await readMessages(t.ctx, blobs, conversationId, { after: 0, limit: MAX_PAGE_MESSAGES })
+    ).messages.map((m) => m.message);
 
   const settled = (t: Awaited<ReturnType<typeof tenant>>, conversationId: string, count: number) =>
     eventually(`${count} messages in ${conversationId}`, async () => {
@@ -252,6 +259,76 @@ async function retryFast(
     `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb, max_attempts = ${maxAttempts}`,
   );
 }
+
+describe("history budget", () => {
+  /** Answers every turn with a tool call, its result and a reply, padded to a known size; records each history. */
+  function recordingRuntime(seen: AgentMessage[][]): AgentRuntime {
+    const pad = "x".repeat(10_000);
+    return {
+      name: "recording",
+      async *run(run) {
+        seen.push(run.history);
+        const n = seen.length;
+        const call = {
+          type: "tool_call",
+          id: `call-${n}`,
+          name: "echo",
+          input: { text: pad },
+        } as const;
+        yield { type: "run_start" };
+        const messages: AgentMessage[] = [
+          { role: "assistant", model: run.model, stopReason: "tool_use", content: [call] },
+          {
+            role: "tool",
+            toolCallId: call.id,
+            content: [{ type: "text", text: pad }],
+            isError: false,
+          },
+          {
+            role: "assistant",
+            model: run.model,
+            stopReason: "end",
+            content: [{ type: "text", text: pad }],
+          },
+        ];
+        for (const message of messages) yield { type: "message_end", message };
+        yield { type: "run_end", reason: "done" };
+      },
+    };
+  }
+
+  it("starts a turn with the newest whole turns that fit, tool calls with their results", async () => {
+    const seen: AgentMessage[][] = [];
+    // Each answered turn is about 30 KB: the budget holds two of them and the new question, not three.
+    const h = await harness({
+      runtime: recordingRuntime(seen),
+      settings: { historyBudgetBytes: 70_000 },
+    });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    for (const [i, question] of ["one", "two", "three", "four"].entries()) {
+      await h.post(t, conversation.id, question);
+      await h.settled(t, conversation.id, (i + 1) * 4);
+    }
+    const last = seen.at(-1) ?? [];
+    expect(last.map((m) => m.role)).toEqual([
+      ...["user", "assistant", "tool", "assistant"],
+      ...["user", "assistant", "tool", "assistant"],
+      "user",
+    ]);
+    expect(textOf(last[0])).toBe("two");
+    expect(textOf(last.at(-1))).toBe("four");
+    // Every call in the history has its result right after it.
+    for (const [i, message] of last.entries()) {
+      if (message.role !== "assistant") continue;
+      for (const part of message.content)
+        if (part.type === "tool_call")
+          expect(last[i + 1]).toMatchObject({ role: "tool", toolCallId: part.id });
+    }
+    // Nothing was lost: the index still holds every message, and the answer went after the last one.
+    expect(await h.messages(t, conversation.id)).toHaveLength(16);
+  });
+});
 
 describe("recovery", () => {
   it("a turn that dies after its tool ran finishes on retry without running the tool again", async () => {

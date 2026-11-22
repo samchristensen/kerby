@@ -74,6 +74,7 @@ export async function startWorker(config: WorkerConfig): Promise<{
       defaultMaxConcurrentTurns: config.defaultMaxConcurrentTurns,
       sweepIntervalMs: config.sweepIntervalSeconds * 1000,
       enableEchoTool: config.enableEchoTool,
+      historyBudgetBytes: config.historyBudgetBytes,
     },
   };
   const scheduler = createScheduler(deps, createHandlers(deps));
