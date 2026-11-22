@@ -450,3 +450,34 @@ describe("listen", () => {
     expect(received).toEqual([]);
   });
 });
+
+describe("a connection lost while in use", () => {
+  it("rejects the transaction or query instead of crashing the process", async () => {
+    const database1 = await database();
+    const db = await tenantDb(database1);
+    const admin = createControlDb(adminUrl(), { max: 1 });
+    cleanups.push(() => admin.close());
+    const kill = (pid: number) => admin.query("select pg_terminate_backend($1)", [pid]);
+
+    // Cut between two statements of a transaction: no query is in flight when the connection ends.
+    await expect(
+      db.transaction(async (tx) => {
+        const { rows } = await tx.query<{ pid: number }>("select pg_backend_pid() as pid");
+        await kill(rows[0]?.pid ?? 0);
+        await sleep(300); // the end of the connection arrives while the client is checked out and idle
+        await tx.query("select 1");
+      }),
+    ).rejects.toThrow(/terminat|Connection/i);
+
+    // Cut under a running query.
+    const running = expect(db.query("select pg_sleep(5)")).rejects.toThrow(/terminat/i);
+    await sleep(200);
+    await admin.query(
+      "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and query like 'select pg_sleep%'",
+      [database1.name],
+    );
+    await running;
+    // The handle still works: the broken connection was discarded.
+    expect((await db.query<{ ok: number }>("select 1 as ok")).rows).toEqual([{ ok: 1 }]);
+  });
+});

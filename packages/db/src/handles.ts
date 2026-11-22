@@ -1,8 +1,8 @@
 // The two database handles (ADR 0004). They are distinct types on purpose: a repo function that takes a
 // `TenantDb` cannot be handed the control plane, and the reverse. Neither exposes a pool or a DSN.
-import { errorFields, log } from "@kerby/observability";
+import { errorCode, errorFields, log } from "@kerby/observability";
 import pg from "pg";
-import { withConnectRetry } from "./connect-retry.ts";
+import { isConnectionError, withConnectRetry } from "./connect-retry.ts";
 import { credentialsFor } from "./credentials.ts";
 import { type ListenOptions, listen, type Subscription } from "./listen.ts";
 
@@ -105,27 +105,53 @@ function makeHandle(url: string, options: PoolOptions): Plain {
   pool.on("error", (error: Error) =>
     log("warn", "idle database client failed", errorFields(error)),
   );
+  // pg-pool takes its error listener off a client while it is checked out, and a client whose connection ends emits
+  // `error` (even with a query in flight, which also rejects). Without a listener that event crashes the process, so a
+  // checked-out client gets one until it is released; the failure reaches the caller through the query, and the
+  // release hands the error back so the pool discards the dead client instead of lending it again.
+  type Checkout = { client: pg.PoolClient; release(broken?: Error): void };
   // Nothing has been sent before a login succeeds, so a retry after renewing the password repeats nothing.
-  const connect = async (): Promise<pg.PoolClient> => {
+  const connect = async (): Promise<Checkout> => {
+    let client: pg.PoolClient;
     try {
-      return await withConnectRetry(() => pool.connect());
+      client = await withConnectRetry(() => pool.connect());
     } catch (error) {
       if (!(await credentials.renew(error))) throw error;
-      return withConnectRetry(() => pool.connect());
+      client = await withConnectRetry(() => pool.connect());
     }
+    let lost: Error | undefined;
+    const onError = (error: Error) => {
+      lost = error;
+      log("warn", "database connection failed while in use", errorFields(error));
+    };
+    client.on("error", onError);
+    return {
+      client,
+      release(broken) {
+        client.off("error", onError);
+        client.release(broken ?? lost);
+      },
+    };
   };
 
   const handle: Plain = {
     async query<R extends Row = Row>(text: string, params?: readonly unknown[]) {
-      const client = await connect();
+      const { client, release } = await connect();
+      let broken: Error | undefined;
       try {
         return await run<R>(client, text, params);
+      } catch (error) {
+        // The server ended the session (57P01 admin shutdown, 57P02 crash) or the socket broke: the pool may not
+        // have seen the end yet, so name the client broken rather than lend it again.
+        if (isConnectionError(error) || /^57P0[12]$/.test(errorCode(error) ?? ""))
+          broken = error as Error;
+        throw error;
       } finally {
-        client.release();
+        release(broken);
       }
     },
     async transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
-      const client = await connect();
+      const { client, release } = await connect();
       let broken: Error | undefined;
       try {
         await client.query("begin");
@@ -145,7 +171,7 @@ function makeHandle(url: string, options: PoolOptions): Plain {
         }
         throw error;
       } finally {
-        client.release(broken);
+        release(broken);
       }
     },
     listen: (channel, onNotify, listenOptions) =>
