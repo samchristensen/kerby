@@ -8,7 +8,6 @@ import {
   CreateTenantRequestSchema,
   type CreateTenantResponse,
   type ExportResponse,
-  LimitsSchema,
   type ListKeysResponse,
   type ListTenantsResponse,
   RestoreRequestSchema,
@@ -47,7 +46,7 @@ function tenantResource(tenant: TenantRecord): Tenant {
     name: tenant.name,
     status: tenant.status,
     plan: tenant.plan,
-    limits: LimitsSchema.parse(tenant.limits),
+    limits: tenant.limits,
     region: tenant.region,
     schemaVersion: tenant.schemaVersion,
     createdAt: tenant.createdAt.toISOString(),
@@ -66,9 +65,9 @@ function keyResource(key: ApiKeyRecord): ApiKey {
 
 /** Service errors are the service layer's; HTTP statuses are decided here. */
 function mapErrors(handler: Route[2]): Route[2] {
-  return async (request, params) => {
+  return async (request, params, client) => {
     try {
-      return await handler(request, params);
+      return await handler(request, params, client);
     } catch (error) {
       if (error instanceof NotFoundError) throw new HttpError(404, "not_found", error.message);
       if (error instanceof ConflictError) throw new HttpError(409, "conflict", error.message);
@@ -80,13 +79,13 @@ function mapErrors(handler: Route[2]): Route[2] {
 export function createControlApp(deps: ControlDeps, operatorToken: string): FetchHandler {
   const expected = digest(operatorToken);
   const authorized = (handler: Route[2]): Route[2] =>
-    mapErrors(async (request, params) => {
+    mapErrors(async (request, params, client) => {
       const presented = bearerToken(request);
       // Compare digests so length and content do not leak through timing.
       if (!presented || !timingSafeEqual(digest(presented), expected)) {
         throw new HttpError(401, "unauthorized", "a valid operator token is required");
       }
-      return handler(request, params);
+      return handler(request, params, client);
     });
 
   const id = (params: Record<string, string>) => params.id ?? "";

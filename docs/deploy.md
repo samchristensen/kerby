@@ -62,12 +62,13 @@ railway ssh --service control -- node --input-type=module -e '
 const r = await fetch("http://127.0.0.1:8081/v1/operator/tenants", {
   method: "POST",
   headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
-  body: JSON.stringify({ name: "acme" }),
+  body: JSON.stringify({ name: "acme", limits: { requestsPerMinute: 600, storageBytes: 1073741824 } }),
 });
 console.log(r.status, await r.text());'
 ```
 
-The response holds the tenant's API key once. Then
+`limits` is optional: an absent key takes the default (`maxConcurrentTurns` 4, `requestsPerMinute` 600 per api
+process, `storageBytes` 1 GiB; ARCHITECTURE.md#tenancy). The response holds the tenant's API key once. Then
 `curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. After a release that adds tenant
 migrations, fan them out with `POST /v1/operator/migrate` the same way: code must tolerate schema versions n and n-1
 while it runs.
@@ -165,7 +166,10 @@ real figure rather than an estimate here.
 ## Observing
 
 `railway logs --service <name>` (add `--lines N`), `railway metrics --service <name> --since 1h`. Logs are JSON with
-`tenantId` and never message content: a `request` line per API request, `turn completed`, `turn failed for good`.
+`tenantId` and never message content: a `request` line per API request (status 429 for a tenant over its request
+rate), `turn completed`, `turn failed for good`, `history cut to its budget` (a turn started without its oldest turns).
+`api` runs with `TRUST_PROXY=true`: Railway's edge sets `X-Forwarded-For` with the client first, and the failed-auth
+limit counts that address; without it every client would share the proxy's.
 `make logs-query ENV=production` reads them and keeps the lines that match `TENANT=<id>`, `LEVEL=warn` (that level and
 worse), `MSG=<substring>`, `SERVICE=<control|api|worker>`, `SINCE=`/`UNTIL=` (`30m`, `2h`, `1d` back from now, or ISO
 8601; Railway's default here is the last hour), one JSON line each, oldest first. Run it from a checkout linked with

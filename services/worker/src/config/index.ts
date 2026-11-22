@@ -43,6 +43,16 @@ export const workerConfigSchema = z
     sweepIntervalSeconds: z.coerce.number().positive().default(10),
     /** Lease length; a heartbeat extends it for as long as a turn runs. */
     claimTimeoutSeconds: z.coerce.number().int().positive().default(120),
+    /**
+     * Bytes of message bodies a turn is rehydrated with (sizes from the tenant's blob index). Past it the oldest whole
+     * turns are left out, cut before a user message, so the model sees the newest context and a worker's memory per
+     * turn is bounded. The turn being answered is always whole. Default 8 MiB.
+     */
+    historyBudgetBytes: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(8 * 1024 * 1024),
     /** Turns one tenant may run at once on this worker when its limits do not say. */
     defaultMaxConcurrentTurns: z.coerce.number().int().positive().default(4),
   })

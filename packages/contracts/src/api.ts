@@ -43,9 +43,22 @@ export const MessageSchema = z.object({
 });
 export type Message = z.infer<typeof MessageSchema>;
 
+/**
+ * `GET /v1/conversations/:id?after=<seq>&limit=<n>`: one page of messages, oldest first, those with `seq` greater
+ * than `after` (default 0). `limit` is 1 to 500, default 100.
+ */
+export const GetConversationQuerySchema = z.object({
+  after: z.coerce.number().int().nonnegative().default(0),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+export type GetConversationQuery = z.infer<typeof GetConversationQuerySchema>;
+
 export const GetConversationResponseSchema = z.object({
   conversation: ConversationSchema,
+  /** One page, oldest first: see `GetConversationQuerySchema`. */
   messages: z.array(MessageSchema),
+  /** Pass as `after` for the next page; null when this page reaches the newest message. */
+  nextAfter: z.number().int().positive().nullable(),
   /** True while a turn is queued or running. */
   busy: z.boolean(),
   /** Why the latest turn produced no answer (the provider refused it, or it failed for good); cleared by the next message. */

@@ -86,9 +86,15 @@ export function bearerToken(request: Request): string | undefined {
 }
 
 export type Params = Record<string, string>;
-export type RouteHandler = (request: Request, params: Params) => Promise<Response> | Response;
+/** The peer of the TCP connection: behind a proxy, that is the proxy (see the api's `TRUST_PROXY`). */
+export type Client = { address: string };
+export type RouteHandler = (
+  request: Request,
+  params: Params,
+  client: Client,
+) => Promise<Response> | Response;
 export type Route = readonly [method: string, pattern: string, handler: RouteHandler];
-export type FetchHandler = (request: Request) => Promise<Response>;
+export type FetchHandler = (request: Request, client: Client) => Promise<Response>;
 
 type Compiled = { method: string; segments: string[]; handler: RouteHandler };
 
@@ -99,7 +105,7 @@ export function createRouter(routes: readonly Route[]): FetchHandler {
     segments: pattern.split("/").filter(Boolean),
     handler,
   }));
-  return async (request) => {
+  return async (request, client) => {
     const path = new URL(request.url).pathname.split("/").filter(Boolean);
     let pathMatched = false;
     for (const route of compiled) {
@@ -121,7 +127,7 @@ export function createRouter(routes: readonly Route[]): FetchHandler {
       pathMatched = true;
       if (route.method !== request.method) continue;
       try {
-        return await route.handler(request, params);
+        return await route.handler(request, params, client);
       } catch (error) {
         if (error instanceof HttpError) {
           return json(error.status, { error: { code: error.code, message: error.message } });
@@ -218,7 +224,7 @@ export function serve(
       .then(() => {
         try {
           request = toRequest(incoming, aborted.signal);
-          return handler(request);
+          return handler(request, { address: incoming.socket.remoteAddress ?? "" });
         } catch {
           // A request Fetch cannot represent: refuse it, and stay up.
           return json(400, { error: { code: "invalid_request", message: "unsupported request" } });

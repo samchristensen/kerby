@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { type Limits, LimitsSchema } from "@kerby/contracts";
 import type { ControlQueryable } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
 
@@ -9,7 +10,8 @@ export type TenantRecord = {
   name: string;
   status: TenantStatus;
   plan: string;
-  limits: Record<string, unknown>;
+  /** Parsed on every read: a row the schema does not accept fails loudly, never silently takes defaults. */
+  limits: Limits;
   region: string;
   dbHost: string;
   dbPort: number;
@@ -43,7 +45,7 @@ export function tenantFromRow(row: TenantRow): TenantRecord {
     name: row.name,
     status: row.status,
     plan: row.plan,
-    limits: row.limits,
+    limits: LimitsSchema.parse(row.limits),
     region: row.region,
     dbHost: row.db_host,
     dbPort: row.db_port,
@@ -91,7 +93,7 @@ export function tenantDbUrl(
 export type NewTenant = {
   name: string;
   plan?: string;
-  limits?: Record<string, unknown>;
+  limits?: Limits;
   region?: string;
   dbHost: string;
   dbPort: number;

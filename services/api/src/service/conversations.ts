@@ -3,6 +3,7 @@ import type {
   Conversation,
   CreateConversationRequest,
   EventEnvelope,
+  GetConversationQuery,
   GetConversationResponse,
   PostMessageRequest,
   PostMessageResponse,
@@ -74,18 +75,24 @@ export async function createConversation(
 const asParts = (content: PostMessageRequest["content"]): ContentPart[] =>
   typeof content === "string" ? [{ type: "text", text: content }] : content;
 
-/** Append the message, enqueue its turn, and tell the workers there is work for this tenant. */
+/**
+ * Append the message, enqueue its turn, and tell the workers there is work for this tenant. Refused when the tenant's
+ * stored bytes, with this message, would pass `storageBytes`.
+ */
 export async function postMessage(
   deps: ApiDeps,
   ctx: TenantContext,
   conversationId: string,
   request: PostMessageRequest,
+  storageBytes: number,
 ): Promise<PostMessageResponse> {
   if (!(await findConversation(ctx.db, conversationId)))
     throw new NotFoundError("conversation not found");
   let seq: number;
   try {
-    ({ seq } = await postUserMessage(ctx, deps.blobs, conversationId, asParts(request.content)));
+    ({ seq } = await postUserMessage(ctx, deps.blobs, conversationId, asParts(request.content), {
+      storageBytes,
+    }));
   } catch (error) {
     if (error instanceof ConversationNotFoundError)
       throw new NotFoundError("conversation not found");
@@ -111,16 +118,18 @@ export async function getConversation(
   deps: ApiDeps,
   ctx: TenantContext,
   conversationId: string,
+  page: GetConversationQuery,
 ): Promise<GetConversationResponse> {
   const record = await findConversation(ctx.db, conversationId);
   if (!record) throw new NotFoundError("conversation not found");
-  const [messages, busy] = await Promise.all([
-    readMessages(ctx, deps.blobs, conversationId),
+  const [{ messages, nextAfter }, busy] = await Promise.all([
+    readMessages(ctx, deps.blobs, conversationId, page),
     isBusy(ctx.db, conversationId),
   ]);
   return {
     conversation: conversationResource(record),
     messages: messages.map(toPublic),
+    nextAfter,
     busy,
     lastError: record.lastError,
   };
@@ -132,6 +141,8 @@ export type StreamItem = { id?: number; envelope: EventEnvelope } | { keepAlive:
 const KEEP_ALIVE_MS = 15_000;
 /** Backstop for a lost NOTIFY: look at the index at least this often. */
 const POLL_MS = 5_000;
+/** Messages read per page while replaying. */
+const REPLAY_PAGE = 100;
 
 /**
  * The conversation's events: persisted messages after `afterSeq` (replayed from the index), then live as they
@@ -186,21 +197,30 @@ export async function* conversationEvents(
       if (dirty || Date.now() - lastPoll >= POLL_MS) {
         dirty = false;
         lastPoll = Date.now();
-        for (const stored of await readMessages(ctx, deps.blobs, conversationId, lastSeq)) {
-          lastSeq = stored.seq;
-          lastActivity = Date.now();
-          yield {
-            id: stored.seq,
-            envelope: {
-              v: 1,
-              conversationId,
-              runId: stored.runId ?? "",
-              seq: stored.seq,
-              at: stored.createdAt.toISOString(),
-              // Public form: the harness's native payload is not for clients.
-              event: { type: "message_end", message: PublicMessageSchema.parse(stored.message) },
-            },
-          };
+        // A page at a time, so a long conversation's replay never holds more than one page of bodies.
+        let more = true;
+        while (more && !signal.aborted) {
+          const page = await readMessages(ctx, deps.blobs, conversationId, {
+            after: lastSeq,
+            limit: REPLAY_PAGE,
+          });
+          more = page.nextAfter !== null;
+          for (const stored of page.messages) {
+            lastSeq = stored.seq;
+            lastActivity = Date.now();
+            yield {
+              id: stored.seq,
+              envelope: {
+                v: 1,
+                conversationId,
+                runId: stored.runId ?? "",
+                seq: stored.seq,
+                at: stored.createdAt.toISOString(),
+                // Public form: the harness's native payload is not for clients.
+                event: { type: "message_end", message: PublicMessageSchema.parse(stored.message) },
+              },
+            };
+          }
         }
       }
       while (live.length > 0) {

@@ -88,6 +88,15 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   Deleting drops the database and role, deletes the object prefix and purges keys; the row stays with status `deleted`.
   Exporting uploads a `pg_dump` and the object listing to the export bucket and returns presigned URLs; exports are kept
   30 days. Nightly, control copies new objects to the backup bucket and drops deleted tenants' copies (ADR 0013).
+- Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
+  an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
+  bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
+  429 `rate_limited` with `Retry-After`. `storageBytes` (api `DEFAULT_STORAGE_BYTES`, 1 GiB) is checked against
+  `sum(size)` of the tenant's blob index when a message is posted, before anything is stored and again inside the post's
+  transaction: 413 `storage_quota_exceeded`; a turn already admitted finishes. Before a key is verified, the only work is
+  the key lookup: a client address that fails `FAILED_AUTH_PER_MINUTE` (30) times in a minute gets 429 without one. The
+  address is the socket peer, or with `TRUST_PROXY=true` (Railway, whose edge sets `X-Forwarded-For` with the client
+  first) the left-most `X-Forwarded-For` entry. The numbers are defaults until pricing (plan 0001, M9).
 
 ## Durability: the turn lifecycle
 
@@ -114,6 +123,10 @@ flowchart LR
 2. **Rehydrate.** The task reads the conversation's messages from the tenant's index (bodies from S3) and starts a
    fresh in-memory harness with them as `AgentRun.history`. Workers hold no state, so any worker takes any turn. A tool
    call in the history without a persisted result is resolved first through `executeTool` (a cached step), never left to the harness.
+   The history has a byte budget (`HISTORY_BUDGET_BYTES`, default 8 MiB): the worker walks the index newest first using
+   the blob index's sizes, fetches only what fits, and cuts only before a user message, so the history starts a turn and
+   a tool call never loses its result. Older turns past the budget are left out (logged with counts, never content); the
+   turn being answered is always whole. Nothing is deleted: the index keeps every message.
 3. **Run.** The adapter turns the harness's native events into `AgentEvent`s. That mapping is the only
    harness-specific transformation; everything downstream sees one format. The supervisor heartbeats the Absurd lease
    for as long as the run lasts, including a model call that writes no checkpoint.
@@ -130,7 +143,10 @@ flowchart LR
 - **Object keys carry a content hash** (`conversations/<id>/messages/<seq>-<sha16>.json`): a retry of the same message
   overwrites itself, and a stale writer's different content lands under a different key and can never replace bytes an
   index row already points at.
-- **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`),
+- **Paged reads.** `GET /v1/conversations/:id?after=<seq>&limit=<n>` returns one page (default 100, at most 500) and
+  `nextAfter`, null on the last page. A conversation still holds at most 2000 messages and 64 MiB: those bound storage,
+  not memory.
+- **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
   then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
   events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
   a poll every 5 s is the backstop for a lost notification.

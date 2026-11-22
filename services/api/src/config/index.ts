@@ -38,9 +38,27 @@ export const apiConfigSchema = z.object({
     ),
   defaultSystem: z.string().default("You are a helpful assistant."),
   /** How long a verified key is trusted: also how long suspension and revocation take to bite. */
+  authCacheSeconds: z.coerce.number().int().min(0).default(30),
   /** Event streams one tenant may hold open on this process (each keeps a database connection). */
   maxStreamsPerTenant: z.coerce.number().int().positive().default(20),
-  authCacheSeconds: z.coerce.number().int().min(0).default(30),
+  /**
+   * Requests per minute for a tenant whose limits do not say (`limits.requestsPerMinute`). A token bucket per api
+   * process: with N processes a tenant gets up to N times this. A default until pricing (plan 0001, M9).
+   */
+  defaultRequestsPerMinute: z.coerce.number().int().positive().default(600),
+  /** Bytes a tenant may store when its limits do not say (`limits.storageBytes`); default 1 GiB, until pricing. */
+  defaultStorageBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  /** Failed authentications one client address may make per minute; past it the address gets 429 without a lookup. */
+  failedAuthPerMinute: z.coerce.number().int().positive().default(30),
+  /**
+   * The api sits behind a proxy that writes `X-Forwarded-For` (Railway's edge): the client address is its left-most
+   * entry. Off (the default), the socket's address is the client and the header is ignored, since anyone can send it.
+   */
+  trustProxy: z.stringbool().default(false),
 });
 
 export type ApiConfig = z.output<typeof apiConfigSchema>;

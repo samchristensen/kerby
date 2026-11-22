@@ -1,6 +1,7 @@
 // The tenant-facing API. Every route but /healthz authenticates a bearer API key and runs as that key's tenant.
 import {
   CreateConversationRequestSchema,
+  GetConversationQuerySchema,
   ModelProviderSchema,
   PostMessageRequestSchema,
   PutModelKeyRequestSchema,
@@ -11,6 +12,7 @@ import {
   ConversationFullError,
   findConversation,
   isConversationId,
+  StorageQuotaExceededError,
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { log, withTenant } from "@kerby/observability";
@@ -33,6 +35,7 @@ import {
   type StreamItem,
 } from "../service/conversations.ts";
 import { listTenantModelKeys, removeModelKey, setModelKey } from "../service/model-keys.ts";
+import { clientAddress, TokenBuckets } from "../service/rate-limit.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -89,8 +92,21 @@ function sse(items: AsyncGenerator<StreamItem>, release: () => Promise<void>): R
   });
 }
 
+/** 429 with `Retry-After`: the client may try again in `seconds`. */
+const rateLimited = (seconds: number, message: string): Response =>
+  json(
+    429,
+    { error: { code: "rate_limited", message: `${message}; retry in ${seconds} s` } },
+    { "retry-after": String(seconds) },
+  );
+
+/** Keys each limiter remembers: tenants, and client addresses that failed to authenticate. */
+const MAX_LIMITER_KEYS = 100_000;
+
 export function createApiApp(deps: ApiDeps): FetchHandler {
   const auth = createAuthenticator(deps.control, deps.settings.authCacheMs);
+  const requests = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
+  const failedAuth = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
 
   /** Authenticate, then run `handler` with the tenant's context. The tenant id comes from the key only. */
   const authed =
@@ -102,20 +118,30 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         principal: Principal,
       ) => Promise<Response> | Response,
     ): Route[2] =>
-    async (request, params) => {
+    async (request, params, client) => {
+      // The only work done before a key is verified is a key lookup: an address that keeps presenting bad keys is
+      // refused without one, whatever key it sends next.
+      const address = clientAddress(request, client.address, deps.settings.trustProxy);
+      const perMinute = deps.settings.failedAuthPerMinute;
+      const blocked = failedAuth.wait(address, perMinute);
+      if (blocked > 0) return rateLimited(blocked, "too many failed authentications");
       const presented = bearerToken(request);
-      if (!presented)
+      if (!presented) {
+        failedAuth.take(address, perMinute);
         throw new HttpError(
           401,
           "unauthorized",
           "an API key is required: Authorization: Bearer <key>",
         );
+      }
       let principal: Principal;
       try {
         principal = await auth.authenticate(presented);
       } catch (error) {
-        if (error instanceof UnauthorizedError)
+        if (error instanceof UnauthorizedError) {
+          failedAuth.take(address, perMinute);
           throw new HttpError(401, "unauthorized", "invalid API key");
+        }
         if (error instanceof TenantUnavailableError)
           throw new HttpError(403, "tenant_unavailable", error.message);
         throw error;
@@ -126,7 +152,13 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       try {
         return await withTenant(principal.tenantId, async () => {
           try {
-            const response = await handler(request, params, principal);
+            const rate =
+              principal.limits.requestsPerMinute ?? deps.settings.defaultRequestsPerMinute;
+            const wait = requests.take(principal.tenantId, rate);
+            const response =
+              wait > 0
+                ? rateLimited(wait, `at most ${rate} requests per minute`)
+                : await handler(request, params, principal);
             status = response.status;
             return response;
           } catch (error) {
@@ -134,6 +166,8 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(404, "not_found", error.message);
             if (error instanceof ConversationFullError)
               throw new HttpError(413, "conversation_full", error.message);
+            if (error instanceof StorageQuotaExceededError)
+              throw new HttpError(413, "storage_quota_exceeded", error.message);
             if (error instanceof ConversationBusyError)
               throw new HttpError(409, "conversation_busy", error.message);
             if (error instanceof ModelKeyLimitError)
@@ -228,15 +262,29 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const body = await readJson(request, PostMessageRequestSchema, {
           maxBytes: MESSAGE_BODY_BYTES,
         });
-        return json(202, await inTenant(principal, (ctx) => postMessage(deps, ctx, id, body)));
+        const storageBytes = principal.limits.storageBytes ?? deps.settings.defaultStorageBytes;
+        return json(
+          202,
+          await inTenant(principal, (ctx) => postMessage(deps, ctx, id, body, storageBytes)),
+        );
       }),
     ],
     [
       "GET",
       "/v1/conversations/:id",
-      authed("GET /v1/conversations/:id", async (_request, params, principal) => {
+      authed("GET /v1/conversations/:id", async (request, params, principal) => {
         const id = conversationId(params);
-        return json(200, await inTenant(principal, (ctx) => getConversation(deps, ctx, id)));
+        const query = GetConversationQuerySchema.safeParse(
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        if (!query.success)
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "after must be a sequence number (0 or more) and limit 1 to 500",
+          );
+        const page = query.data;
+        return json(200, await inTenant(principal, (ctx) => getConversation(deps, ctx, id, page)));
       }),
     ],
     [

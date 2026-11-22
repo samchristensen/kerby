@@ -115,6 +115,9 @@ importers:
 
   packages/control-plane:
     dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@kerby/db':
         specifier: workspace:*
         version: link:../db

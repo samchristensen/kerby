@@ -101,6 +101,8 @@ export default defineRailway((ctx) => {
       TENANT_DB_SECRET: control.env.TENANT_DB_SECRET,
       SECRETS_PUBLIC_KEY: preserve(),
       ...alerts,
+      // Railway's edge writes X-Forwarded-For with the client first: the failed-auth limit counts that address.
+      TRUST_PROXY: "true",
     },
   });
 

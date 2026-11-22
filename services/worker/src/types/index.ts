@@ -22,5 +22,7 @@ export type WorkerDeps = {
     defaultMaxConcurrentTurns: number;
     sweepIntervalMs: number;
     enableEchoTool: boolean;
+    /** Bytes of message bodies a turn starts with; older whole turns past it are left out (`readHistory`). */
+    historyBudgetBytes: number;
   };
 };

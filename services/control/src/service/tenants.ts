@@ -1,4 +1,5 @@
 import { tenantPrefix } from "@kerby/blobs";
+import type { Limits } from "@kerby/contracts";
 import {
   audit,
   createApiKey,
@@ -29,7 +30,7 @@ export function currentSchemaVersion(): string {
 export type ProvisionRequest = {
   name: string;
   plan?: string | undefined;
-  limits?: Record<string, unknown> | undefined;
+  limits?: Limits | undefined;
 };
 export type Provisioned = { tenant: TenantRecord; key: Awaited<ReturnType<typeof createApiKey>> };
 

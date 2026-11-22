@@ -48,6 +48,10 @@ export async function startApi(config: ApiConfig) {
       authCacheMs: config.authCacheSeconds * 1000,
       maxStreamsPerTenant: config.maxStreamsPerTenant,
       streamRecheckMs: 5000,
+      defaultRequestsPerMinute: config.defaultRequestsPerMinute,
+      defaultStorageBytes: config.defaultStorageBytes,
+      failedAuthPerMinute: config.failedAuthPerMinute,
+      trustProxy: config.trustProxy,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

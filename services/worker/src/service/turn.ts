@@ -9,7 +9,7 @@ import {
   LeaseLostError,
   notifyLive,
   persistMessage,
-  readMessages,
+  readHistory,
   recordToolExecution,
   SeqConflictError,
   setLastError,
@@ -92,9 +92,24 @@ export async function runTurn(
   const conversation = await findConversation(ctx.db, conversationId);
   if (!conversation) throw new Error(`conversation ${conversationId} does not exist`);
 
-  // Rehydrate: everything persisted so far, and the position of the next message.
-  const stored = await readMessages(ctx, deps.blobs, conversationId);
-  let nextSeq = (stored.at(-1)?.seq ?? 0) + 1;
+  // Rehydrate: the newest whole turns that fit the history budget, and the position of the next message.
+  const history = await readHistory(
+    ctx,
+    deps.blobs,
+    conversationId,
+    deps.settings.historyBudgetBytes,
+  );
+  if (history.dropped.messages > 0) {
+    log("info", "history cut to its budget: older turns left out", {
+      conversationId,
+      keptMessages: history.messages.length,
+      keptBytes: history.bytes,
+      droppedMessages: history.dropped.messages,
+      droppedBytes: history.dropped.bytes,
+      budgetBytes: deps.settings.historyBudgetBytes,
+    });
+  }
+  let nextSeq = history.lastSeq + 1;
   const tools = tenantTools({ enableEcho: deps.settings.enableEchoTool });
 
   // Bring your own key: the tenant's key for the model's provider, opened for this run only.
@@ -122,7 +137,7 @@ export async function runTurn(
     system: conversation.system,
     model: conversation.model,
     ...(apiKey === undefined ? {} : { apiKey }),
-    history: stored.map((s) => s.message),
+    history: history.messages.map((s) => s.message),
     tools: tools.specs(),
     // The only way a tool runs: an Absurd step keyed by the call id, so a retried turn gets the stored result and
     // does not repeat a side effect. `recordToolExecution` counts real runs inside the step.
