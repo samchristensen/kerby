@@ -24,7 +24,7 @@ export const controlConfigSchema = z.object({
     .string()
     .regex(/^[a-z][a-z0-9_]*$/)
     .default("kerby_tenant_template"),
-  /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */
+  /** The primary bucket, holding every tenant's objects: a Railway bucket, or RustFS locally. */
   s3Endpoint: z.url(),
   s3Region: z.string().min(1).optional(),
   s3Bucket: z.string().min(1),
@@ -37,7 +37,18 @@ export const controlConfigSchema = z.object({
   ),
   /** Set by Railway on every deployment; names the environment in alerts. */
   railwayEnvironmentName: z.string().min(1).optional(),
-  exportDir: z.string().min(1).default("/var/lib/kerby/exports"),
+  /** The export bucket: only control holds its keys. */
+  exportS3Endpoint: z.url(),
+  exportS3Region: z.string().min(1).optional(),
+  exportS3Bucket: z.string().min(1),
+  exportS3AccessKeyId: z.string().min(1),
+  exportS3SecretAccessKey: z.string().min(1),
+  /** The backup bucket, a copy of the primary's `t/` in another region: only control holds its keys. */
+  backupS3Endpoint: z.url(),
+  backupS3Region: z.string().min(1).optional(),
+  backupS3Bucket: z.string().min(1),
+  backupS3AccessKeyId: z.string().min(1),
+  backupS3SecretAccessKey: z.string().min(1),
   pgDumpPath: z.string().min(1).default("pg_dump"),
 });
 

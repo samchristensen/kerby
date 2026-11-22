@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@kerby/agent";
-import { createTestBlobs } from "@kerby/blobs/testing";
+import { tenantPrefix } from "@kerby/blobs";
+import { createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import { createTenantExecutor, type RunContext } from "@kerby/durable";
 import { describe, expect, it } from "vitest";
 import {
@@ -56,7 +57,9 @@ describe("postUserMessage", () => {
   it("stores nothing when it refuses a post: a busy conversation, or a full one", async () => {
     await using tenant = await createTestTenant();
     const { blobs, conversation } = await conversationWithTurn(tenant);
-    const objects = async () => (await blobs.listPrefix(tenant.tenantId)).length;
+    const bucket = await createTestBucket();
+    const objects = async () =>
+      (await Array.fromAsync(bucket.list(tenantPrefix(tenant.tenantId)))).length;
     const indexed = async () =>
       Number(
         (await tenant.db.query<{ n: string }>("select count(*)::text as n from blobs")).rows[0]?.n,

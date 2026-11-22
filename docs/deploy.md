@@ -8,13 +8,15 @@ deployed and smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 One Railway project, `kerby`. Per environment (`production` is the standing one):
 
-| Service        | What                                                                                                 | Reachable from                           |
-| -------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `Postgres`     | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database | the other services, privately            |
-| bucket `kerby` | Railway bucket (S3-compatible); every object is under `t/<tenantId>/`                                | the other services, by endpoint and keys |
-| `control`      | operator API (`:8081`), no public domain                                                             | `railway ssh --service control`          |
-| `api`          | tenant API (`:8080`), public Railway domain                                                          | the internet                             |
-| `worker`       | runs turns, health on `:8082`, no public domain                                                      | nothing                                  |
+| Service                | What                                                                                                 | Reachable from                              |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database | the other services, privately               |
+| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                         | the other services, by endpoint and keys    |
+| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                            | `control` only, by its keys; presigned URLs |
+| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))         | `control` only, by its keys                 |
+| `control`              | operator API (`:8081`), no public domain                                                             | `railway ssh --service control`             |
+| `api`                  | tenant API (`:8080`), public Railway domain                                                          | the internet                                |
+| `worker`               | runs turns, health on `:8082`, no public domain                                                      | nothing                                     |
 
 `control`, `api` and `worker` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
 (`ghcr.io/samchristensen/kerby-<name>`); Railway builds nothing. Each environment runs the tag named after it
@@ -70,6 +72,36 @@ The response holds the tenant's API key once. Then
 migrations, fan them out with `POST /v1/operator/migrate` the same way: code must tolerate schema versions n and n-1
 while it runs.
 
+## Export a tenant
+
+`POST /v1/operator/tenants/<id>/export` (run as above) dumps the tenant's database and lists its objects into the
+`kerby-exports` bucket and answers `{ dumpUrl, objectsUrl, expiresAt, ... }`: URLs that download without credentials for
+24 hours, each recorded in the audit log (`export.url_issued`). Hand them over, or fetch them yourself before they expire.
+Control deletes exports 30 days after they were made, a deleted tenant's too, at start and every night at 03:00 UTC.
+
+## Bucket backup and restore
+
+Every night at 03:00 UTC one control instance (a Postgres advisory lock picks it) copies every active or suspended tenant's
+objects that are new or changed from `kerby` to `kerby-backup` (`sjc`), and deletes the copy of every tenant whose status is
+`deleted`. Nothing else is deleted from the backup, so an object lost in `kerby` stays there. Railway buckets have no
+versioning, replication or backups of their own. The run logs `bucket backup ran` with counts, bytes and its duration;
+`failed` above zero raises the `bucket backup failed` alert. Run it now with `POST /v1/operator/backup` (409 while another run holds the lock).
+
+Restore copies back only objects missing from `kerby`, never overwriting one, so it is safe to repeat while tenants work:
+
+```sh
+railway ssh --service control -- node --input-type=module -e '
+const r = await fetch("http://127.0.0.1:8081/v1/operator/backup/restore", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
+  body: JSON.stringify({ tenantId: "<id>" }),  // {} restores every active or suspended tenant
+});
+console.log(r.status, await r.text());'
+```
+
+After a Postgres restore, restore every tenant (`{}`): the index the restored databases hold points at objects the bucket
+may have lost since. Objects written after the last nightly run are not in the backup.
+
 ## Environments
 
 `make railway-setup ENV=pr-123` creates `pr-123` as a copy of `production` (Railway gives the copy its own Postgres volume
@@ -108,7 +140,8 @@ on purpose: a generated value there would be made again on every apply.
   of its database until each role's password is reset.
 - Only `control` holds the administrative database URL. `api` and `worker` connect to the control database as the limited
   `kerby_app` role, which control creates (migration 0002) and gives its password at start: deploy control first.
-- The bucket's keys are references (`${{kerby.ACCESS_KEY_ID}}`), so resetting them needs no change here; redeploy the services.
+- The buckets' keys are references (`${{kerby.ACCESS_KEY_ID}}`), so resetting them needs no change here; redeploy the services.
+  Only `control` references the keys of `kerby-exports` and `kerby-backup` (`EXPORT_S3_*`, `BACKUP_S3_*`).
 
 ## Postgres
 
@@ -152,8 +185,8 @@ Everything goes to one channel (a Slack or Discord channel the operator watches)
    webhook.
 4. **`ALERT_WEBHOOK_URL`** on `control`, `api` and `worker`, the same channel URL: Railway cannot alert on log lines, so
    Kerby posts its own failures. `alert(kind, fields)` (`@kerby/observability`) writes an error line with
-   `alert: <kind>` and posts it: `turn failed for good` and `lease lost` (worker), `provisioning failed` and
-   `migration fan-out failed` (control). A Slack URL (`hooks.slack.com`) gets `{"text"}`, Discord
+   `alert: <kind>` and posts it: `turn failed for good` and `lease lost` (worker), `provisioning failed`,
+   `migration fan-out failed`, `bucket backup failed` and `export retention failed` (control). A Slack URL (`hooks.slack.com`) gets `{"text"}`, Discord
    (`discord.com/api/webhooks`) `{"content"}`, anything else the alert as JSON (`alert`, `service`, `environment`,
    `at`, `tenantId`, `fields`, `suppressed`). One post per kind per process per five minutes; the next post counts the
    ones held back, and every one is still a log line (`make logs-query ENV=production LEVEL=error`). Posts carry tenant

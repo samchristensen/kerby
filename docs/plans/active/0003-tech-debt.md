@@ -43,7 +43,7 @@ flowchart LR
   Copy `SECRETS_PRIVATE_KEYS` from `worker` to a store outside Railway. Prove the copy: `publicKeyOf(copy)`
   (`packages/secrets`) equals `api`'s `SECRETS_PUBLIC_KEY`. Write where it lives (never the value) and the check in
   docs/deploy.md. Do it with A1: a restored database without this key restores no model key.
-- [ ] **A3 Bucket copy** ("The bucket has no copy outside itself"). M.
+- [x] **A3 Bucket copy** ("The bucket has no copy outside itself"). M.
   Now: `bucket("kerby")` has no versioning or replication, and message bodies live only there, so A1 alone restores an
   index that points at nothing.
   Fix: use what Railway buckets offer (versioning, replication) if anything; otherwise copy `t/` on a schedule to a second
@@ -159,7 +159,7 @@ flowchart LR
   from its result (behavior past the budget: open question). The caps stay; they bound storage, not memory.
   Proof: a 600-message conversation paged in tests and on the local stack; a worker test where the harness sees only the
   newest whole turns. Document in ARCHITECTURE.md step 2.
-- [ ] **F2 Exports in a bucket** ("Tenant exports are written to the control container's disk"). M.
+- [x] **F2 Exports in a bucket** ("Tenant exports are written to the control container's disk"). M.
   Now: `services/control/src/service/export.ts` writes `<name>-<id>-<stamp>.dump` and `.objects.json` under `exportDir`
   and returns those paths.
   Fix: a second bucket that only `control` holds keys for; upload then delete the local file (a single put caps an
@@ -167,7 +167,7 @@ flowchart LR
   line; RustFS presigning is untested, spike S3). The export store lives in `packages/blobs` (one door to S3); amend
   ARCHITECTURE.md where it says blobs takes a tenant context on every call. Audit each URL issued.
   Proof: control test against RustFS fetches the URL, and is refused after expiry; one export on a scratch environment.
-- [ ] **F3 Export retention** ("Deleting a tenant keeps its export files"). S. After F2 and the retention answer.
+- [x] **F3 Export retention** ("Deleting a tenant keeps its export files"). S. After F2 and the retention answer.
   Fix: a bucket lifecycle rule if Railway buckets support one; otherwise control deletes expired exports at startup and
   daily. Proof: test with an injected clock.
 
@@ -250,3 +250,9 @@ No work until the trigger; the debt line stays and names it.
   (Slack `{text}`, Discord `{content}`, JSON otherwise; one post per kind per 5 minutes per process; redacted; never
   throws) for turn failed for good, lease lost, provisioning failed, migration fan-out failed; smoke posted provisioning
   and fan-out alerts from a local stack. D2 stays open until a real channel receives one.
+- 2026-11-22 A3, F2, F3 (PR #6, ADR 0013): exports upload to a control-only bucket `kerby-exports` (multipart, temp file
+  removed) and return 24 h presigned URLs, each audited; retention 30 days at startup and nightly, deleted tenants
+  included (Railway buckets have no lifecycle rules); nightly 03:00 UTC copy of `t/` to `kerby-backup` (`sjc`) under an
+  advisory lock, changed objects only, deleted tenants' prefixes removed; `POST /v1/operator/backup` and
+  `/backup/restore` (missing objects only). RustFS presigning verified (download, 403 after expiry); local smoke deleted
+  an object, the read failed, restore brought it back. Production proof waits for the first release.

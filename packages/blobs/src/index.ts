@@ -1,30 +1,25 @@
-// Object storage behind one door (ADR 0002). Every call takes a tenant context: the object key is
-// `t/<tenantId>/<key>`, and the tenant's own `blobs` table is the index. The object is written first, then
-// the index row, so a crash between them leaves an orphan object (swept in M8), never an index row without bytes.
+// Object storage behind one door (ADR 0002). Tenant code goes through `Blobs`, which takes a tenant context on every
+// call: the object key is `t/<tenantId>/<key>`, and the tenant's own `blobs` table is the index. The object is written
+// first, then the index row, so a crash between them leaves an orphan object (swept in M8), never an index row without
+// bytes. `Bucket` (./bucket.ts) is the operator's raw-key access, for `control` only.
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import {
-  CreateBucketCommand,
-  DeleteObjectsCommand,
-  GetObjectCommand,
-  HeadBucketCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import type { TenantContext } from "@kerby/db";
+import { type BucketConfig, createBucket, createS3Client, tenantPrefix } from "./bucket.ts";
+
+export {
+  type Bucket,
+  type BucketConfig,
+  type CopySummary,
+  copyObjects,
+  createBucket,
+  type StoredObject,
+  tenantPrefix,
+} from "./bucket.ts";
 
 /** Blob index migration, a tenant migration applied after Absurd's. */
 export const blobsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
-
-export type BlobsConfig = {
-  /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */
-  endpoint: string;
-  bucket: string;
-  credentials: { accessKeyId: string; secretAccessKey: string };
-  /** Defaults to `us-east-1`; RustFS ignores it and Railway buckets use `auto`. */
-  region?: string | undefined;
-};
 
 export type PutBlob = {
   /** What it is: `message`, `attachment`, ... Free-form, for the index. */
@@ -44,12 +39,6 @@ export class BlobNotFoundError extends Error {
 }
 
 const KEY = /^[A-Za-z0-9._=:-]+(?:\/[A-Za-z0-9._=:-]+)*$/;
-const TENANT_ID = /^[A-Za-z0-9-]{1,64}$/;
-
-function prefix(tenantId: string): string {
-  if (!TENANT_ID.test(tenantId)) throw new Error("invalid tenant id for an object prefix");
-  return `t/${tenantId}/`;
-}
 
 function objectKey(tenantId: string, key: string): string {
   if (
@@ -61,29 +50,19 @@ function objectKey(tenantId: string, key: string): string {
       `invalid blob key "${key}": use [A-Za-z0-9._=:-] segments separated by "/", no "." or ".." segments`,
     );
   }
-  return prefix(tenantId) + key;
+  return tenantPrefix(tenantId) + key;
 }
 
 export interface Blobs {
   put(ctx: TenantContext, blob: PutBlob): Promise<BlobRef>;
   /** Looks the id up in the context's own index first; an id from another tenant is simply not found. */
   get(ctx: TenantContext, blobId: string): Promise<BlobObject>;
-  /** Every object under the tenant's prefix, keys relative to it (tenant export). */
-  listPrefix(tenantId: string): Promise<{ key: string; size: number }[]>;
-  /** Delete every object of a tenant (tenant deletion). Returns how many. */
-  deletePrefix(tenantId: string): Promise<number>;
   /** Create the bucket if it does not exist (local stacks and tests; production buckets are provisioned). */
   ensureBucket(): Promise<void>;
 }
 
-export function createBlobs(config: BlobsConfig): Blobs {
-  const s3 = new S3Client({
-    endpoint: config.endpoint,
-    region: config.region ?? "us-east-1",
-    credentials: config.credentials,
-    // Path-style addressing works on every S3-compatible server we run against.
-    forcePathStyle: true,
-  });
+export function createBlobs(config: BucketConfig): Blobs {
+  const s3 = createS3Client(config);
   const Bucket = config.bucket;
 
   return {
@@ -115,7 +94,7 @@ export function createBlobs(config: BlobsConfig): Blobs {
       const row = rows[0];
       if (!row) throw new BlobNotFoundError(`blob ${blobId} not found`);
       // A context pairing one tenant's id with another's database must not read across.
-      if (!row.object_key.startsWith(prefix(ctx.tenantId))) {
+      if (!row.object_key.startsWith(tenantPrefix(ctx.tenantId))) {
         throw new BlobNotFoundError(`blob ${blobId} does not belong to this tenant`);
       }
       const object = await s3.send(new GetObjectCommand({ Bucket, Key: row.object_key }));
@@ -127,51 +106,6 @@ export function createBlobs(config: BlobsConfig): Blobs {
       };
     },
 
-    async listPrefix(tenantId) {
-      const Prefix = prefix(tenantId);
-      const found: { key: string; size: number }[] = [];
-      let ContinuationToken: string | undefined;
-      do {
-        const page = await s3.send(new ListObjectsV2Command({ Bucket, Prefix, ContinuationToken }));
-        for (const object of page.Contents ?? []) {
-          if (object.Key)
-            found.push({ key: object.Key.slice(Prefix.length), size: object.Size ?? 0 });
-        }
-        ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-      } while (ContinuationToken);
-      return found;
-    },
-
-    async deletePrefix(tenantId) {
-      const Prefix = prefix(tenantId);
-      let deleted = 0;
-      let ContinuationToken: string | undefined;
-      do {
-        const page = await s3.send(new ListObjectsV2Command({ Bucket, Prefix, ContinuationToken }));
-        const keys = (page.Contents ?? []).flatMap((object) =>
-          object.Key ? [{ Key: object.Key }] : [],
-        );
-        if (keys.length > 0) {
-          const result = await s3.send(
-            new DeleteObjectsCommand({ Bucket, Delete: { Objects: keys, Quiet: true } }),
-          );
-          if (result.Errors?.length)
-            throw new Error(
-              `deleting objects under ${Prefix} failed for ${result.Errors.length} keys`,
-            );
-          deleted += keys.length;
-        }
-        ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-      } while (ContinuationToken);
-      return deleted;
-    },
-
-    async ensureBucket() {
-      try {
-        await s3.send(new HeadBucketCommand({ Bucket }));
-      } catch {
-        await s3.send(new CreateBucketCommand({ Bucket }));
-      }
-    },
+    ensureBucket: () => createBucket(config).ensureBucket(),
   };
 }

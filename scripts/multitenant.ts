@@ -176,8 +176,11 @@ async function crossTenantSuite(a: Tenant, b: Tenant): Promise<void> {
 
   // Object prefixes: an export lists only the tenant's own prefix.
   const exportA = await operator("POST", `/tenants/${a.id}/export`);
-  const objectsFile = String(exportA.body.objectsFile);
-  const keys = JSON.parse(compose("exec", "-T", "control", "cat", objectsFile)) as {
+  // The URL names the bucket's endpoint as control reaches it (`rustfs:9000`), so download it from there.
+  const download = `const r = await fetch(${JSON.stringify(String(exportA.body.objectsUrl))}); if (!r.ok) throw new Error("download " + r.status); process.stdout.write(await r.text());`;
+  const keys = JSON.parse(
+    compose("exec", "-T", "control", "node", "--input-type=module", "-e", download),
+  ) as {
     key: string;
   }[];
   check(
