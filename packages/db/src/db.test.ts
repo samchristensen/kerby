@@ -9,6 +9,7 @@ import {
   createClusterAdmin,
   createControlDb,
   createTenantDb,
+  LISTEN_APPLICATION_NAME,
   migrate,
   migrateTenants,
   rawPool,
@@ -344,6 +345,19 @@ describe("ClusterAdmin", () => {
 });
 
 describe("listen", () => {
+  const listeningConnections = async (name: string): Promise<number> => {
+    const admin = createControlDb(adminUrl(), { max: 1 });
+    try {
+      const { rows } = await admin.query<{ n: number }>(
+        "select count(*)::int as n from pg_stat_activity where datname = $1 and application_name = $2",
+        [name, LISTEN_APPLICATION_NAME],
+      );
+      return rows[0]?.n ?? 0;
+    } finally {
+      await admin.close();
+    }
+  };
+
   it("delivers notifications, and resyncs after the connection is cut", async () => {
     const database1 = await database();
     const db = await tenantDb(database1);
@@ -364,13 +378,65 @@ describe("listen", () => {
     const admin = createControlDb(adminUrl(), { max: 1 });
     cleanups.push(() => admin.close());
     await admin.query(
-      "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and query like 'listen %'",
-      [database1.name],
+      "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and application_name = $2",
+      [database1.name, LISTEN_APPLICATION_NAME],
     );
     await eventually(async () => reconnects === 1);
     await db.query("select pg_notify('things', 'two')");
     await eventually(async () => received.length === 2);
     expect(received).toEqual(["one", "two"]);
+  });
+
+  it("shares one connection per database among all subscriptions, and closes it after the last", async () => {
+    const database1 = await database();
+    // Two handles on the same database (a pool evicted and reopened) still share the listening connection.
+    const db = await tenantDb(database1);
+    const again = await tenantDb(database1);
+    const received = new Map<string, string[]>();
+    let reconnects = 0;
+    const subscriptions = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        (i % 2 === 0 ? db : again).listen(
+          `conversation_${i % 4}`,
+          (payload) => received.set(`${i}`, [...(received.get(`${i}`) ?? []), payload]),
+          { onReconnect: () => reconnects++ },
+        ),
+      ),
+    );
+    cleanups.push(async () => {
+      for (const subscription of subscriptions) await subscription.close();
+    });
+    expect(await listeningConnections(database1.name)).toBe(1);
+
+    // Each subscriber hears its own channel only.
+    await db.query("select pg_notify('conversation_1', 'a')");
+    await eventually(async () => received.size === 3);
+    expect([...received.keys()].sort()).toEqual(["1", "5", "9"]);
+
+    // Every channel is listened again after a reconnect, and every subscriber told to resync.
+    const admin = createControlDb(adminUrl(), { max: 1 });
+    cleanups.push(() => admin.close());
+    await admin.query(
+      "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and application_name = $2",
+      [database1.name, LISTEN_APPLICATION_NAME],
+    );
+    await eventually(async () => reconnects === 12);
+    await db.query("select pg_notify('conversation_2', 'b')");
+    await eventually(async () => received.size === 6);
+
+    // A channel whose subscribers all left is unlistened; the others keep hearing.
+    for (const i of [3, 7, 11]) await subscriptions[i]?.close();
+    await db.query("select pg_notify('conversation_3', 'c'), pg_notify('conversation_0', 'd')");
+    await eventually(async () => received.get("0")?.length === 1);
+    expect(received.has("3")).toBe(false);
+    expect(await listeningConnections(database1.name)).toBe(1);
+
+    for (const subscription of subscriptions) await subscription?.close();
+    await eventually(async () => (await listeningConnections(database1.name)) === 0);
+    // A new subscriber after that opens a fresh connection.
+    const late = await db.listen("conversation_0", () => {});
+    expect(await listeningConnections(database1.name)).toBe(1);
+    await late.close();
   });
 
   it("stops delivering after close and rejects an unsafe channel name", async () => {

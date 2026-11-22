@@ -45,6 +45,7 @@ export async function startApi(config: ApiConfig) {
       defaultSystem: config.defaultSystem,
       authCacheMs: config.authCacheSeconds * 1000,
       maxStreamsPerTenant: config.maxStreamsPerTenant,
+      maxStreamsPerProcess: config.maxStreamsPerProcess,
       streamRecheckMs: 5000,
       defaultRequestsPerMinute: config.defaultRequestsPerMinute,
       defaultStorageBytes: config.defaultStorageBytes,

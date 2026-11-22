@@ -24,7 +24,10 @@ export interface TenantTx extends Queryable {
   readonly [plane]: "tenant";
 }
 
-/** LISTEN on a channel over a dedicated connection that reconnects on failure. Payloads are what `pg_notify` sent. */
+/**
+ * LISTEN on a channel. Every subscription to one database in this process shares one dedicated connection, which
+ * reconnects on failure. Payloads are what `pg_notify` sent.
+ */
 export interface Listens {
   listen(
     channel: string,

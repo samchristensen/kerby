@@ -39,8 +39,10 @@ export const apiConfigSchema = z.object({
   defaultSystem: z.string().default("You are a helpful assistant."),
   /** How long a verified key is trusted: also how long suspension and revocation take to bite. */
   authCacheSeconds: z.coerce.number().int().min(0).default(30),
-  /** Event streams one tenant may hold open on this process (each keeps a database connection). */
+  /** Event streams one tenant may hold open on this process (each leases the tenant's pool of 2 connections). */
   maxStreamsPerTenant: z.coerce.number().int().positive().default(20),
+  /** Event streams this process holds open in all, for every tenant: bounds its connections (docs/deploy.md#postgres). */
+  maxStreamsPerProcess: z.coerce.number().int().positive().default(200),
   /**
    * Requests per minute for a tenant whose limits do not say (`limits.requestsPerMinute`). A token bucket per api
    * process: with N processes a tenant gets up to N times this. A default until pricing (plan 0001, M9).

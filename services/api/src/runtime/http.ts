@@ -14,7 +14,7 @@ import {
   isConversationId,
   StorageQuotaExceededError,
 } from "@kerby/conversations";
-import type { TenantContext } from "@kerby/db";
+import type { TenantContext, TenantLease } from "@kerby/db";
 import { log, withTenant } from "@kerby/observability";
 import {
   bearerToken,
@@ -202,7 +202,11 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     return id;
   };
 
-  /** Open event streams per tenant in this process: each holds a database connection for as long as it lives. */
+  /**
+   * Open event streams in this process, in all and per tenant: each leases its tenant's pool and shares the tenant's
+   * listening connection for as long as it lives (connection budget: docs/deploy.md#postgres).
+   */
+  let streamsOpen = 0;
   const openStreams = new Map<string, number>();
 
   const providerParam = (params: Record<string, string>): string => {
@@ -297,6 +301,12 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const after = header === null ? 0 : Number(header);
         if (!Number.isInteger(after) || after < 0)
           throw new HttpError(400, "invalid_request", "Last-Event-ID must be a sequence number");
+        if (streamsOpen >= deps.settings.maxStreamsPerProcess)
+          throw new HttpError(
+            503,
+            "server_busy",
+            `this server holds its maximum of ${deps.settings.maxStreamsPerProcess} open event streams; retry shortly, or read the conversation with GET /v1/conversations/:id`,
+          );
         const open = openStreams.get(principal.tenantId) ?? 0;
         if (open >= deps.settings.maxStreamsPerTenant)
           throw new HttpError(
@@ -304,12 +314,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
             "too_many_streams",
             `at most ${deps.settings.maxStreamsPerTenant} event streams may be open at once`,
           );
+        streamsOpen++;
         openStreams.set(principal.tenantId, open + 1);
         let released = false;
-        let lease: Awaited<ReturnType<typeof deps.pools.acquire>> | undefined;
+        let lease: TenantLease | undefined;
         const release = async () => {
           if (released) return;
           released = true;
+          streamsOpen--;
           const left = (openStreams.get(principal.tenantId) ?? 1) - 1;
           if (left > 0) openStreams.set(principal.tenantId, left);
           else openStreams.delete(principal.tenantId);
