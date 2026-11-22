@@ -43,7 +43,10 @@ shows it as drift, and `railway config pull` imports it if you did. `railway-set
 a secret. Kerby holds no model provider keys: each tenant
 stores its own (`PUT /v1/model-keys/<provider>`, [ADR 0008](adr/0008-byok-sealed-secrets.md)). The setup makes a secrets key
 pair once: the private key is `SECRETS_PRIVATE_KEYS` on `worker`, the public half `SECRETS_PUBLIC_KEY` on `api`. Never delete
-the private key from `worker`: every stored tenant key is sealed to it. Back it up somewhere other than Railway.
+the private key from `worker`: every stored tenant key is sealed to it. Its copy outside Railway is the operator's macOS
+login keychain item `kerby SECRETS_PRIVATE_KEYS` (account `kerby-production`); keep a second copy in a password manager.
+Check a copy is the live key: `publicKeyOf(copy)` from `@kerby/secrets` must equal `api`'s `SECRETS_PUBLIC_KEY`. After
+a key rotation (ADR 0008), update the copy.
 
 The api's address is in `railway service list --json` (`url`). A custom domain: add `domains: ["api.example.com"]` to the
 `api` service in `.railway/railway.ts` and apply, then add the DNS records Railway prints.
@@ -116,7 +119,8 @@ on purpose: a generated value there would be made again on every apply.
 - Backups: a daily backup of the Postgres volume, kept 6 days (`railway postgres pitr schedule list --service Postgres`;
   set with `railway postgres pitr schedule set --daily`). Restore: `railway postgres pitr backup list`, then
   `railway postgres pitr backup restore <id> --service Postgres` (replaces the volume's contents: take an on-demand backup
-  first with `railway postgres pitr backup create`). Bucket objects are not in it (plan 0003, A3).
+  first with `railway postgres pitr backup create`). The restore drill took 77 s on a small database (ADR 0012). Bucket
+  objects are not in it: see the bucket backup.
 - psql into production: `railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL"'` (the control image has the client).
 
 ## Cost
@@ -139,6 +143,5 @@ There are no alarms yet (tech debt).
 
 ## Known gaps
 
-See `docs/plans/tech-debt.md`: no backups, no alarms, a single Postgres instance, `max_connections` at 100, no edge rate
-limiting, every tenant role's password derives from one shared secret, tenant exports are written to the control
-container's disk.
+See `docs/plans/tech-debt.md`. Known and accepted (ADR 0012): one Postgres instance, up to a day of data lost to a volume
+failure.

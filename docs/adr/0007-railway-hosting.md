@@ -48,8 +48,9 @@ already do.
 ## Consequences
 
 - Always on: no scale to zero. Railway bills usage (CPU, memory, volume, egress), so small idle services cost little;
-  `deploy.sleepApplication` could put `api` to sleep but is untested with event streams and the worker never idles.
-- One Postgres instance on one volume: no replica, no multi-zone storage. Backups are not configured (tech debt).
+  nothing sleeps ([ADR 0012](0012-recovery-and-availability.md)).
+- One Postgres instance on one volume: no replica, no multi-zone storage; nightly volume backups and the HA trigger are
+  in [ADR 0012](0012-recovery-and-availability.md).
 - No alarms or dashboards beyond Railway's logs and metrics (tech debt). Logs are structured JSON with tenant ids and no content.
 - Whoever holds the Railway login can read every variable, so every secret. There is no least-privilege agent role yet
   (tech debt): a project token (`RAILWAY_TOKEN`) is the starting point.
