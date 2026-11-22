@@ -1,0 +1,27 @@
+# Throwaway (plan 0003, C4): what can the production project token do? Prints exit codes and counts, never values.
+name: token-probe
+on: pull_request
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - run: npm install --global @railway/cli@5.62.1 >/dev/null
+      - name: probe
+        run: |
+          try() { label="$1"; shift; if out=$("$@" 2>&1); then echo "OK    $label"; else echo "FAIL  $label: $(echo "$out" | tail -1 | cut -c1-160)"; fi; }
+          try "status" railway status
+          try "whoami (account)" railway whoami
+          try "list projects (account)" railway list
+          try "service list production" railway service list --environment production
+          try "logs api" railway logs --service api --environment production --lines 1
+          n=$(railway variable list --service control --environment production --json 2>/dev/null | jq 'keys | length' 2>/dev/null || echo 0)
+          echo "INFO  control variables readable: $n keys (names only counted)"
+          try "bucket credentials (prints keys; discarded)" sh -c 'railway bucket credentials --bucket kerby --environment production --json >/dev/null'
+          try "create environment" railway environment new probe-token --duplicate production
+          railway environment delete probe-token --yes >/dev/null 2>&1 || true
+          try "account API query" railway api 'query { me { name } }'
+          try "projects API query" railway api 'query { projects { edges { node { name } } } }'
