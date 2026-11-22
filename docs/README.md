@@ -9,6 +9,7 @@ The repository is the only memory an agent has: a decision, plan, or convention 
 | [principles.md](principles.md)           | Before writing code.                                                                |
 | [adr/](adr)                              | Before deciding structure, dependencies, infrastructure, tenancy.                   |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Adding or moving anything.                                                          |
+| [deploy.md](deploy.md)                   | Deploying, provisioning a tenant, or operating the hosted stack on Railway.         |
 
 ## Conventions
 

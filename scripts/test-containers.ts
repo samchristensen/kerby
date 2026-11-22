@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TestProject } from "vitest/node";
 
-export const POSTGRES_IMAGE = "postgres:17-alpine";
+export const POSTGRES_IMAGE = "postgres:18-alpine";
 export const RUSTFS_IMAGE = "rustfs/rustfs:1.0.6";
 
 export type TestContainers = {

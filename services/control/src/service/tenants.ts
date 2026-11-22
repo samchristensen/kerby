@@ -61,7 +61,7 @@ export async function provisionTenant(
       template: settings.templateDatabase,
       owner: tenant.dbRole,
     });
-    // Re-own first: restricting connect would lock out a non-superuser admin (RDS) before it could.
+    // Re-own first: restricting connect would lock out a non-superuser admin before it could.
     await cluster.reassignOwned(tenant.dbName, tenant.dbRole);
     await cluster.restrictDatabase(tenant.dbName, tenant.dbRole);
     // The copy may predate the newest migrations: catch up, as the tenant's own role.

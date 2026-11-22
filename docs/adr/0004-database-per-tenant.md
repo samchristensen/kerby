@@ -32,7 +32,7 @@ operations on one database.
   backstop), then claims Absurd tasks from that tenant's database. Because the worker chooses whom to claim for,
   per-tenant concurrency and fair sharing are enforced there, which Absurd itself does not do.
 - **Object storage.** Keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call. A tenant
-  may be assigned its own bucket and KMS key in its row. The blob index lives in the tenant database.
+  may be assigned its own bucket in its row. The blob index lives in the tenant database.
 - **Secrets.** Tenant model keys and tool credentials are envelope-encrypted in the control plane, with a per-tenant data
   key, and decrypted only inside a run. Logs carry the tenant id and never message content or secrets.
 - **Migrations.** Control migrations run once; tenant migrations fan out to every tenant database, recorded per tenant

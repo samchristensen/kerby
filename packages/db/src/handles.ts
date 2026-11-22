@@ -2,6 +2,7 @@
 // `TenantDb` cannot be handed the control plane, and the reverse. Neither exposes a pool or a DSN.
 import { errorFields, log } from "@kerby/observability";
 import pg from "pg";
+import { withConnectRetry } from "./connect-retry.ts";
 import { type ListenOptions, listen, type Subscription } from "./listen.ts";
 
 export type Row = Record<string, unknown>;
@@ -65,7 +66,7 @@ export function rawPool(db: ControlDb | TenantDb): pg.Pool {
 }
 
 async function run<R extends Row>(
-  target: Pick<pg.Pool, "query">,
+  target: Pick<pg.PoolClient, "query">,
   text: string,
   params?: readonly unknown[],
 ): Promise<QueryResult<R>> {
@@ -84,6 +85,8 @@ function makeHandle(url: string, options: PoolOptions): Plain {
     connectionString: url,
     max: options.max ?? 10,
     idleTimeoutMillis: options.idleTimeoutMillis ?? 10_000,
+    // A connect that hangs (a cluster resuming) fails after this and is retried by `withConnectRetry`.
+    connectionTimeoutMillis: 30_000,
   });
   // An idle client dying must not crash the process; the next query opens another.
   pool.on("error", (error: Error) =>
@@ -91,10 +94,16 @@ function makeHandle(url: string, options: PoolOptions): Plain {
   );
 
   const handle: Plain = {
-    query: <R extends Row = Row>(text: string, params?: readonly unknown[]) =>
-      run<R>(pool, text, params),
+    async query<R extends Row = Row>(text: string, params?: readonly unknown[]) {
+      const client = await withConnectRetry(() => pool.connect());
+      try {
+        return await run<R>(client, text, params);
+      } finally {
+        client.release();
+      }
+    },
     async transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
-      const client = await pool.connect();
+      const client = await withConnectRetry(() => pool.connect());
       let broken: Error | undefined;
       try {
         await client.query("begin");

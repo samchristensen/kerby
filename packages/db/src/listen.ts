@@ -4,6 +4,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorFields, log } from "@kerby/observability";
 import pg from "pg";
+import { withConnectRetry } from "./connect-retry.ts";
 
 export type Subscription = { close(): Promise<void> };
 export type ListenOptions = { onReconnect?: () => void };
@@ -37,7 +38,7 @@ export async function listen(
     client = next;
   }
 
-  await connect();
+  await withConnectRetry(connect);
 
   // Supervisor: waits for the connection to end, then reopens it.
   void (async () => {

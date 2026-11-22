@@ -12,13 +12,14 @@ x-tenant-env: &tenant-env
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     command: ["-c", "max_connections=500"]
     environment:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: kerby_control
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Postgres 18 images keep a versioned data directory below /var/lib/postgresql, so that is the volume.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d kerby_control"]
       interval: 3s

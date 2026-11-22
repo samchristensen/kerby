@@ -18,12 +18,11 @@ import type { TenantContext } from "@kerby/db";
 export const blobsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
 export type BlobsConfig = {
-  /** A custom S3-compatible endpoint (RustFS locally). Omit for AWS S3. */
-  endpoint?: string | undefined;
+  /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */
+  endpoint: string;
   bucket: string;
-  /** Static credentials (local stacks). Omit on AWS: the SDK uses the task or instance role. */
-  credentials?: { accessKeyId: string; secretAccessKey: string } | undefined;
-  /** Omit on AWS: the SDK reads the region from its environment. */
+  credentials: { accessKeyId: string; secretAccessKey: string };
+  /** Defaults to `us-east-1`; RustFS ignores it and Railway buckets use `auto`. */
   region?: string | undefined;
 };
 
@@ -79,15 +78,11 @@ export interface Blobs {
 
 export function createBlobs(config: BlobsConfig): Blobs {
   const s3 = new S3Client({
-    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
-    ...(config.endpoint
-      ? { region: config.region ?? "us-east-1" }
-      : config.region
-        ? { region: config.region }
-        : {}),
-    ...(config.credentials ? { credentials: config.credentials } : {}),
-    // Custom endpoints (RustFS, MinIO) need path-style; AWS S3 uses virtual-hosted style.
-    forcePathStyle: config.endpoint !== undefined,
+    endpoint: config.endpoint,
+    region: config.region ?? "us-east-1",
+    credentials: config.credentials,
+    // Path-style addressing works on every S3-compatible server we run against.
+    forcePathStyle: true,
   });
   const Bucket = config.bucket;
 

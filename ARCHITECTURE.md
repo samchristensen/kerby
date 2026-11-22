@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-aws-hosting.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -161,8 +161,10 @@ then provisions a `default` tenant through the operator API and prints its key. 
 
 ## Hosting
 
-AWS, by Terraform in `infra/aws`: [ADR 0007](docs/adr/0007-aws-hosting.md), runbook in [docs/deploy-aws.md](docs/deploy-aws.md). The
-images are the ones Compose runs; hosted, S3 uses the task role (no keys) and Postgres is RDS reached with `sslmode=verify-full`.
+Railway, driven by `scripts/railway.ts` (`make railway-setup`, `make deploy`): one project, a `production` environment (any other name is an
+ephemeral copy), and per environment a `Postgres` service, a bucket, and `control`, `api` and `worker` built from the Dockerfiles Compose
+runs: [ADR 0007](docs/adr/0007-railway-hosting.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
+Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys.
 
 ## Dependencies
 

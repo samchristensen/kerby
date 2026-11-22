@@ -6,14 +6,14 @@ export const workerConfigSchema = z
   .object({
     controlDatabaseUrl: z.string().min(1),
     tenantDbSecret: z.string().min(16),
-    /** `sslmode` for tenant database URLs (`verify-full` on RDS); omit for a local, unencrypted Postgres. */
+    /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
     tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
-    /** A custom S3-compatible endpoint (RustFS locally). Omit on AWS: the SDK then uses S3 and the task role. */
-    s3Endpoint: z.url().optional(),
+    /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */
+    s3Endpoint: z.url(),
     s3Region: z.string().min(1).optional(),
     s3Bucket: z.string().min(1),
-    s3AccessKeyId: z.string().min(1).optional(),
-    s3SecretAccessKey: z.string().min(1).optional(),
+    s3AccessKeyId: z.string().min(1),
+    s3SecretAccessKey: z.string().min(1),
     /** Names this worker in Absurd's run rows. */
     workerId: z
       .string()

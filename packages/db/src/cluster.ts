@@ -67,8 +67,8 @@ export function createClusterAdmin(url: string): ClusterAdmin {
         [quoted, password],
       );
       await exec(rows[0]?.sql ?? "");
-      // A non-superuser admin (RDS's rds_superuser) may only create a database owned by, and move objects to, a role
-      // it is a member of.
+      // A non-superuser admin (a managed Postgres without superuser access) may only create a database owned by, and
+      // move objects to, a role it is a member of.
       await exec(`grant ${quoted} to current_user`);
     },
     async createDatabase(name, options = {}) {

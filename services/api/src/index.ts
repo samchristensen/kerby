@@ -18,10 +18,7 @@ export async function startApi(config: ApiConfig) {
     endpoint: config.s3Endpoint,
     region: config.s3Region,
     bucket: config.s3Bucket,
-    credentials:
-      config.s3AccessKeyId && config.s3SecretAccessKey
-        ? { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey }
-        : undefined,
+    credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
   });
   const pools = new TenantPools({
     async resolveUrl(tenantId) {

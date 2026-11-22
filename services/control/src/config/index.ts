@@ -10,7 +10,7 @@ export const controlConfigSchema = z.object({
   operatorToken: z.string().min(16),
   /** Derives every tenant database role's password (ADR 0004). All services that open tenant databases share it. */
   tenantDbSecret: z.string().min(16),
-  /** `sslmode` for tenant database URLs (`verify-full` on RDS); omit for a local, unencrypted Postgres. */
+  /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
   tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
   /** An administrative URL on the cluster that holds tenant databases (CREATEDB, CREATEROLE). */
   clusterAdminUrl: z.string().min(1),
@@ -24,12 +24,12 @@ export const controlConfigSchema = z.object({
     .string()
     .regex(/^[a-z][a-z0-9_]*$/)
     .default("kerby_tenant_template"),
-  /** A custom S3-compatible endpoint (RustFS locally). Omit on AWS: the SDK then uses S3 and the task role. */
-  s3Endpoint: z.url().optional(),
+  /** The S3-compatible endpoint: a Railway bucket, or RustFS locally. */
+  s3Endpoint: z.url(),
   s3Region: z.string().min(1).optional(),
   s3Bucket: z.string().min(1),
-  s3AccessKeyId: z.string().min(1).optional(),
-  s3SecretAccessKey: z.string().min(1).optional(),
+  s3AccessKeyId: z.string().min(1),
+  s3SecretAccessKey: z.string().min(1),
   exportDir: z.string().min(1).default("/var/lib/kerby/exports"),
   pgDumpPath: z.string().min(1).default("pg_dump"),
 });

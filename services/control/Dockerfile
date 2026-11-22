@@ -7,17 +7,13 @@ WORKDIR /app
 # Node 25+ no longer ships corepack: install the pnpm that `packageManager` in package.json names.
 RUN npm install --global pnpm@${PNPM_VERSION}
 
-# The Amazon RDS CA bundle, so `sslmode=verify-full` works against RDS. Harmless elsewhere.
-ADD --chmod=0644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /opt/rds-global-bundle.pem
-ENV NODE_EXTRA_CA_CERTS=/opt/rds-global-bundle.pem
-
 # pg_dump for tenant export: it must be at least the server major version, which Debian's own package is not.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo $VERSION_CODENAME)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-client-17 \
+ && apt-get install -y --no-install-recommends postgresql-client-18 \
  && apt-get purge -y --auto-remove curl gnupg \
  && rm -rf /var/lib/apt/lists/*
 

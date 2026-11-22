@@ -1,6 +1,9 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant infra aws-push
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant railway-setup deploy env-down
+
+# The Railway environment that railway-setup, deploy and env-down act on.
+ENV ?= production
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -49,10 +52,12 @@ e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, and a 200-tenant load run (KERBY_LOAD_TENANTS=n)
 	node scripts/multitenant.ts
 
-infra: ## Format-check and validate the Terraform in infra/aws (needs terraform; no AWS credentials)
-	terraform -chdir=infra/aws fmt -check -recursive
-	terraform -chdir=infra/aws init -backend=false -input=false >/dev/null
-	terraform -chdir=infra/aws validate
+railway-setup: ## Create and wire Kerby's Railway services for ENV (default production); safe to run again
+	node scripts/railway.ts setup $(ENV)
 
-aws-push: ## Build linux/amd64 images and push them to ECR (AWS_REGION=..., clean git tree)
-	./scripts/aws-push.sh
+deploy: ## Upload this checkout to Railway for ENV (default production): control, then api and worker
+	node scripts/railway.ts deploy $(ENV)
+
+env-down: ## Delete a Railway environment and its data: make env-down ENV=pr-123 (never production)
+	@test "$(ENV)" != production || (echo "usage: make env-down ENV=<name>; production is not deleted from here" && exit 1)
+	railway environment delete $(ENV) --yes

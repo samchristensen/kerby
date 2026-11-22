@@ -25,7 +25,7 @@ For the agent building Kerby with no human present. Read this first after any co
 ## Test infrastructure (build first, task T0)
 
 - `vitest.config.ts` with a `globalSetup` that starts disposable containers via `docker run` and exports their URLs to
-  tests through `provide`/env: `postgres:17-alpine` (`-c max_connections=500`, random host port, `POSTGRES_PASSWORD=dev`)
+  tests through `provide`/env: `postgres:18-alpine` (`-c max_connections=500`, random host port, `POSTGRES_PASSWORD=dev`)
   and a pinned `rustfs/rustfs` (env `RUSTFS_ACCESS_KEY=devkey`, `RUSTFS_SECRET_KEY=devsecret123`, command `/data`, port 9000).
   Tear both down after the run. Wait for readiness (`pg_isready` via a `pg` connect loop; an S3 `ListBuckets` loop).
 - Test helpers (in the owning package's `src/testing.ts`, exported as `@kerby/<pkg>/testing`): `createTestControlDb()`

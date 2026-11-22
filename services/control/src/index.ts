@@ -31,10 +31,7 @@ export async function startControl(config: ControlConfig) {
     endpoint: config.s3Endpoint,
     region: config.s3Region,
     bucket: config.s3Bucket,
-    credentials:
-      config.s3AccessKeyId && config.s3SecretAccessKey
-        ? { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey }
-        : undefined,
+    credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
   });
   await blobs.ensureBucket();
   const pools = new TenantPools({

@@ -237,7 +237,7 @@ describe("TenantPools", () => {
   });
 });
 
-describe("ClusterAdmin as a non-superuser (RDS rds_superuser)", () => {
+describe("ClusterAdmin as a non-superuser", () => {
   it("provisions a database owned by a restricted role without superuser rights", async () => {
     const root = createControlDb(adminUrl(), { max: 1 });
     const suffix = Math.random().toString(16).slice(2, 10);
