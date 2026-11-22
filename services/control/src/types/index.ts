@@ -13,6 +13,7 @@ export type ControlDeps = {
     clusterPort: number;
     /** See `tenantDbPassword`. */
     tenantDbSecret: string;
+    tenantDbSslmode?: "disable" | "require" | "verify-full" | undefined;
     templateDatabase: string;
     exportDir: string;
     pgDumpPath: string;

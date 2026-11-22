@@ -25,7 +25,11 @@ export async function exportTenant(deps: ControlDeps, tenantId: string): Promise
   const dumpFile = `${base}.dump`;
   const objectsFile = `${base}.objects.json`;
 
-  await dumpDatabase(tenantDbUrl(tenant, settings.tenantDbSecret), dumpFile, settings.pgDumpPath);
+  await dumpDatabase(
+    tenantDbUrl(tenant, settings.tenantDbSecret, settings.tenantDbSslmode),
+    dumpFile,
+    settings.pgDumpPath,
+  );
   const objects = await blobs.listPrefix(tenant.id);
   await writeFile(objectsFile, JSON.stringify(objects, null, 2));
   await audit(deps.control, {

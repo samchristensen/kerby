@@ -7,6 +7,10 @@ WORKDIR /app
 # Node 25+ no longer ships corepack: install the pnpm that `packageManager` in package.json names.
 RUN npm install --global pnpm@${PNPM_VERSION}
 
+# The Amazon RDS CA bundle, so `sslmode=verify-full` works against RDS. Harmless elsewhere.
+ADD --chmod=0644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /opt/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/opt/rds-global-bundle.pem
+
 FROM base AS sources
 COPY . .
 

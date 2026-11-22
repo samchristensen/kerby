@@ -76,6 +76,7 @@ export function tenantDbPassword(secret: string, tenantId: string): string {
 export function tenantDbUrl(
   tenant: Pick<TenantRecord, "id" | "dbHost" | "dbPort" | "dbName" | "dbRole">,
   secret: string,
+  sslmode?: "disable" | "require" | "verify-full",
 ): string {
   const url = new URL("postgres://placeholder");
   url.username = tenant.dbRole;
@@ -83,6 +84,7 @@ export function tenantDbUrl(
   url.hostname = tenant.dbHost;
   url.port = String(tenant.dbPort);
   url.pathname = `/${tenant.dbName}`;
+  if (sslmode) url.searchParams.set("sslmode", sslmode);
   return url.toString();
 }
 

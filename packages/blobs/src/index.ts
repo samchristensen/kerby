@@ -18,10 +18,13 @@ import type { TenantContext } from "@kerby/db";
 export const blobsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
 export type BlobsConfig = {
-  endpoint: string;
+  /** A custom S3-compatible endpoint (RustFS locally). Omit for AWS S3. */
+  endpoint?: string | undefined;
   bucket: string;
-  credentials: { accessKeyId: string; secretAccessKey: string };
-  region?: string;
+  /** Static credentials (local stacks). Omit on AWS: the SDK uses the task or instance role. */
+  credentials?: { accessKeyId: string; secretAccessKey: string } | undefined;
+  /** Omit on AWS: the SDK reads the region from its environment. */
+  region?: string | undefined;
 };
 
 export type PutBlob = {
@@ -76,10 +79,15 @@ export interface Blobs {
 
 export function createBlobs(config: BlobsConfig): Blobs {
   const s3 = new S3Client({
-    endpoint: config.endpoint,
-    region: config.region ?? "us-east-1",
-    credentials: config.credentials,
-    forcePathStyle: true,
+    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+    ...(config.endpoint
+      ? { region: config.region ?? "us-east-1" }
+      : config.region
+        ? { region: config.region }
+        : {}),
+    ...(config.credentials ? { credentials: config.credentials } : {}),
+    // Custom endpoints (RustFS, MinIO) need path-style; AWS S3 uses virtual-hosted style.
+    forcePathStyle: config.endpoint !== undefined,
   });
   const Bucket = config.bucket;
 

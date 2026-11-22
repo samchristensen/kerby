@@ -35,14 +35,18 @@ export async function startWorker(config: WorkerConfig): Promise<{
   const control = createControlDb(config.controlDatabaseUrl);
   const blobs = createBlobs({
     endpoint: config.s3Endpoint,
+    region: config.s3Region,
     bucket: config.s3Bucket,
-    credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
+    credentials:
+      config.s3AccessKeyId && config.s3SecretAccessKey
+        ? { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey }
+        : undefined,
   });
   const pools = new TenantPools({
     async resolveUrl(tenantId) {
       const tenant = await getTenant(control, tenantId);
       if (!tenant) throw new Error(`tenant ${tenantId} does not exist`);
-      return tenantDbUrl(tenant, config.tenantDbSecret);
+      return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
     },
   });
   const models = config.kerbyFakeModel

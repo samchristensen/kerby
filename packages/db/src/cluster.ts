@@ -26,7 +26,7 @@ export interface ClusterAdmin {
    * owned by `owner`. Objects in the copy keep the creating role as owner until `reassignOwned`.
    */
   createDatabase(name: string, options?: { template?: string; owner?: string }): Promise<void>;
-  /** `public` may no longer connect to `database`; `role` may, and no one else. */
+  /** `public` may no longer connect to `database`; `role` and the admin role may, and no one else. */
   restrictDatabase(database: string, role: string): Promise<void>;
   /** Hand every object in `database` owned by the admin role to `role` (so the tenant owns its schema). */
   reassignOwned(database: string, role: string): Promise<void>;
@@ -67,6 +67,9 @@ export function createClusterAdmin(url: string): ClusterAdmin {
         [quoted, password],
       );
       await exec(rows[0]?.sql ?? "");
+      // A non-superuser admin (RDS's rds_superuser) may only create a database owned by, and move objects to, a role
+      // it is a member of.
+      await exec(`grant ${quoted} to current_user`);
     },
     async createDatabase(name, options = {}) {
       const sql = [
@@ -90,7 +93,9 @@ export function createClusterAdmin(url: string): ClusterAdmin {
     async restrictDatabase(database, role) {
       const quotedDb = identifier(database, "database name");
       await exec(`revoke all on database ${quotedDb} from public`);
-      await exec(`grant connect on database ${quotedDb} to ${identifier(role, "role name")}`);
+      await exec(
+        `grant connect on database ${quotedDb} to ${identifier(role, "role name")}, current_user`,
+      );
     },
     async reassignOwned(database, role) {
       // `quoted` is a validated, double-quoted identifier, so it is safe inside the statement text below.

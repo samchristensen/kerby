@@ -21,15 +21,19 @@ export async function startControl(config: ControlConfig) {
   const cluster = createClusterAdmin(config.clusterAdminUrl);
   const blobs = createBlobs({
     endpoint: config.s3Endpoint,
+    region: config.s3Region,
     bucket: config.s3Bucket,
-    credentials: { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey },
+    credentials:
+      config.s3AccessKeyId && config.s3SecretAccessKey
+        ? { accessKeyId: config.s3AccessKeyId, secretAccessKey: config.s3SecretAccessKey }
+        : undefined,
   });
   await blobs.ensureBucket();
   const pools = new TenantPools({
     async resolveUrl(tenantId) {
       const tenant = await getTenant(control, tenantId);
       if (!tenant) throw new Error(`tenant ${tenantId} does not exist`);
-      return tenantDbUrl(tenant, config.tenantDbSecret);
+      return tenantDbUrl(tenant, config.tenantDbSecret, config.tenantDbSslmode);
     },
   });
   const deps: ControlDeps = {
@@ -41,6 +45,7 @@ export async function startControl(config: ControlConfig) {
       clusterHost: config.clusterHost,
       clusterPort: config.clusterPort,
       tenantDbSecret: config.tenantDbSecret,
+      tenantDbSslmode: config.tenantDbSslmode,
       templateDatabase: config.templateDatabase,
       exportDir: config.exportDir,
       pgDumpPath: config.pgDumpPath,

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant infra aws-push
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -48,3 +48,11 @@ e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes 
 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, and a 200-tenant load run (KERBY_LOAD_TENANTS=n)
 	node scripts/multitenant.ts
+
+infra: ## Format-check and validate the Terraform in infra/aws (needs terraform; no AWS credentials)
+	terraform -chdir=infra/aws fmt -check -recursive
+	terraform -chdir=infra/aws init -backend=false -input=false >/dev/null
+	terraform -chdir=infra/aws validate
+
+aws-push: ## Build linux/amd64 images and push them to ECR (AWS_REGION=..., clean git tree)
+	./scripts/aws-push.sh

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   type ClosableControlDb,
   type ClosableTenantDb,
+  createClusterAdmin,
   createControlDb,
   createTenantDb,
   migrate,
@@ -233,6 +234,71 @@ describe("TenantPools", () => {
         (await pools.use(id, (db) => db.query("select count(*)::int as n from fanned"))).rows,
       ).toEqual([{ n: 0 }]);
     }
+  });
+});
+
+describe("ClusterAdmin as a non-superuser (RDS rds_superuser)", () => {
+  it("provisions a database owned by a restricted role without superuser rights", async () => {
+    const root = createControlDb(adminUrl(), { max: 1 });
+    const suffix = Math.random().toString(16).slice(2, 10);
+    const admin = `adm_${suffix}`;
+    await root.query(`create role ${admin} login createdb createrole password 'pw'`);
+    cleanups.push(async () => {
+      await root.query(`drop role if exists ${admin}`);
+      await root.close();
+    });
+    const url = new URL(adminUrl());
+    url.username = admin;
+    url.password = "pw";
+    const cluster = createClusterAdmin(url.toString());
+    cleanups.push(() => cluster.close());
+
+    // A template the admin owns, as the control service makes it.
+    const template = `tpl_${suffix}`;
+    await cluster.createDatabase(template);
+    const inTemplate = createTenantDb(cluster.urlFor(template), { max: 1 });
+    await inTemplate.query("create table things (id int)");
+    await inTemplate.close();
+
+    const role = `r_${suffix}`;
+    const name = `t_${suffix}`;
+    await cluster.createRole(role, "tenant-pw");
+    await cluster.createDatabase(name, { template, owner: role });
+    await cluster.reassignOwned(name, role);
+    await cluster.restrictDatabase(name, role);
+    cleanups.push(async () => {
+      await cluster.dropDatabase(name);
+      await cluster.dropRole(role);
+      await cluster.dropDatabase(template);
+    });
+
+    const tenantUrl = new URL(adminUrl());
+    tenantUrl.username = role;
+    tenantUrl.password = "tenant-pw";
+    tenantUrl.pathname = `/${name}`;
+    const own = createTenantDb(tenantUrl.toString(), { max: 1 });
+    cleanups.push(() => own.close());
+    await own.query("insert into things values (1)");
+    expect(
+      (
+        await own.query<{ tableowner: string }>(
+          "select tableowner from pg_tables where tablename = 'things'",
+        )
+      ).rows,
+    ).toEqual([{ tableowner: role }]);
+    // and nobody else can get in
+    expect(await cluster.databaseExists(name)).toBe(true);
+    const outsider = `o_${suffix}`;
+    await root.query(`create role ${outsider} login password 'pw'`);
+    cleanups.push(async () => {
+      await root.query(`drop role if exists ${outsider}`);
+    });
+    const outsiderUrl = new URL(tenantUrl);
+    outsiderUrl.username = outsider;
+    outsiderUrl.password = "pw";
+    const intruder = createTenantDb(outsiderUrl.toString(), { max: 1 });
+    cleanups.push(() => intruder.close());
+    await expect(intruder.query("select 1")).rejects.toThrow(/permission denied|not allowed/);
   });
 });
 
