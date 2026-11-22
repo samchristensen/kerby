@@ -20,7 +20,7 @@ import { pipeline, Readable, Transform, type TransformCallback } from "node:stre
 import zlib from "node:zlib";
 
 /** Why the guard refused or ended an exchange. */
-export type EgressRefusal =
+type EgressRefusal =
   | "invalid_url"
   | "scheme"
   | "credentials"
@@ -34,6 +34,9 @@ export type EgressRefusal =
   | "response_too_large"
   | "network";
 
+/**
+ * @public Egress has no caller yet (ADR 0010); callers tell refusals apart with `instanceof EgressError` and `reason`.
+ */
 export class EgressError extends Error {
   override name = "EgressError";
   readonly reason: EgressRefusal;
@@ -78,9 +81,9 @@ export const BLOCKED_RANGES: readonly BlockedRange[] = [
   { range: "ff00::/8", why: "multicast" },
 ];
 
-export type ResolvedAddress = { readonly address: string; readonly family: 4 | 6 };
+type ResolvedAddress = { readonly address: string; readonly family: 4 | 6 };
 /** Every address of a hostname. The default asks the system resolver (`dns.lookup`, all addresses). */
-export type Resolver = (hostname: string) => Promise<readonly ResolvedAddress[]>;
+type Resolver = (hostname: string) => Promise<readonly ResolvedAddress[]>;
 
 export type EgressOptions = {
   /** Default `BLOCKED_RANGES`. Tests narrow it so a loopback server can answer. */

@@ -60,7 +60,7 @@ export class TenantNameTakenError extends Error {
 }
 
 /** Database and role names derive from the tenant id: nothing to look up, nothing a request can choose. */
-export function tenantDatabaseNames(tenantId: string): { dbName: string; dbRole: string } {
+function tenantDatabaseNames(tenantId: string): { dbName: string; dbRole: string } {
   const hex = tenantId.replaceAll("-", "");
   return { dbName: `t_${hex}`, dbRole: `r_${hex}` };
 }

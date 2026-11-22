@@ -8,9 +8,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { TestProject } from "vitest/node";
 
 export const POSTGRES_IMAGE = "postgres:18-alpine";
-export const RUSTFS_IMAGE = "rustfs/rustfs:1.0.6";
+const RUSTFS_IMAGE = "rustfs/rustfs:1.0.6";
 
-export type TestContainers = {
+type TestContainers = {
   /** Superuser URL of a Postgres server; tests create their own databases on it. */
   postgresUrl: string;
   s3: { endpoint: string; accessKeyId: string; secretAccessKey: string };
@@ -88,6 +88,7 @@ export function removeStale(alive: (pid: number) => boolean = isAlive): void {
   if (stale.length > 0) docker("rm", "-f", ...stale);
 }
 
+/** @public vitest.config.ts names this file as `globalSetup`; vitest calls its default export. */
 export default async function setup(project: TestProject): Promise<() => void> {
   removeStale();
   const suffix = randomBytes(4).toString("hex");

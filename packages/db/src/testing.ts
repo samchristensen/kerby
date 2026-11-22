@@ -16,7 +16,7 @@ export function adminUrl(): string {
   return inject("containers").postgresUrl;
 }
 
-export function urlForDatabase(name: string): string {
+function urlForDatabase(name: string): string {
   const url = new URL(adminUrl());
   url.pathname = `/${name}`;
   return url.toString();

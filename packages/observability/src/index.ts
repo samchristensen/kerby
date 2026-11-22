@@ -8,7 +8,7 @@ export type Level = "debug" | "info" | "warn" | "error";
 const ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
 /** Scalars only: an object or array is how message bodies sneak into logs. */
-export type Scalar = string | number | boolean | null | undefined;
+type Scalar = string | number | boolean | null | undefined;
 export type LogFields = {
   [key: string]: Scalar;
   // The usual carriers of tenant content are type errors here and dropped at runtime.
@@ -54,7 +54,7 @@ export function withTenant<T>(tenantId: string, fn: () => T): T {
   return tenants.run(tenantId, fn);
 }
 
-export function currentTenantId(): string | null {
+function currentTenantId(): string | null {
   return tenants.getStore() ?? null;
 }
 
@@ -116,7 +116,7 @@ export type AlertOptions = {
 };
 
 /** What one post says; Slack and Discord get it as one line of text. */
-export type AlertMessage = {
+type AlertMessage = {
   alert: string;
   service: string;
   environment: string | null;

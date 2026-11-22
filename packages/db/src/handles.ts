@@ -6,17 +6,17 @@ import { isConnectionError, withConnectRetry } from "./connect-retry.ts";
 import { credentialsFor } from "./credentials.ts";
 import { type ListenOptions, listen, type Subscription } from "./listen.ts";
 
-export type Row = Record<string, unknown>;
-export type QueryResult<R extends Row> = { rows: R[]; rowCount: number };
+type Row = Record<string, unknown>;
+type QueryResult<R extends Row> = { rows: R[]; rowCount: number };
 
 declare const plane: unique symbol;
 
-export interface Queryable {
+interface Queryable {
   query<R extends Row = Row>(text: string, params?: readonly unknown[]): Promise<QueryResult<R>>;
 }
 
 /** Inside `ControlDb.transaction`. */
-export interface ControlTx extends Queryable {
+interface ControlTx extends Queryable {
   readonly [plane]: "control";
 }
 /** Inside `TenantDb.transaction`. */
@@ -28,7 +28,7 @@ export interface TenantTx extends Queryable {
  * LISTEN on a channel. Every subscription to one database in this process shares one dedicated connection, which
  * reconnects on failure. Payloads are what `pg_notify` sent.
  */
-export interface Listens {
+interface Listens {
   listen(
     channel: string,
     onNotify: (payload: string) => void,

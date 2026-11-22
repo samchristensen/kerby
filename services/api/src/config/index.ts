@@ -1,7 +1,7 @@
 import { loadConfig } from "@kerby/config";
 import { z } from "zod";
 
-export const apiConfigSchema = z.object({
+const apiConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
   port: z.coerce.number().int().min(0).default(8080),
   controlDatabaseUrl: z.string().min(1),

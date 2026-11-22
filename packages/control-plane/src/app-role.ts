@@ -1,7 +1,7 @@
 import type { ControlDb } from "@kerby/db";
 
 /** The limited role api and worker use on the control database (migration 0002). */
-export const APP_ROLE = "kerby_app";
+const APP_ROLE = "kerby_app";
 
 /** Let the app role log in with `password`. Idempotent; run by the control service at startup. */
 export async function setAppRolePassword(db: ControlDb, password: string): Promise<void> {

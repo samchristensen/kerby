@@ -21,15 +21,9 @@ export const LimitsSchema = z.object({
 });
 export type Limits = z.infer<typeof LimitsSchema>;
 
-export const TenantStatusSchema = z.enum([
-  "provisioning",
-  "active",
-  "suspended",
-  "deleting",
-  "deleted",
-]);
+const TenantStatusSchema = z.enum(["provisioning", "active", "suspended", "deleting", "deleted"]);
 
-export const TenantSchema = z.object({
+const TenantSchema = z.object({
   id: z.uuid(),
   name: z.string(),
   status: TenantStatusSchema,
@@ -41,7 +35,7 @@ export const TenantSchema = z.object({
 });
 export type Tenant = z.infer<typeof TenantSchema>;
 
-export const ApiKeySchema = z.object({
+const ApiKeySchema = z.object({
   id: z.string(),
   label: z.string(),
   createdAt: z.iso.datetime(),
@@ -59,10 +53,9 @@ export const CreateTenantRequestSchema = z.object({
   plan: z.string().min(1).optional(),
   limits: LimitsSchema.optional(),
 });
-export type CreateTenantRequest = z.infer<typeof CreateTenantRequestSchema>;
 
 /** The key's secret is returned once, here, and never again. */
-export const CreateTenantResponseSchema = z.object({
+const CreateTenantResponseSchema = z.object({
   tenant: TenantSchema,
   apiKey: ApiKeySchema,
   secret: z.string(),
@@ -70,18 +63,17 @@ export const CreateTenantResponseSchema = z.object({
 export type CreateTenantResponse = z.infer<typeof CreateTenantResponseSchema>;
 
 export const CreateKeyRequestSchema = z.object({ label: z.string().max(100).optional() });
-export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 
-export const CreateKeyResponseSchema = z.object({ apiKey: ApiKeySchema, secret: z.string() });
+const CreateKeyResponseSchema = z.object({ apiKey: ApiKeySchema, secret: z.string() });
 export type CreateKeyResponse = z.infer<typeof CreateKeyResponseSchema>;
 
-export const ListKeysResponseSchema = z.object({ keys: z.array(ApiKeySchema) });
+const ListKeysResponseSchema = z.object({ keys: z.array(ApiKeySchema) });
 export type ListKeysResponse = z.infer<typeof ListKeysResponseSchema>;
 
-export const ListTenantsResponseSchema = z.object({ tenants: z.array(TenantSchema) });
+const ListTenantsResponseSchema = z.object({ tenants: z.array(TenantSchema) });
 export type ListTenantsResponse = z.infer<typeof ListTenantsResponseSchema>;
 
-export const ExportResponseSchema = z.object({
+const ExportResponseSchema = z.object({
   /** Downloads a `pg_dump` custom-format file of the tenant's database, without credentials, until `expiresAt`. */
   dumpUrl: z.url(),
   /** Downloads the tenant's object keys and sizes, as JSON, until `expiresAt`. */
@@ -95,7 +87,7 @@ export type ExportResponse = z.infer<typeof ExportResponseSchema>;
 const BackupFailureSchema = z.object({ tenantId: z.uuid(), error: z.string() });
 
 /** One run of the bucket backup: changed objects of every live tenant copied, deleted tenants' copies removed. */
-export const BackupResponseSchema = z.object({
+const BackupResponseSchema = z.object({
   tenants: z.number().int().nonnegative(),
   copied: z.number().int().nonnegative(),
   bytes: z.number().int().nonnegative(),
@@ -109,10 +101,9 @@ export type BackupResponse = z.infer<typeof BackupResponseSchema>;
 
 /** Restore one tenant's objects from the backup, or every live tenant's when `tenantId` is absent. */
 export const RestoreRequestSchema = z.object({ tenantId: z.uuid().optional() });
-export type RestoreRequest = z.infer<typeof RestoreRequestSchema>;
 
 /** Only objects missing from the primary bucket are copied back; nothing there is overwritten. */
-export const RestoreResponseSchema = z.object({
+const RestoreResponseSchema = z.object({
   tenants: z.number().int().nonnegative(),
   restored: z.number().int().nonnegative(),
   bytes: z.number().int().nonnegative(),

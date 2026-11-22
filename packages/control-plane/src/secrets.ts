@@ -14,7 +14,7 @@ export class ModelKeyLimitError extends Error {
 }
 
 /** A provider id as Kerby model ids spell it (`anthropic` in `anthropic/claude-...`). */
-export const isProviderId = (value: string): boolean => PROVIDER.test(value);
+const isProviderId = (value: string): boolean => PROVIDER.test(value);
 
 function secretName(provider: string): string {
   if (!isProviderId(provider)) throw new Error(`"${provider}" is not a provider id (a-z, 0-9, -)`);

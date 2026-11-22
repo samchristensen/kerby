@@ -6,8 +6,8 @@ import { join } from "node:path";
 /** Control-plane migrations, for `migrate(controlDb, [controlMigrationsDir])`. */
 export const controlMigrationsDir = join(import.meta.dirname, "..", "migrations", "control");
 
-export { APP_ROLE, restrictControlDatabase, setAppRolePassword } from "./app-role.ts";
-export { type AuditDetail, audit } from "./audit.ts";
+export { restrictControlDatabase, setAppRolePassword } from "./app-role.ts";
+export { audit } from "./audit.ts";
 export {
   listTenantsWithoutDbPassword,
   newTenantDbPassword,
@@ -19,7 +19,6 @@ export {
 } from "./db-credentials.ts";
 export {
   type ApiKeyRecord,
-  type Authenticated,
   authenticateApiKey,
   type CreatedKey,
   createApiKey,
@@ -30,7 +29,6 @@ export {
 export {
   deleteModelKey,
   hasModelKey,
-  isProviderId,
   listModelKeys,
   MAX_MODEL_KEYS_PER_TENANT,
   ModelKeyLimitError,
@@ -42,13 +40,9 @@ export {
   getTenant,
   insertTenant,
   listTenants,
-  type NewTenant,
   setSchemaVersion,
   setTenantStatus,
   TenantNameTakenError,
   type TenantRecord,
-  type TenantStatus,
-  tenantDatabaseNames,
-  tenantDbUrl,
 } from "./tenants.ts";
-export { recordUsage, type UsageEntry } from "./usage.ts";
+export { recordUsage } from "./usage.ts";

@@ -26,7 +26,7 @@ export type BucketConfig = {
   region?: string | undefined;
 };
 
-export type StoredObject = { key: string; size: number; etag: string };
+type StoredObject = { key: string; size: number; etag: string };
 
 const TENANT_ID = /^[A-Za-z0-9-]{1,64}$/;
 

@@ -27,7 +27,7 @@ import {
  * same key (a retry overwrites itself); different content is a different key, so a stale writer can never replace
  * the bytes an index row already points at.
  */
-export function messageKey(conversationId: string, seq: number, sha256: string): string {
+function messageKey(conversationId: string, seq: number, sha256: string): string {
   return `conversations/${conversationId}/messages/${String(seq).padStart(8, "0")}-${sha256.slice(0, 16)}.json`;
 }
 
@@ -74,7 +74,7 @@ const MAX_POST_ATTEMPTS = 5;
  * What one conversation may hold. Reads are paged and a turn reads its history within a byte budget, so these bound
  * storage and the index rows a rehydrate scans, not memory; a tenant that reaches them starts a new conversation.
  */
-export const MAX_CONVERSATION_MESSAGES = 2000;
+const MAX_CONVERSATION_MESSAGES = 2000;
 export const MAX_CONVERSATION_BYTES = 64 * 1024 * 1024;
 
 /**

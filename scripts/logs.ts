@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
-export const SERVICES = ["control", "api", "worker"] as const;
+const SERVICES = ["control", "api", "worker"] as const;
 const LEVELS = ["debug", "info", "warn", "error"] as const;
 type Level = (typeof LEVELS)[number];
 
@@ -62,7 +62,7 @@ export function parseLine(raw: string, service: string): LogLine | undefined {
   };
 }
 
-export function matches(line: LogLine, filter: LogFilter): boolean {
+function matches(line: LogLine, filter: LogFilter): boolean {
   if (filter.tenantId !== undefined && line.tenantId !== filter.tenantId) return false;
   if (filter.service !== undefined && line.service !== filter.service) return false;
   if (filter.level !== undefined) {

@@ -1,7 +1,7 @@
 // Task names, queues and parameter types: the one place a background job is declared (ADR 0002).
 // Params are small JSON references (ids), never message bodies: Absurd's retention may delete them.
 
-export const QUEUES = ["turns", "system"] as const;
+const QUEUES = ["turns", "system"] as const;
 export type Queue = (typeof QUEUES)[number];
 
 /** Each task and the queue it runs on. */
@@ -15,8 +15,6 @@ export type TaskParams = {
   /** Continue a conversation after its message `seq` (the user message that caused this turn). */
   "run-turn": { conversationId: string; seq: number };
 };
-
-export const taskNames = Object.keys(TASKS) as TaskName[];
 
 /** Retry for infrastructure failures (not for refused requests, which end the run normally). */
 export const DEFAULT_MAX_ATTEMPTS = 5;

@@ -31,7 +31,7 @@ export type TaskHandlers = {
   [N in TaskName]: (params: TaskParams[N], run: RunContext) => Promise<void>;
 };
 
-export type ClaimedRun = ClaimedTask;
+type ClaimedRun = ClaimedTask;
 
 export type ExecutorOptions = {
   /** Identifies this worker in Absurd's run rows. */
