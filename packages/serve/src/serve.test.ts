@@ -1,5 +1,7 @@
 import { connect } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -11,6 +13,10 @@ import {
   type Server,
   serve,
 } from "./index.ts";
+
+// A collection mid-stream is what lost the abort in CI; force one where it matters.
+setFlagsFromString("--expose-gc");
+const gc = runInNewContext("gc") as () => void;
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -119,6 +125,7 @@ describe("serve", () => {
     const reader = response.body?.getReader();
     const chunk = await reader?.read();
     expect(new TextDecoder().decode(chunk?.value)).toBe("first\n");
+    gc();
     controller.abort();
     await aborted.promise;
   });

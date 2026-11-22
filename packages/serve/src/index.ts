@@ -207,11 +207,18 @@ export function serve(
   const sockets = new Set<Socket>();
   const server = createServer((incoming, outgoing) => {
     const aborted = new AbortController();
-    outgoing.on("close", () => aborted.abort());
+    // A Request's `signal` follows `aborted` only while the Request is reachable (undici links them through a WeakRef).
+    // A streaming handler often keeps only a listener on that signal, so hold the Request until the exchange ends.
+    let request: Request | undefined;
+    outgoing.on("close", () => {
+      aborted.abort();
+      request = undefined;
+    });
     Promise.resolve()
       .then(() => {
         try {
-          return handler(toRequest(incoming, aborted.signal));
+          request = toRequest(incoming, aborted.signal);
+          return handler(request);
         } catch {
           // A request Fetch cannot represent: refuse it, and stay up.
           return json(400, { error: { code: "invalid_request", message: "unsupported request" } });
