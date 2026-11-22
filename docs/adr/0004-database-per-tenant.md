@@ -30,7 +30,9 @@ operations on one database.
 - **The worker serves many databases.** It keeps a tenant scheduler: it learns of work from a `NOTIFY` on the control
   database (sent by the api after it spawns a turn in the tenant's database, at-least-once, with a slow sweep as the
   backstop), then claims Absurd tasks from that tenant's database. Because the worker chooses whom to claim for,
-  per-tenant concurrency and fair sharing are enforced there, which Absurd itself does not do.
+  per-tenant concurrency and fair sharing are enforced there, which Absurd itself does not do. The limit holds across
+  workers: each claim takes an advisory lock in the tenant's database, counts the runs holding a live lease, and
+  claims at most the difference, in the same transaction.
 - **Object storage.** Keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call. A tenant
   may be assigned its own bucket in its row. The blob index lives in the tenant database.
 - **Secrets.** Tenant model keys and tool credentials are envelope-encrypted in the control plane, with a per-tenant data

@@ -1,6 +1,7 @@
 // The tenant scheduler (ADR 0004): the worker learns of work from a NOTIFY on the control database (plus a periodic
 // sweep as the backstop), and claims from a tenant's own database only while that tenant is under its concurrency
-// limit. A tenant at its limit costs nothing (no query), so a noisy tenant cannot delay another.
+// limit, counted across every worker in the tenant's database (`TenantExecutor.claim`). A tenant at its limit on
+// this worker alone costs nothing (no query), so a noisy tenant cannot delay another.
 import { getTenant, listTenants, type TenantRecord } from "@kerby/control-plane";
 import type { TenantContext } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
@@ -47,8 +48,9 @@ export function createScheduler(
     if (stopping) return;
     const tenant = known ?? (await getTenant(control, tenantId));
     if (tenant?.status !== "active") return;
-    const free = limitOf(tenant, settings.defaultMaxConcurrentTurns) - (running.get(tenantId) ?? 0);
-    if (free <= 0) return;
+    const limit = limitOf(tenant, settings.defaultMaxConcurrentTurns);
+    // Fast path: this worker alone is at the limit, so all workers together are too.
+    if ((running.get(tenantId) ?? 0) >= limit) return;
 
     const lease = await pools.acquire(tenantId);
     let remaining = 0;
@@ -61,7 +63,7 @@ export function createScheduler(
           ? {}
           : { heartbeatEveryMs: settings.heartbeatEveryMs }),
       });
-      const tasks = await executor.claim(free);
+      const tasks = await executor.claim(limit);
       remaining = tasks.length;
       for (const task of tasks) {
         running.set(tenantId, (running.get(tenantId) ?? 0) + 1);

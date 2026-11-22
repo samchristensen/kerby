@@ -126,7 +126,9 @@ flowchart LR
 ```
 
 1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` (a periodic sweep catches missed ones) and
-   claims from that tenant's database only while the tenant is under its concurrency limit.
+   claims from that tenant's database only while the tenant is under its concurrency limit, counted across every
+   worker: the claim runs in a tenant-database transaction holding an advisory lock, counts the turns running there
+   under a live lease and claims at most the difference. A worker already at the limit by itself does not ask.
 2. **Rehydrate.** The task reads the conversation's messages from the tenant's index (bodies from S3) and starts a
    fresh in-memory harness with them as `AgentRun.history`. Workers hold no state, so any worker takes any turn. A tool
    call in the history without a persisted result is resolved first through `executeTool` (a cached step), never left to the harness.
