@@ -119,7 +119,7 @@ flowchart LR
 
 ## D. See failures
 
-- [ ] **D1 Queryable logs** ("M3 asks that `make test` run against the real stack"). M.
+- [x] **D1 Queryable logs** ("M3 asks that `make test` run against the real stack"). M.
   Decision: `make test` stays on disposable containers; `make e2e` and `make multitenant` are the real-stack runs (log in
   plan 0001 and tick its M3 item). No traces until a profile needs them.
   Fix: `scripts/logs.ts` (`make logs-query`) reads JSON lines from `docker compose logs`, or from `railway logs` for
@@ -245,3 +245,8 @@ No work until the trigger; the debt line stays and names it.
   `railway postgres ha convert`); the admin stays a superuser, so the non-superuser provisioning path goes; nothing
   sleeps. C6: the orphan bucket `modular-safe-wx5G` has no instance in any environment; `railway bucket delete` refuses
   it and an environment patch marking it deleted did not remove it: delete it in the dashboard.
+- 2026-11-22 D1+D2 (PR #5): `make logs-query` filters local or Railway JSON logs (Railway's `message`/`timestamp` mapped
+  back) by tenant, level, message, service and time. `alert(kind, fields)` logs and posts to `ALERT_WEBHOOK_URL`
+  (Slack `{text}`, Discord `{content}`, JSON otherwise; one post per kind per 5 minutes per process; redacted; never
+  throws) for turn failed for good, lease lost, provisioning failed, migration fan-out failed; smoke posted provisioning
+  and fan-out alerts from a local stack. D2 stays open until a real channel receives one.

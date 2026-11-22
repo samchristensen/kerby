@@ -51,7 +51,9 @@ already do.
   nothing sleeps ([ADR 0012](0012-recovery-and-availability.md)).
 - One Postgres instance on one volume: no replica, no multi-zone storage; nightly volume backups and the HA trigger are
   in [ADR 0012](0012-recovery-and-availability.md).
-- No alarms or dashboards beyond Railway's logs and metrics (tech debt). Logs are structured JSON with tenant ids and no content.
+- Alerts are Railway's notifications, one project webhook and monitors, plus Kerby's own failures posted to
+  `ALERT_WEBHOOK_URL`, all into one channel (docs/deploy.md#alerts). No dashboards beyond Railway's metrics. Logs are
+  structured JSON with tenant ids and no content (`make logs-query`).
 - Whoever holds the Railway login can read every variable, so every secret. There is no least-privilege agent role yet
   (tech debt): a project token (`RAILWAY_TOKEN`) is the starting point.
 - Tenant exports are written to the control container's disk, which a redeploy clears (tech debt, as before).

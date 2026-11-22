@@ -4,7 +4,7 @@ import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
 import { getTenant, readModelKey, tenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
-import { log } from "@kerby/observability";
+import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
   createFakeModels,
   createPiDurableRuntime,
@@ -33,6 +33,11 @@ export async function startWorker(config: WorkerConfig): Promise<{
   deps: WorkerDeps;
   close(): Promise<void>;
 }> {
+  configureAlerts({
+    service: "worker",
+    environment: config.railwayEnvironmentName,
+    webhookUrl: config.alertWebhookUrl,
+  });
   const control = createControlDb(config.controlDatabaseUrl);
   const blobs = createBlobs({
     endpoint: config.s3Endpoint,
@@ -85,6 +90,7 @@ export async function startWorker(config: WorkerConfig): Promise<{
       await health.close();
       await pools.close();
       await control.close();
+      await flushAlerts();
     },
   };
 }

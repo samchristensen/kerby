@@ -13,7 +13,7 @@ import {
 } from "@kerby/control-plane";
 import { tenantMigrationDirs } from "@kerby/conversations";
 import { migrate, readMigrations } from "@kerby/db";
-import { errorFields, log, withTenant } from "@kerby/observability";
+import { alert, errorFields, withTenant } from "@kerby/observability";
 import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
 
 const ACTOR = "operator";
@@ -77,9 +77,7 @@ export async function provisionTenant(
     });
     return { tenant: active ?? tenant, key };
   } catch (error) {
-    withTenant(tenant.id, () =>
-      log("error", "provisioning failed; removing what was created", errorFields(error)),
-    );
+    withTenant(tenant.id, () => alert("provisioning failed", errorFields(error)));
     await pools.evict(tenant.id);
     await cluster.dropDatabase(tenant.dbName).catch(() => {});
     await cluster.dropRole(tenant.dbRole).catch(() => {});

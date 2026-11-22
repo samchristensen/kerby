@@ -8,7 +8,7 @@ import {
   tenantDbUrl,
 } from "@kerby/control-plane";
 import { createClusterAdmin, createControlDb, migrate, TenantPools } from "@kerby/db";
-import { log } from "@kerby/observability";
+import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { serve } from "@kerby/serve";
 import { type ControlConfig, loadControlConfig } from "./config/index.ts";
 import { createControlApp } from "./runtime/http.ts";
@@ -21,6 +21,11 @@ export type { ControlConfig };
 
 /** Build the adapters for `config`, prepare the databases, and listen. */
 export async function startControl(config: ControlConfig) {
+  configureAlerts({
+    service: "control",
+    environment: config.railwayEnvironmentName,
+    webhookUrl: config.alertWebhookUrl,
+  });
   const control = createControlDb(config.controlDatabaseUrl);
   await migrate(control, [controlMigrationsDir]);
   if (config.appDatabasePassword) await setAppRolePassword(control, config.appDatabasePassword);
@@ -70,6 +75,7 @@ export async function startControl(config: ControlConfig) {
       await pools.close();
       await cluster.close();
       await control.close();
+      await flushAlerts();
     },
   };
 }

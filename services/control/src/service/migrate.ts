@@ -1,6 +1,7 @@
 import { audit, listTenants, setSchemaVersion } from "@kerby/control-plane";
 import { tenantMigrationDirs } from "@kerby/conversations";
 import { migrateTenants } from "@kerby/db";
+import { alert, errorFields, log, withTenant } from "@kerby/observability";
 import type { ControlDeps } from "../types/index.ts";
 import { ensureTemplate } from "./template.ts";
 import { currentSchemaVersion } from "./tenants.ts";
@@ -32,6 +33,17 @@ export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun
     action: "tenants.migrate",
     detail: { migrated: result.migrated.length, failed: result.failed.length },
   });
+  for (const { tenantId, error } of result.failed) {
+    withTenant(tenantId, () => log("error", "tenant migration failed", errorFields(error)));
+  }
+  if (result.failed.length > 0) {
+    // One alert per run: the per-tenant lines above say which tenants and why (`make logs-query MSG=...`).
+    alert("migration fan-out failed", {
+      failed: result.failed.length,
+      migrated: result.migrated.length,
+      firstFailedTenant: result.failed[0]?.tenantId,
+    });
+  }
   return {
     migrated: result.migrated.length,
     failed: result.failed.map((f) => ({ tenantId: f.tenantId, error: f.error.message })),

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -45,6 +45,12 @@ psql: ## psql into the control database (DB=<name> for another, e.g. a tenant da
 
 logs: ## Follow the stack logs
 	docker compose logs -f --tail=100
+
+# ENV counts only when given on the command line: its default (production) is for the Railway targets below.
+logs-query: ## Filtered JSON log lines: TENANT= LEVEL=warn MSG= SERVICE= SINCE=30m UNTIL=; ENV=<name> reads Railway
+	@node scripts/logs.ts $(if $(TENANT),--tenant '$(TENANT)') $(if $(LEVEL),--level '$(LEVEL)') \
+	  $(if $(MSG),--msg '$(MSG)') $(if $(SERVICE),--service '$(SERVICE)') $(if $(SINCE),--since '$(SINCE)') \
+	  $(if $(UNTIL),--until '$(UNTIL)') $(if $(filter command line,$(origin ENV)),--env '$(ENV)')
 
 e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes elsewhere (KERBY_E2E_KEEP=1 keeps the stack)
 	node scripts/e2e.ts

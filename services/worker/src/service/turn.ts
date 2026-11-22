@@ -16,7 +16,7 @@ import {
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
-import { errorFields, log } from "@kerby/observability";
+import { alert, errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
 import { tenantTools } from "./tools.ts";
 
@@ -183,8 +183,9 @@ export async function runTurn(
         ? new Error(scrub(caught.message))
         : caught;
     if (error instanceof LeaseLostError) {
-      // Another worker owns this turn now; it will rehydrate from what is persisted. Write nothing more.
-      log("warn", "lease lost; abandoning the run", { taskId: run.taskId });
+      // Another worker owns this turn now; it will rehydrate from what is persisted. Write nothing more. An alert:
+      // the lease outlived its heartbeat, so this worker stalled or lost the database for a claim timeout.
+      alert("lease lost", { taskId: run.taskId });
       return;
     }
     if (error instanceof SeqConflictError) {
@@ -194,7 +195,7 @@ export async function runTurn(
     // The last attempt failing for good leaves a trace on the conversation, unless this run is already superseded.
     const finalAttempt = run.maxAttempts !== null && run.attempt >= run.maxAttempts;
     if (finalAttempt && (await holdsRun(ctx.db, run).catch(() => false))) {
-      log("error", "turn failed for good", { attempt: run.attempt, ...errorFields(error) });
+      alert("turn failed for good", { attempt: run.attempt, ...errorFields(error) });
       await setLastError(
         ctx.db,
         conversationId,
