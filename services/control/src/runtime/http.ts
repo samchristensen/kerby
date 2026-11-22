@@ -10,6 +10,8 @@ import {
   type ExportResponse,
   type ListKeysResponse,
   type ListTenantsResponse,
+  ReissueExportRequestSchema,
+  type ReissueExportResponse,
   RestoreRequestSchema,
   type RestoreResponse,
   type Tenant,
@@ -26,7 +28,7 @@ import {
 } from "@kerby/serve";
 import { backupBuckets, restoreFromBackup } from "../service/backup.ts";
 import { rotateTenantDbPassword } from "../service/db-credentials.ts";
-import { exportTenant } from "../service/export.ts";
+import { exportTenant, reissueExportUrls } from "../service/export.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
 import {
@@ -159,6 +161,20 @@ export function createControlApp(deps: ControlDeps, operatorToken: string): Fetc
       authorized(async (_request, params) => {
         const exported = await exportTenant(deps, id(params));
         const response: ExportResponse = exported;
+        return json(200, response);
+      }),
+    ],
+    [
+      // New URLs for an export that exists, a deleted tenant's too (exports outlive the tenant by the retention).
+      "POST",
+      "/v1/operator/tenants/:id/export/reissue",
+      authorized(async (request, params) => {
+        const body = await readJson(request, ReissueExportRequestSchema);
+        const response: ReissueExportResponse = await reissueExportUrls(
+          deps,
+          id(params),
+          body.stamp,
+        );
         return json(200, response);
       }),
     ],

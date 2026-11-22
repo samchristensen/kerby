@@ -1,11 +1,12 @@
-// Messages: the body is a JSON object in S3 (deterministic key), the tenant's `messages` row is the index and the
-// order. Persist-before-act (ARCHITECTURE.md#durability): write the object, then the fenced index row.
-import { createHash } from "node:crypto";
+// Messages: the body is a JSON object in S3, the tenant's `messages` row is the index and the order. Persist-before-act
+// (ARCHITECTURE.md#durability): write the object, then the fenced index row.
+import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage, ContentPart } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { AgentMessageSchema } from "@kerby/contracts";
 import type { TenantContext, TenantQueryable } from "@kerby/db";
 import { holdsRun, type RunContext, spawnInTx } from "@kerby/durable";
+import { errorFields, log, withTenant } from "@kerby/observability";
 import {
   ConversationBusyError,
   ConversationFullError,
@@ -25,10 +26,12 @@ import {
 /**
  * The object key of a message: position and a prefix of the content hash. Identical content at a position is the
  * same key (a retry overwrites itself); different content is a different key, so a stale writer can never replace
- * the bytes an index row already points at.
+ * the bytes an index row already points at. A `unique` suffix makes the key this writer's alone: only then may it
+ * delete the blob again (a user post that fails after storing its body), because a key is one blob row.
  */
-function messageKey(conversationId: string, seq: number, sha256: string): string {
-  return `conversations/${conversationId}/messages/${String(seq).padStart(8, "0")}-${sha256.slice(0, 16)}.json`;
+function messageKey(conversationId: string, seq: number, sha256: string, unique?: string): string {
+  const suffix = unique === undefined ? "" : `-${unique}`;
+  return `conversations/${conversationId}/messages/${String(seq).padStart(8, "0")}-${sha256.slice(0, 16)}${suffix}.json`;
 }
 
 const encodeMessage = (message: AgentMessage): Uint8Array =>
@@ -40,16 +43,31 @@ async function putMessage(
   conversationId: string,
   seq: number,
   body: Uint8Array,
+  unique?: string,
 ): Promise<string> {
   const sha256 = createHash("sha256").update(body).digest("hex");
   const { blobId } = await blobs.put(ctx, {
     kind: "message",
-    key: messageKey(conversationId, seq, sha256),
+    key: messageKey(conversationId, seq, sha256, unique),
     body,
     mediaType: "application/json",
     conversationId,
   });
   return blobId;
+}
+
+/**
+ * Take back a user post's blob after the post failed, so a refused post leaves no row counting toward the quota and no
+ * object. A failure here is logged and not raised: the caller is about to surface the refusal, which matters more.
+ */
+async function discardBlob(ctx: TenantContext, blobs: Blobs, blobId: string): Promise<void> {
+  try {
+    await blobs.delete(ctx, blobId);
+  } catch (error) {
+    withTenant(ctx.tenantId, () =>
+      log("warn", "could not remove the blob of a refused post", errorFields(error)),
+    );
+  }
 }
 
 /** Bytes the tenant stores: the sum of its blob index, leaving out `exceptBlobId` (an object just written). */
@@ -116,44 +134,54 @@ export async function postUserMessage(
       [conversationId],
     );
     const predicted = rows[0]?.next ?? 1;
-    // The object goes first: its key needs the seq, which the transaction below re-checks under a row lock.
-    const blobId = await putMessage(ctx, blobs, conversationId, predicted, body);
-    const result = await ctx.db.transaction(async (tx) => {
-      const locked = await tx.query("select 1 from conversations where id = $1 for update", [
-        conversationId,
-      ]);
-      if (locked.rowCount === 0)
-        throw new ConversationNotFoundError(`conversation ${conversationId} not found`);
-      if (await isBusy(tx, conversationId)) {
-        throw new ConversationBusyError("a turn is already running for this conversation");
-      }
-      const next = await tx.query<{ next: number }>(
-        "select coalesce(max(seq), 0) + 1 as next from messages where conversation_id = $1",
-        [conversationId],
-      );
-      const seq = next.rows[0]?.next ?? 1;
-      if (seq !== predicted) return undefined; // another writer got in between: retry with the new position
-      // Again under the lock, with what other conversations stored meanwhile; the object just written is left out.
-      refuseOverQuota(await storedBytes(tx, blobId), body.byteLength, limits.storageBytes);
-      await tx.query("update conversations set last_error = null where id = $1", [conversationId]);
-      await tx.query(
-        "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
-        [conversationId, seq, blobId],
-      );
-      // Streams listening to this conversation see the message at once, and in order with the worker's events.
-      await tx.query("select pg_notify($1, $2)", [
-        conversationChannel(conversationId),
-        JSON.stringify({ persisted: seq }),
-      ]);
-      await spawnInTx(
-        tx,
-        "run-turn",
-        { conversationId, seq },
-        { idempotencyKey: `turn:${conversationId}:${seq}` },
-      );
-      return seq;
-    });
+    // The object goes first: its key needs the seq, which the transaction below re-checks under a row lock. The key is
+    // unique to this attempt, so the blob can be taken back if the post does not commit.
+    const blobId = await putMessage(ctx, blobs, conversationId, predicted, body, randomUUID());
+    const result = await ctx.db
+      .transaction(async (tx) => {
+        const locked = await tx.query("select 1 from conversations where id = $1 for update", [
+          conversationId,
+        ]);
+        if (locked.rowCount === 0)
+          throw new ConversationNotFoundError(`conversation ${conversationId} not found`);
+        if (await isBusy(tx, conversationId)) {
+          throw new ConversationBusyError("a turn is already running for this conversation");
+        }
+        const next = await tx.query<{ next: number }>(
+          "select coalesce(max(seq), 0) + 1 as next from messages where conversation_id = $1",
+          [conversationId],
+        );
+        const seq = next.rows[0]?.next ?? 1;
+        if (seq !== predicted) return undefined; // another writer got in between: retry with the new position
+        // Again under the lock, with what other conversations stored meanwhile; the object just written is left out.
+        refuseOverQuota(await storedBytes(tx, blobId), body.byteLength, limits.storageBytes);
+        await tx.query("update conversations set last_error = null where id = $1", [
+          conversationId,
+        ]);
+        await tx.query(
+          "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
+          [conversationId, seq, blobId],
+        );
+        // Streams listening to this conversation see the message at once, and in order with the worker's events.
+        await tx.query("select pg_notify($1, $2)", [
+          conversationChannel(conversationId),
+          JSON.stringify({ persisted: seq }),
+        ]);
+        await spawnInTx(
+          tx,
+          "run-turn",
+          { conversationId, seq },
+          { idempotencyKey: `turn:${conversationId}:${seq}` },
+        );
+        return seq;
+      })
+      .catch(async (error: unknown) => {
+        // Refused or failed after the put (a quota or busy race, a missing conversation): leave neither row nor object.
+        await discardBlob(ctx, blobs, blobId);
+        throw error;
+      });
     if (result !== undefined) return { seq: result };
+    await discardBlob(ctx, blobs, blobId); // another writer took the position: this object's key names the wrong one
   }
   throw new Error(
     `could not append to conversation ${conversationId}: too many concurrent writers`,

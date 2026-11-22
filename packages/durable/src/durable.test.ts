@@ -134,6 +134,22 @@ describe("TenantExecutor", () => {
     expect(await executors[1]?.claim(3)).toHaveLength(1);
   });
 
+  it("claims no more than the caller can run, and leaves the rest queued", async () => {
+    const db = await tenant();
+    const executor = createTenantExecutor(db, { "run-turn": async () => {} }, { workerId: "a" });
+    for (let i = 0; i < 4; i++) await spawn(db, `k${i}`);
+    expect(await executor.claim(10, 2)).toHaveLength(2);
+    const { rows } = await db.query<{ state: string; tasks: number }>(
+      "select state, count(*)::int as tasks from absurd.r_turns group by state order by state",
+    );
+    // The two unclaimed tasks have no run in `running`: they are still waiting for any worker.
+    expect(rows).toEqual([
+      { state: "pending", tasks: 2 },
+      { state: "running", tasks: 2 },
+    ]);
+    expect(await executor.claim(10, 0)).toEqual([]);
+  });
+
   it("fences the first run out once its lease lapsed and a second worker took over", async () => {
     const db = await tenant();
     await db.query("create table effects (run text not null)");

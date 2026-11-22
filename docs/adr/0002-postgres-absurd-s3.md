@@ -18,8 +18,10 @@ worker's SQLite file. A hosted multi-tenant service wants stateless workers and 
 - **Background work is an Absurd task**, declared in `packages/durable` (task names, param types, queues), the only
   importer of `absurd-sdk`. Schedules are an idempotent spawn keyed by task and slot (Absurd's cron pattern).
 - **Bytes and transcripts live in S3-compatible storage**; the tenant database keeps the index (`blobs`: key, kind,
-  size, hash, conversation). `packages/blobs` is the only importer of the S3 client. Object keys are deterministic and
-  tenant-prefixed, so a retried write overwrites itself; the index row is written after the object.
+  size, hash, conversation). `packages/blobs` is the only importer of the S3 client. Object keys are tenant-prefixed and
+  usually deterministic, so a retried write overwrites itself (a key is one index row; a writer that may need to take
+  its blob back, such as a user post, uses a key of its own); the index row is written after the object, and a delete
+  removes the row before the object, so a crash leaves an orphan object, never a row without bytes.
 - **Local development** runs Postgres, an S3-compatible container (RustFS, Apache-2.0, one container; pinned in
   Compose), `api`, `worker`, and `control`. Production uses any S3.
 

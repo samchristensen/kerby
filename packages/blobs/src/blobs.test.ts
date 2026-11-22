@@ -102,6 +102,32 @@ describe("blobs", () => {
     await expect(blobs.get(swapped, ref.blobId)).rejects.toBeInstanceOf(BlobNotFoundError);
   });
 
+  it("deletes one blob's row and object, and only through its own tenant", async () => {
+    const blobs = await createTestBlobs();
+    const bucket = await createTestBucket();
+    const a = await tenant();
+    const b = await tenant();
+    const put = (ctx: TenantContext, key: string) =>
+      blobs.put(ctx, { kind: "k", key, body: bytes(key), mediaType: "text/plain" });
+    const gone = await put(a, "gone");
+    const kept = await put(a, "kept");
+    const theirs = await put(b, "gone");
+
+    // Another tenant's id is not found, even through a context that pairs this tenant's id with that database.
+    await expect(blobs.delete(a, theirs.blobId)).rejects.toBeInstanceOf(BlobNotFoundError);
+    await expect(
+      blobs.delete({ tenantId: a.tenantId, db: b.db }, theirs.blobId),
+    ).rejects.toBeInstanceOf(BlobNotFoundError);
+    expect(text((await blobs.get(b, theirs.blobId)).body)).toBe("gone");
+
+    await blobs.delete(a, gone.blobId);
+    expect((await a.db.query("select id from blobs")).rows).toEqual([{ id: kept.blobId }]);
+    expect(await keys(bucket, tenantPrefix(a.tenantId))).toEqual([`t/${a.tenantId}/kept`]);
+    expect(await keys(bucket, tenantPrefix(b.tenantId))).toEqual([`t/${b.tenantId}/gone`]);
+    await expect(blobs.get(a, gone.blobId)).rejects.toBeInstanceOf(BlobNotFoundError);
+    await expect(blobs.delete(a, gone.blobId)).rejects.toBeInstanceOf(BlobNotFoundError);
+  });
+
   it("rejects keys that could leave the tenant's prefix", async () => {
     const blobs = await createTestBlobs();
     const a = await tenant();

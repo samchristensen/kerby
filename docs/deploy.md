@@ -80,6 +80,23 @@ while it runs.
 24 hours, each recorded in the audit log (`export.url_issued`). Hand them over, or fetch them yourself before they expire.
 Control deletes exports 30 days after they were made, a deleted tenant's too, at start and every night at 03:00 UTC.
 
+To get fresh URLs for an export that exists (the URLs last 24 hours; the export stays 30 days, a deleted tenant's too),
+without exporting again:
+
+```sh
+railway ssh --service control -- node --input-type=module -e '
+const r = await fetch("http://127.0.0.1:8081/v1/operator/tenants/<id>/export/reissue", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
+  body: JSON.stringify({}),  // {} picks the newest export; { stamp: "2026-11-22T03-00-00-000Z" } picks one
+});
+console.log(r.status, await r.text());
+'
+```
+
+It answers `{ dumpUrl, objectsUrl, expiresAt, exportedAt, ... }` and audits each URL (`tenant.export_reissue`,
+`export.url_issued`). 404 means the tenant has no export, or retention has deleted it.
+
 ## Bucket backup and restore
 
 Every night at 03:00 UTC one control instance (a Postgres advisory lock picks it) copies every active or suspended tenant's
@@ -87,6 +104,9 @@ objects that are new or changed from `kerby` to `kerby-backup` (`sjc`), and dele
 `deleted`. Nothing else is deleted from the backup, so an object lost in `kerby` stays there. Railway buckets have no
 versioning, replication or backups of their own. The run logs `bucket backup ran` with counts, bytes and its duration;
 `failed` above zero raises the `bucket backup failed` alert. Run it now with `POST /v1/operator/backup` (409 while another run holds the lock).
+Each run without a failing tenant is recorded in the audit log; control checks at start and every hour that one is less
+than 26 hours old (with none recorded, that the process is) and raises `bucket backup overdue` if not. A control that is
+down for the whole day cannot say so: it has no public domain, so only Railway's deployment webhook tells you.
 
 Restore copies back only objects missing from `kerby`, never overwriting one, so it is safe to repeat while tenants work:
 
@@ -130,8 +150,13 @@ CI needs two repository secrets, made once by a person:
   Railway uses it to pull the private images.
 
 Set both with `gh secret set <NAME> -R samchristensen/kerby`. Without them CI still publishes images and skips the release.
-The `uptime` workflow checks `GET /healthz` on the repository variable `KERBY_API_URL` every 15 minutes; `nightly` runs
-`make e2e` and `make multitenant` on a fresh Compose stack.
+The `uptime` workflow runs every 15 minutes from GitHub: `GET /healthz` on the repository variable `KERBY_API_URL`, then
+`GET /v1/conversations/<id>` as the `canary` tenant, which proves the key check, a tenant pool and the tenant database from
+outside. The canary tenant (limits: 1 turn, 60 requests a minute, 1 MiB) holds one empty conversation (variable
+`KERBY_CANARY_CONVERSATION_ID`) and a placeholder Anthropic key, because the api refuses a conversation without a model
+key for its provider; it never posts, so nothing calls Anthropic. Its API key is the repository secret `KERBY_CANARY_KEY`.
+To replace the key: create one for the tenant (`POST /v1/operator/tenants/<id>/keys`), `gh secret set KERBY_CANARY_KEY`,
+revoke the old one. `nightly` runs `make e2e` and `make multitenant` on a fresh Compose stack.
 
 ## Secrets
 
@@ -174,16 +199,19 @@ on purpose: a generated value there would be made again on every apply.
   (`ENV=pr-123`) gets its own volume: check `show max_connections` there and run the same two commands if it says 100.
 - **Connection budget.** Every process opens at most (upper bounds, from the code's defaults):
 
-  | Process | Connections                         | Terms                                                                                                                                                                                                                             |
-  | ------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | api     | `2 × max(maxPools, D + R) + D + 10` | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10 |
-  | worker  | `2 × max(maxPools, W) + 10 + 1`     | `W` tenants with a turn running here; the control pool; one `LISTEN` on the control database                                                                                                                                      |
-  | control | `2 × maxPools + 10 + 2 + 1`         | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                          |
+  | Process | Connections                             | Terms                                                                                                                                                                                                                                               |
+  | ------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | api     | `2 × max(maxPools, D + R) + D + 10`     | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                   |
+  | worker  | `2 × max(maxPools, min(C, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50); `W` tenants with a turn running or being claimed here, each holding its pool for as long as it does, so at most `C`; the control pool; one `LISTEN` on the control database |
+  | control | `2 × maxPools + 10 + 2 + 1`             | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                            |
 
   The sum over all processes, plus `superuser_reserved_connections` (3) and room for operators' `psql` (say 17), must
   stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 111 + control 113 + 20 = 454
   of 500. Each extra worker adds 111 and each extra api 210: raise `max_connections` by as much first (and
-  `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api.
+  `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api. The worker's 111 holds at
+  `MAX_RUNNING_TURNS` 50 however many tenants run at once: past the cap a worker claims nothing more and queues the
+  tenants that ask, longest-waiting first. Raising it to `C` above 50 costs 2 connections per extra tenant, up to
+  `2 × C + 11` for the worker: raise `max_connections` first.
 - **Measured** (`make multitenant`, stream saturation, 2026-11-22; two api processes, 200 tenants provisioned, local
   `max_connections` 500): an open stream costs its tenant 3 connections on that api process (the pool of 2 and the
   listener) however many streams it has: 46 tenants with 60 streams held 156 connections on one process, 60 tenants
@@ -242,7 +270,7 @@ Everything goes to one channel (a Slack or Discord channel the operator watches)
 4. **`ALERT_WEBHOOK_URL`** on `control`, `api` and `worker`, the same channel URL: Railway cannot alert on log lines, so
    Kerby posts its own failures. `alert(kind, fields)` (`@kerby/observability`) writes an error line with
    `alert: <kind>` and posts it: `turn failed for good` and `lease lost` (worker), `provisioning failed`,
-   `migration fan-out failed`, `bucket backup failed` and `export retention failed` (control). A Slack URL (`hooks.slack.com`) gets `{"text"}`, Discord
+   `migration fan-out failed`, `bucket backup failed`, `bucket backup overdue`, `bucket backup freshness check failed` and `export retention failed` (control). A Slack URL (`hooks.slack.com`) gets `{"text"}`, Discord
    (`discord.com/api/webhooks`) `{"content"}`, anything else the alert as JSON (`alert`, `service`, `environment`,
    `at`, `tenantId`, `fields`, `suppressed`). One post per kind per process per five minutes; the next post counts the
    ones held back, and every one is still a log line (`make logs-query ENV=production LEVEL=error`). Posts carry tenant
@@ -265,7 +293,7 @@ Locally, `KERBY_ALERT_WEBHOOK_URL=http://host.docker.internal:<port>/ make up` p
 
 Production (2026-11-22): a Slack app with an incoming webhook into the alerts channel; the same URL is
 `ALERT_WEBHOOK_URL` on all three services, the project webhook, and the repository secret `ALERT_WEBHOOK_URL` that the
-`uptime` workflow posts to on failure. Monitors are not set yet (tech debt).
+`uptime` workflow posts to on failure. The Monitors were added by hand in the dashboard (they are not in the IaC file).
 
 ## Do not do
 

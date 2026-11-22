@@ -7,6 +7,7 @@ import type {
   CreateKeyResponse,
   CreateTenantResponse,
   ExportResponse,
+  ReissueExportResponse,
   RestoreResponse,
   Tenant,
 } from "@kerby/contracts";
@@ -38,8 +39,8 @@ import { createSecretBox, generateBoxKey } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createControlApp } from "./index.ts";
-import { untilNext } from "./runtime/nightly.ts";
-import { BACKUP_LOCK_KEY } from "./service/backup.ts";
+import { startNightly, untilNext } from "./runtime/nightly.ts";
+import { BACKUP_LOCK_KEY, backupBuckets, checkBackupFreshness } from "./service/backup.ts";
 import { ensureTenantDbPasswords } from "./service/db-credentials.ts";
 import { deleteExpiredExports } from "./service/export.ts";
 import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
@@ -508,6 +509,134 @@ describe("export", () => {
       "2026-01-03T00-00-00-000Z.objects.json",
     ]);
   });
+
+  describe("reissue", () => {
+    const reissue = async (
+      call: (method: string, path: string, body?: unknown) => Promise<Response>,
+      id: string,
+      body: object = {},
+    ) => call("POST", `/v1/operator/tenants/${id}/export/reissue`, body);
+
+    it("gives new URLs to the same export, also after the tenant is deleted, and audits them", async () => {
+      const { call, provision, blobs, tenantDb, control } = await start();
+      const { tenant } = await provision("acme");
+      await blobs.put(await tenantDb(tenant.id), {
+        kind: "message",
+        key: "m/1.json",
+        body: new Uint8Array([1, 2, 3]),
+        mediaType: "application/octet-stream",
+      });
+      const exported = (await (
+        await call("POST", `/v1/operator/tenants/${tenant.id}/export`)
+      ).json()) as ExportResponse;
+
+      const download = async (url: string) => Buffer.from(await (await fetch(url)).arrayBuffer());
+      const again = async () => {
+        const response = await reissue(call, tenant.id);
+        expect(response.status).toBe(200);
+        return (await response.json()) as ReissueExportResponse;
+      };
+      const first = await again();
+      expect(first).toMatchObject({ objectPrefix: `t/${tenant.id}/` });
+      expect(first).not.toHaveProperty("objectCount");
+      expect(Date.parse(first.expiresAt) - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
+      expect(await download(first.dumpUrl)).toEqual(await download(exported.dumpUrl));
+      expect(await download(first.objectsUrl)).toEqual(await download(exported.objectsUrl));
+
+      expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
+      const afterDelete = await again();
+      expect(await download(afterDelete.dumpUrl)).toEqual(await download(exported.dumpUrl));
+      expect(await (await fetch(afterDelete.objectsUrl)).json()).toEqual([
+        { key: "m/1.json", size: 3 },
+      ]);
+
+      const { rows } = await control.db.query<{ action: string }>(
+        "select action from audit_log where tenant_id = $1 and action like '%export%' order by id",
+        [tenant.id],
+      );
+      expect(rows.map((r) => r.action)).toEqual([
+        "tenant.export",
+        "export.url_issued",
+        "export.url_issued",
+        "tenant.export_reissue",
+        "export.url_issued",
+        "export.url_issued",
+        "tenant.export_reissue",
+        "export.url_issued",
+        "export.url_issued",
+      ]);
+    });
+
+    it("takes the newest export, or the one named by its stamp", async () => {
+      const { call, provision, setNow } = await start();
+      const { tenant } = await provision("acme");
+      const older = Date.now() - 2 * 60 * 60 * 1000;
+      const newer = older + 60 * 60 * 1000;
+      for (const at of [older, newer]) {
+        setNow(new Date(at));
+        expect((await call("POST", `/v1/operator/tenants/${tenant.id}/export`)).status).toBe(200);
+      }
+      setNow(new Date());
+      const stamp = (at: number) => new Date(at).toISOString().replaceAll(/[:.]/g, "-");
+      const issued = async (body: object) =>
+        (await (await reissue(call, tenant.id, body)).json()) as ReissueExportResponse;
+
+      const latest = await issued({});
+      expect(latest.exportedAt).toBe(new Date(newer).toISOString());
+      expect(new URL(latest.dumpUrl).pathname).toContain(`/${tenant.id}/${stamp(newer)}.dump`);
+      const chosen = await issued({ stamp: stamp(older) });
+      expect(chosen.exportedAt).toBe(new Date(older).toISOString());
+      expect(new URL(chosen.objectsUrl).pathname).toContain(
+        `/${tenant.id}/${stamp(older)}.objects.json`,
+      );
+      expect((await reissue(call, tenant.id, { stamp: "2020-01-01T00-00-00-000Z" })).status).toBe(
+        404,
+      );
+      expect((await reissue(call, tenant.id, { stamp: "../x" })).status).toBe(400);
+    });
+
+    it("never reaches another tenant's keys, and 404s where there is no export", async () => {
+      const { call, provision, buckets } = await start();
+      const exporter = await provision("exporter");
+      const other = await provision("other");
+      expect((await call("POST", `/v1/operator/tenants/${exporter.tenant.id}/export`)).status).toBe(
+        200,
+      );
+
+      expect((await reissue(call, other.tenant.id)).status).toBe(404);
+      // A tenant id that is a prefix or a path, not a tenant id.
+      for (const id of [
+        exporter.tenant.id.slice(0, 8),
+        exporter.tenant.id.toUpperCase(),
+        `${exporter.tenant.id}/..`,
+        encodeURIComponent(`${other.tenant.id}/../${exporter.tenant.id}`),
+        "",
+      ]) {
+        expect((await reissue(call, id)).status, id).toBe(404);
+      }
+      // An upload cut short (a dump with no listing) is not an export.
+      await buckets.exports.write(
+        `${other.tenant.id}/2026-01-01T00-00-00-000Z.dump`,
+        new Uint8Array([1]),
+        "application/octet-stream",
+      );
+      expect((await reissue(call, other.tenant.id)).status).toBe(404);
+    });
+
+    it("404s once retention has deleted the export", async () => {
+      const { call, provision, setNow, deps } = await start();
+      const { tenant } = await provision("acme");
+      const day = 24 * 60 * 60 * 1000;
+      const first = Date.parse("2026-01-01T00:00:00.000Z");
+      setNow(new Date(first));
+      expect((await call("POST", `/v1/operator/tenants/${tenant.id}/export`)).status).toBe(200);
+      setNow(new Date(first + 29 * day));
+      expect((await reissue(call, tenant.id)).status).toBe(200);
+      setNow(new Date(first + 31 * day));
+      expect(await deleteExpiredExports(deps)).toBe(2);
+      expect((await reissue(call, tenant.id)).status).toBe(404);
+    });
+  });
 });
 
 describe("bucket backup", () => {
@@ -592,6 +721,91 @@ describe("bucket backup", () => {
     expect(untilNext(new Date("2026-11-22T01:30:00Z"), 3)).toBe(1.5 * hour);
     expect(untilNext(new Date("2026-11-22T03:00:00Z"), 3)).toBe(24 * hour);
     expect(untilNext(new Date("2026-11-22T23:00:00Z"), 3)).toBe(4 * hour);
+  });
+
+  describe("dead-man check", () => {
+    const hour = 60 * 60 * 1000;
+    const overdueAlerts = (logs: Record<string, unknown>[]) =>
+      logs.filter((l) => l.alert === "bucket backup overdue");
+
+    it("stays quiet after a fresh success and alerts once the last one is older than 26 hours", async () => {
+      const { call, deps, setNow } = await start();
+      const logs = captureLogs();
+      expect((await call("POST", "/v1/operator/backup")).status).toBe(200);
+      const succeededAt = Date.now();
+      // The process started long ago, so only the recorded success can keep the check quiet.
+      const startedAt = new Date(succeededAt - 100 * hour);
+
+      setNow(new Date(succeededAt + 25 * hour));
+      await checkBackupFreshness(deps, startedAt);
+      expect(overdueAlerts(logs)).toEqual([]);
+
+      setNow(new Date(succeededAt + 27.5 * hour));
+      await checkBackupFreshness(deps, startedAt);
+      expect(overdueAlerts(logs)).toEqual([
+        expect.objectContaining({ recorded: true, ageHours: 27, maxAgeHours: 26 }),
+      ]);
+    });
+
+    it("does not count a run with a failing tenant", async () => {
+      const { provision, deps, control, setNow } = await start();
+      await provision("acme");
+      const logs = captureLogs();
+      const broken: ControlDeps = {
+        ...deps,
+        buckets: {
+          ...deps.buckets,
+          primary: {
+            ...deps.buckets.primary,
+            list: () => {
+              throw new Error("primary bucket unreachable");
+            },
+          },
+        },
+      };
+      expect((await backupBuckets(broken)).failed).toHaveLength(1);
+      expect(logs.filter((l) => l.alert === "bucket backup failed")).toHaveLength(1);
+      const { rows } = await control.db.query(
+        "select 1 from audit_log where action like 'bucket_backup%'",
+      );
+      expect(rows).toEqual([]);
+
+      const startedAt = new Date();
+      setNow(new Date(startedAt.getTime() + 27 * hour));
+      await checkBackupFreshness(deps, startedAt);
+      expect(overdueAlerts(logs)).toEqual([expect.objectContaining({ recorded: false })]);
+    });
+
+    it("gives a process with no record 26 hours from its start, then alerts", async () => {
+      const { deps, setNow } = await start();
+      const logs = captureLogs();
+      const startedAt = new Date("2026-11-22T10:00:00Z");
+
+      setNow(startedAt);
+      await checkBackupFreshness(deps, startedAt);
+      setNow(new Date(startedAt.getTime() + 25 * hour));
+      await checkBackupFreshness(deps, startedAt);
+      expect(overdueAlerts(logs)).toEqual([]);
+
+      setNow(new Date(startedAt.getTime() + 27 * hour));
+      await checkBackupFreshness(deps, startedAt);
+      expect(overdueAlerts(logs)).toEqual([
+        expect.objectContaining({ recorded: false, ageHours: 27 }),
+      ]);
+    });
+
+    it("checks once at startup, and stop() waits for it and clears the hourly timer", async () => {
+      const { deps, control } = await start();
+      const logs = captureLogs();
+      // The last success was 30 hours ago: control was down at 03:00 and has just restarted.
+      await control.db.query(
+        "insert into audit_log (tenant_id, actor, action, at) values (null, 'system', 'bucket_backup.succeeded', now() - interval '30 hours')",
+      );
+      await startNightly(deps).stop();
+      expect(overdueAlerts(logs)).toEqual([
+        expect.objectContaining({ recorded: true, ageHours: 30 }),
+      ]);
+    });
   });
 });
 

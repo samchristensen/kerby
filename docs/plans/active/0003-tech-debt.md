@@ -4,16 +4,14 @@ Goal: every line of [tech-debt.md](../tech-debt.md) is paid, closed by a recorde
 parked behind a named trigger. Each item quotes the start of its debt line; remove that line and tick the box in the same
 commit. "Now" facts were checked against the code on 2026-11-22. Sizes: S under half a day, M one to two days, L more.
 
-## Open questions (block the named item)
+## Questions, all answered
 
-- Where alerts go and who answers them (a webhook into a chat channel, email). Blocks D2, D3.
-- Recovery targets: data that may be lost (RPO) and outage that may last (RTO) once tenants pay. Blocks H1; sets A1's
-  schedule (daily and weekly until answered).
-- Export retention: days an export is kept, and whether a deleted tenant's last export outlives it. Blocks F3.
-- History over the worker's budget: drop the oldest turns at a user-message boundary (default) or refuse the turn with
-  413. Blocks the worker half of F1.
-- A Git remote and a CI host (`.railway/README.md` assumes GitHub Actions). Blocks C1, C5.
-- An edge in front of `api` (a proxy on a custom domain) and an uptime monitor. Blocks D3.
+- Where alerts go: a Slack channel through `ALERT_WEBHOOK_URL` (D2).
+- Recovery targets: RPO 24 h, one instance until a tenant pays or an SLA is sold (ADR 0012).
+- Export retention: 30 days, a deleted tenant's included (ADR 0013).
+- History over the worker's budget: drop the oldest turns, cutting before a user message (F1).
+- Git remote and CI host: GitHub, `samchristensen/kerby` (ADR 0011).
+- An edge in front of `api`: not yet (the owner's call, 2026-11-22; a tech-debt line). The monitor is the `uptime` workflow.
 
 ## Order
 
@@ -112,10 +110,12 @@ flowchart LR
 - [x] **C5 IaC and environments in CI** (same line, second half). M. After C1 and C4.
   Fix: `railwayapp/config` plans on pull requests and applies on merge; a pull request gets `ENV=pr-<n>` (setup, deploy,
   a smoke call), deleted with `make env-down` on close.
-- [ ] **C6 Orphan bucket** ("IaC and buckets: an environment filled in from the file alone"). S, **human**.
-  Delete `modular-safe-wx5G` in the dashboard. The empty-environment limitation is already an ADR 0007 decision
-  ("verified"), so the line goes; retry an empty environment whenever the `railway` pin is bumped (note in
-  `.railway/README.md`).
+- [x] **C6 Orphan bucket** ("IaC and buckets: an environment filled in from the file alone"). S. Closed without deleting
+  it: `modular-safe-wx5G` has no instance in any environment, so the dashboard does not list it (the owner could not find
+  it), `railway bucket delete` refuses ("not deployed in environment"), the public API has no bucket deletion, and an
+  environment patch that adds an instance (committed, 2026-11-22) changes nothing. Parked below. The empty-environment
+  limitation is an ADR 0007 decision ("verified"); retry an empty environment whenever the `railway` pin is bumped (note
+  in `.railway/README.md`).
 
 ## D. See failures
 
@@ -197,6 +197,29 @@ flowchart LR
   cold start, and an open stream across the threshold. Enable it in the IaC or record the result in ADR 0007. The worker
   stays awake: its scheduler sweeps every 10 s.
 
+## I. Residuals (debts the first release and its reviews left)
+
+- [x] **I1 Backup freshness alarm** ("Bucket backup (ADR 0013)", the clause about a run that never happened). S.
+  A fully successful `backupBuckets` run writes an `audit_log` row; control checks at startup and hourly and alerts
+  `bucket backup overdue` when the last success is over 26 h old (a process with no record measures from its own start).
+  Accepted limit, now in the debt line: control has no public domain, so a control that is down all day alerts only through
+  Railway's deployment webhook.
+- [x] **I2 Canary read** ("The `uptime` workflow checks `GET /healthz` only"). S, **human** for the secret (done by the
+  agent with the owner's login). Production tenant `canary` (1 turn, 60 requests a minute, 1 MiB) with one empty
+  conversation and a placeholder Anthropic key (the api refuses a conversation without a model key); the `uptime` workflow
+  reads it with `KERBY_CANARY_KEY` and `KERBY_CANARY_CONVERSATION_ID`, and alerts naming the step that failed.
+- [x] **I3 Quota race leaves an object** ("A post refused by the quota re-check"). S. `Blobs.delete` (row first, then
+  object); `postUserMessage` takes its blob back when the post does not commit. User-post keys carry a per-attempt
+  suffix, so a loser of a same-position race can never delete the winner's blob.
+- [x] **I4 Export reissue** ("Exports (ADR 0013): a URL lives 24 h"). S. `POST /v1/operator/tenants/:id/export/reissue`
+  presigns an existing export (newest, or by stamp), also for a deleted tenant; audited per URL.
+- [x] **I5 Worker turn cap** ("A worker has no cap on running turns across tenants"). M. `MAX_RUNNING_TURNS` (default
+  50, the `maxPools` default): the scheduler reserves slots before claiming and passes the number to the claim, so it never
+  holds a task it cannot run; waiting tenants are served first come first served. Budget formula updated.
+- [x] **I6 Railway Monitors and a real webhook event** (the Monitors line). S, **human**. The owner added the Monitors
+  in the dashboard (Observability, a widget's menu, Add monitor) and tested them (2026-11-22). They are not in the IaC
+  file: its types have no setting for them.
+
 ## Parked behind a trigger
 
 No work until the trigger; the debt line stays and names it.
@@ -207,16 +230,27 @@ No work until the trigger; the debt line stays and names it.
 - **Conformance suite** ("`AgentRuntime` has one adapter"). Trigger: a second adapter is proposed. Fix then: lift the
   port-contract cases out of `runtime-pi-durable/src/runtime.test.ts` (event order, persist-before-act gate, rehydration
   without repeating a tool, unanswered tool calls through `executeTool`, refusal) into `@kerby/agent/testing`.
-- **Admin-membership grant** (paid in PR #8: deleted, ADR 0012) ("`reassignOwned` (packages/db) moves ownership by hand"). Trigger: H1. Correction:
-  `reassignOwned` runs on every host, Railway included, because a superuser cannot `REASSIGN OWNED` its own objects and
-  the tenant role must own its schema to migrate it. Only `grant <role> to current_user` in `createRole` serves the
-  non-superuser path; delete it if H1 keeps a superuser admin.
 - **Body cache** (the rest of "A conversation read fetches every message body"). Trigger: after F1, a profile shows S3
   gets dominating a read or a rehydrate. Fix then: a per-process LRU of bodies bounded in bytes and keyed by object key;
   keys carry a content hash, so nothing is ever invalidated.
 - **Re-seal** (the rest of the model-keys line). Trigger: the first secrets key rotation. Fix then: a script run where
   the private keys are (`worker`) that opens each `tenant_secrets` row whose embedded key id is not the current key's,
   re-seals it, and audits it. The console is plan 0001 M9, not debt.
+- **Alert debounce** ("Alert debounce is per process"). Trigger: a second worker replica. Fix then: share the window in a
+  control-database row.
+- **CI token scope** ("CI's `RAILWAY_TOKEN`"). Trigger: a second person with write access. Fix then: both secrets behind a
+  GitHub environment limited to `main`, no plan on pull requests, or required review.
+- **Edge and shared counters** ("No edge proxy or WAF"). Trigger: the owner picks an edge, or `api` runs more than one
+  process. Fix then: move the request and failed-auth limits to the edge or a shared counter.
+- **Stream connections** ("An open event stream keeps its tenant's pool leased"). Trigger: `MAX_STREAMS_PER_PROCESS`
+  reached in production. Fix then: read through a short lease per poll, so only the listener stays open.
+- **Bucket copy limits** (the rest of "Bucket backup (ADR 0013)"). Trigger: a tenant is promised an RPO under 24 h, or
+  copy volume makes the pass through control costly. Fix then: copy more often, or per-tenant bucket versioning.
+- **Orphan bucket** ("IaC and buckets: an orphan bucket"). Trigger: a `railway` pin bump (retry `railway bucket delete -b
+  modular-safe-wx5G -e production`), or Railway support offering to delete it. It has no instance, so it holds no data;
+  `railway api` lists it in the project (id `d69d20f7-679d-4f10-90cd-d35aec412921`) and the dashboard does not.
+- **Handed to plan 0001**, no work here: stored bytes reported to `usage` (the other half of G2, M8); an operator endpoint
+  for tenant limits (M9); a console for model keys (M9).
 
 ## Log
 
@@ -309,3 +343,11 @@ No work until the trigger; the debt line stays and names it.
   inside the production control container with its own configuration posted "alert channel check" there. Not done:
   Monitors (dashboard only) and a live Railway event through the rule (`webhookTest` is not authorized for the login):
   a tech-debt line.
+- 2026-11-22 I1 to I5 and the canary (this change): backup freshness alarm, canary read in `uptime` (tenant `canary` made
+  in production; the key is a repository secret, never printed; a first key was lost to a failed script and revoked), quota
+  race cleanup (`Blobs.delete`), export reissue route, worker turn cap. Plan hygiene: questions closed, the paid
+  admin-membership entry removed, the debts without a trigger given one or handed to plan 0001. C6 (delete the orphan bucket
+  in the dashboard) and I6 (Monitors, Test Webhook) remain: both need the Railway dashboard.
+- 2026-11-22 C6 and I6 closed. The orphan bucket is still in the project: the API lists it (no instance), the dashboard does
+  not, and the CLI, the API and an environment patch cannot delete it; parked with a retry trigger. The owner added the
+  Monitors and tested them. The plan stays in `active/` because the parked items have no other home.

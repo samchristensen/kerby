@@ -5,7 +5,7 @@ import { tenantPrefix } from "@kerby/blobs";
 import { audit, resolveTenantDbUrl } from "@kerby/control-plane";
 import { dumpDatabase } from "@kerby/db";
 import { log } from "@kerby/observability";
-import type { ControlDeps } from "../types/index.ts";
+import { type ControlDeps, NotFoundError } from "../types/index.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 /** How long an export's download URLs work. */
@@ -69,18 +69,32 @@ export async function exportTenant(deps: ControlDeps, tenantId: string): Promise
     "application/json",
   );
 
-  const expiresAt = new Date(at.getTime() + EXPORT_URL_SECONDS * 1000).toISOString();
-  const presign = (key: string) =>
-    buckets.exports.presignGet(key, { expiresInSeconds: EXPORT_URL_SECONDS, signedAt: at });
-  const [dumpUrl, objectsUrl] = [await presign(dumpKey), await presign(objectsKey)];
-
   await audit(deps.control, {
     tenantId,
     actor: "operator",
     action: "tenant.export",
     detail: { objectCount: objects.length },
   });
-  // Each URL is a credential to the tenant's data until it expires: record that it was issued.
+  const urls = await issueUrls(deps, tenant.id, dumpKey, objectsKey, at);
+  return { ...urls, objectPrefix: prefix, objectCount: objects.length };
+}
+
+/**
+ * Presign an export's two files and audit each URL: a URL is a credential to the tenant's data until it expires, so
+ * every one issued is recorded, whether by the export itself or by a reissue.
+ */
+async function issueUrls(
+  deps: ControlDeps,
+  tenantId: string,
+  dumpKey: string,
+  objectsKey: string,
+  at: Date,
+): Promise<{ dumpUrl: string; objectsUrl: string; expiresAt: string }> {
+  const { exports } = deps.buckets;
+  const expiresAt = new Date(at.getTime() + EXPORT_URL_SECONDS * 1000).toISOString();
+  const presign = (key: string) =>
+    exports.presignGet(key, { expiresInSeconds: EXPORT_URL_SECONDS, signedAt: at });
+  const [dumpUrl, objectsUrl] = [await presign(dumpKey), await presign(objectsKey)];
   for (const key of [dumpKey, objectsKey]) {
     await audit(deps.control, {
       tenantId,
@@ -89,7 +103,75 @@ export async function exportTenant(deps: ControlDeps, tenantId: string): Promise
       detail: { key, expiresAt },
     });
   }
-  return { dumpUrl, objectsUrl, expiresAt, objectPrefix: prefix, objectCount: objects.length };
+  return { dumpUrl, objectsUrl, expiresAt };
+}
+
+const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const COMPLETE_EXPORT_FILE = /^(.+)\.(dump|objects\.json)$/;
+
+export type ReissuedExport = {
+  dumpUrl: string;
+  objectsUrl: string;
+  expiresAt: string;
+  objectPrefix: string;
+  /** The export's own time, from its stamp. */
+  exportedAt: string;
+};
+
+/**
+ * Fresh download URLs for an export that already exists: the newest of the tenant's, or the one with `stamp`. It reads
+ * only the export bucket, never the tenant's row, so it works for a deleted tenant whose export is still within
+ * retention. The keys come from listing `<tenantId>/`, never from building a key out of the request; an export whose
+ * dump or listing is missing (an upload cut short) does not count. Nothing there: NotFoundError.
+ */
+export async function reissueExportUrls(
+  deps: ControlDeps,
+  tenantId: string,
+  stamp?: string,
+): Promise<ReissuedExport> {
+  // The id becomes a key prefix: only a canonical UUID may, so no other tenant's prefix can be reached.
+  if (!TENANT_ID.test(tenantId)) throw new NotFoundError(`tenant ${tenantId} has no export`);
+  const keyPrefix = `${tenantId}/`;
+  const files = new Map<string, Set<string>>();
+  for await (const object of deps.buckets.exports.list(keyPrefix)) {
+    const match = COMPLETE_EXPORT_FILE.exec(object.key.slice(keyPrefix.length));
+    const [, found, kind] = match ?? [];
+    if (
+      found === undefined ||
+      kind === undefined ||
+      exportedAt(`${keyPrefix}${found}.dump`) === undefined
+    )
+      continue;
+    files.set(found, (files.get(found) ?? new Set()).add(kind));
+  }
+  const complete = [...files]
+    .filter(([, kinds]) => kinds.has("dump") && kinds.has("objects.json"))
+    .map(([found]) => found)
+    .sort();
+  const chosen = stamp === undefined ? complete.at(-1) : complete.find((found) => found === stamp);
+  const at = chosen === undefined ? undefined : exportedAt(`${keyPrefix}${chosen}.dump`);
+  if (chosen === undefined || at === undefined) {
+    throw new NotFoundError(
+      stamp === undefined
+        ? `tenant ${tenantId} has no export`
+        : `tenant ${tenantId} has no export ${stamp}`,
+    );
+  }
+
+  await audit(deps.control, {
+    tenantId,
+    actor: "operator",
+    action: "tenant.export_reissue",
+    detail: { stamp: chosen },
+  });
+  const urls = await issueUrls(
+    deps,
+    tenantId,
+    `${keyPrefix}${chosen}.dump`,
+    `${keyPrefix}${chosen}.objects.json`,
+    deps.now(),
+  );
+  return { ...urls, objectPrefix: tenantPrefix(tenantId), exportedAt: at.toISOString() };
 }
 
 /**

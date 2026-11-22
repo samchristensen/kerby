@@ -47,6 +47,44 @@ async function exclusively<T>(deps: ControlDeps, fn: () => Promise<T>): Promise<
   });
 }
 
+/** The audit action of a run with no per-tenant failure: what the freshness check looks for. */
+const BACKUP_SUCCESS_ACTION = "bucket_backup.succeeded";
+/** A nightly run is 24 hours apart; two hours of slack for a long run or a late start. */
+const BACKUP_MAX_AGE_MS = 26 * 60 * 60 * 1000;
+
+/**
+ * Whether the backup is overdue at `now`: the last success's age, or with none recorded, the time since this process
+ * started (a fresh deployment is not overdue the moment it starts).
+ */
+function backupOverdue(
+  now: Date,
+  lastSuccess: Date | undefined,
+  startedAt: Date,
+): { overdue: boolean; ageMs: number } {
+  const ageMs = now.getTime() - (lastSuccess ?? startedAt).getTime();
+  return { overdue: ageMs > BACKUP_MAX_AGE_MS, ageMs };
+}
+
+/**
+ * Alert when no successful backup run is recorded within 26 hours (`startedAt` stands in when none is recorded at all).
+ * It catches a run that never happened, which a run's own failure alert cannot: control down at 03:00 UTC. Counts and
+ * ages only.
+ */
+export async function checkBackupFreshness(deps: ControlDeps, startedAt: Date): Promise<void> {
+  const { rows } = await deps.control.query<{ at: Date | null }>(
+    "select max(at) as at from audit_log where action = $1",
+    [BACKUP_SUCCESS_ACTION],
+  );
+  const lastSuccess = rows[0]?.at ?? undefined;
+  const { overdue, ageMs } = backupOverdue(deps.now(), lastSuccess, startedAt);
+  if (!overdue) return;
+  alert("bucket backup overdue", {
+    recorded: lastSuccess !== undefined,
+    ageHours: Math.floor(ageMs / 3_600_000),
+    maxAgeHours: BACKUP_MAX_AGE_MS / 3_600_000,
+  });
+}
+
 /**
  * Copy the primary bucket's `t/` to the backup bucket, tenant by tenant: objects missing there or differing in size or
  * ETag. Objects only in the backup stay (they are what a restore brings back), except a deleted tenant's, which are
@@ -97,6 +135,13 @@ export async function backupBuckets(deps: ControlDeps): Promise<BackupRun> {
       alert("bucket backup failed", {
         failed: failed.length,
         firstFailedTenant: failed[0]?.tenantId,
+      });
+    } else {
+      await audit(deps.control, {
+        tenantId: null,
+        actor: "system",
+        action: BACKUP_SUCCESS_ACTION,
+        detail: { tenants: run.tenants, copied: run.copied, bytes: run.bytes },
       });
     }
     return run;
