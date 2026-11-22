@@ -11,10 +11,8 @@ import { createApiApp } from "./runtime/http.ts";
 import type { ApiDeps } from "./types/index.ts";
 
 export { createApiApp } from "./runtime/http.ts";
-export type { ApiDeps } from "./types/index.ts";
-export type { ApiConfig };
 
-export async function startApi(config: ApiConfig) {
+async function startApi(config: ApiConfig) {
   configureAlerts({
     service: "api",
     environment: config.railwayEnvironmentName,

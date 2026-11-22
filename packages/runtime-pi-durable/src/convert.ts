@@ -175,7 +175,7 @@ export function assistantFromPi(
 }
 
 /** The text of a Pi tool result message (images become a note: bytes never enter Kerby's transcript inline). */
-export function piMediaToParts(content: readonly PiMedia[]): ContentPart[] {
+function piMediaToParts(content: readonly PiMedia[]): ContentPart[] {
   return content.map((part) =>
     part.type === "text"
       ? { type: "text", text: part.text }

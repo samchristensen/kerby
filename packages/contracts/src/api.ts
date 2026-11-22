@@ -4,11 +4,6 @@ import { AgentEventSchema, AgentMessageSchema, ContentPartSchema } from "./agent
 
 const Id = z.string().min(1).max(128);
 
-export const ErrorResponseSchema = z.object({
-  error: z.object({ code: z.string(), message: z.string() }),
-});
-export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
-
 export const CreateConversationRequestSchema = z.object({
   /** The tenant's own name for the end user. Kerby does not authenticate end users. */
   externalUserId: Id.optional(),
@@ -18,7 +13,7 @@ export const CreateConversationRequestSchema = z.object({
 });
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
 
-export const ConversationSchema = z.object({
+const ConversationSchema = z.object({
   id: z.uuid(),
   externalUserId: z.string().nullable(),
   model: z.string(),
@@ -33,15 +28,13 @@ export const PublicMessageSchema = z.discriminatedUnion("role", [
   AgentMessageSchema.options[1].omit({ native: true }),
   AgentMessageSchema.options[2].omit({ native: true }),
 ]);
-export type PublicMessage = z.infer<typeof PublicMessageSchema>;
 
-export const MessageSchema = z.object({
+const MessageSchema = z.object({
   /** Position in the conversation, from 1, assigned once. Also the SSE event id basis. */
   seq: z.number().int().positive(),
   message: PublicMessageSchema,
   createdAt: z.iso.datetime(),
 });
-export type Message = z.infer<typeof MessageSchema>;
 
 /**
  * `GET /v1/conversations/:id?after=<seq>&limit=<n>`: one page of messages, oldest first, those with `seq` greater
@@ -72,7 +65,7 @@ export const PostMessageRequestSchema = z.object({
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequestSchema>;
 
-export const PostMessageResponseSchema = z.object({
+const PostMessageResponseSchema = z.object({
   /** The user message's position; the turn that answers it starts after it. */
   seq: z.number().int().positive(),
 });

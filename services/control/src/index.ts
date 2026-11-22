@@ -18,11 +18,9 @@ import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts"
 import type { ControlDeps } from "./types/index.ts";
 
 export { createControlApp } from "./runtime/http.ts";
-export type { ControlDeps } from "./types/index.ts";
-export type { ControlConfig };
 
 /** Build the adapters for `config`, prepare the databases, and listen. */
-export async function startControl(config: ControlConfig) {
+async function startControl(config: ControlConfig) {
   configureAlerts({
     service: "control",
     environment: config.railwayEnvironmentName,

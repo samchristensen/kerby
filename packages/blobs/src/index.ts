@@ -11,17 +11,15 @@ import { type BucketConfig, createBucket, createS3Client, tenantPrefix } from ".
 export {
   type Bucket,
   type BucketConfig,
-  type CopySummary,
   copyObjects,
   createBucket,
-  type StoredObject,
   tenantPrefix,
 } from "./bucket.ts";
 
 /** Blob index migration, a tenant migration applied after Absurd's. */
 export const blobsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-export type PutBlob = {
+type PutBlob = {
   /** What it is: `message`, `attachment`, ... Free-form, for the index. */
   kind: string;
   /** Deterministic, relative to the tenant's prefix, e.g. `conversations/<id>/messages/000007.json`. A retry overwrites. */
@@ -31,8 +29,8 @@ export type PutBlob = {
   conversationId?: string;
 };
 
-export type BlobRef = { blobId: string; size: number; sha256: string };
-export type BlobObject = { body: Uint8Array; mediaType: string; size: number };
+type BlobRef = { blobId: string; size: number; sha256: string };
+type BlobObject = { body: Uint8Array; mediaType: string; size: number };
 
 export class BlobNotFoundError extends Error {
   override name = "BlobNotFoundError";

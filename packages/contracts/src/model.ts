@@ -24,14 +24,12 @@ export const PutModelKeyRequestSchema = z.object({
     .max(4096)
     .regex(/^[\x21-\x7e]+$/, "an API key is printable ASCII without spaces"),
 });
-export type PutModelKeyRequest = z.infer<typeof PutModelKeyRequestSchema>;
 
 /** What the API says about a stored key: which provider and when. The key itself is never returned. */
-export const ModelKeySchema = z.object({
+const ModelKeySchema = z.object({
   provider: ModelProviderSchema,
   createdAt: z.iso.datetime(),
 });
-export type ModelKey = z.infer<typeof ModelKeySchema>;
 
-export const ListModelKeysResponseSchema = z.object({ keys: z.array(ModelKeySchema) });
+const ListModelKeysResponseSchema = z.object({ keys: z.array(ModelKeySchema) });
 export type ListModelKeysResponse = z.infer<typeof ListModelKeysResponseSchema>;

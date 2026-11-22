@@ -1,0 +1,30 @@
+// `make knip`: dead files, unused exports and types, unused or undeclared dependencies. Every workspace is
+// internal, so package entry files are checked too (`includeEntryExports`): an export no workspace imports is dead.
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  "includeEntryExports": true,
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.ts", ".railway/railway.ts", "vitest.config.ts"],
+      "project": ["scripts/**/*.ts", ".railway/**/*.ts", "*.ts"],
+      // The Makefile runs it (`pnpm exec biome`); knip reads package.json scripts, not the Makefile.
+      "ignoreDependencies": ["@biomejs/biome"]
+    },
+    // Each workspace's other entries come from its package.json `exports`: `src/index.ts` (a service's too), and the
+    // `./testing` and `./providers` subpaths.
+    "services/*": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/*": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    }
+  },
+  // Default exports read by tools, not imported: the Railway CLI and vitest. Neither file exports anything else.
+  // A single export kept for another reason carries a `@public` JSDoc tag (knip skips it) that says why.
+  "ignoreIssues": {
+    ".railway/railway.ts": ["exports"],
+    "vitest.config.ts": ["exports"]
+  }
+}

@@ -9,9 +9,9 @@ import type { ControlDeps } from "../types/index.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 /** How long an export's download URLs work. */
-export const EXPORT_URL_SECONDS = 24 * 60 * 60;
+const EXPORT_URL_SECONDS = 24 * 60 * 60;
 /** How long an export is kept, a deleted tenant's included (it may be the hand-over copy). Decided in ADR 0013. */
-export const EXPORT_RETENTION_DAYS = 30;
+const EXPORT_RETENTION_DAYS = 30;
 
 export type TenantExport = {
   dumpUrl: string;

@@ -95,7 +95,7 @@ flowchart LR
   Fix: a workflow running `make setup`, `make check`, `make test` on every push and pull request (hosted runners have
   Docker, which `scripts/test-containers.ts` needs); `make e2e` and `make multitenant` nightly. Actions pinned by commit
   SHA (versions live once). Ticks plan 0001 M0.
-- [ ] **C2 knip** ("`knip` (dead code, unused dependencies) is not wired"). S. Overdue: three services exist.
+- [x] **C2 knip** ("`knip` (dead code, unused dependencies) is not wired"). S. Overdue: three services exist.
   Risk: the catalog pins TypeScript 7.0.2, which has no JavaScript API (`createSourceFile` is undefined); confirm the
   chosen knip version runs without it before adopting. Fix: catalog pin and ADR 0005 line, a config naming the entries
   (`services/*/src/index.ts`, package `exports`, `testing.ts`, tests, `scripts/*.ts`, `.railway/railway.ts`), a `knip`
@@ -278,3 +278,10 @@ No work until the trigger; the debt line stays and names it.
   streaming tenant per api process however many streams (46 tenants 156, 60 tenants 181 to 183; bound 190), peak 421 to
   426 in all, one tenant role at most 8; so `MAX_STREAMS_PER_TENANT` 15 (was 20) and `TENANT_ROLE_CONNECTION_LIMIT` 20
   (was 50). Also: a connection lost while a pooled client is checked out no longer crashes the process (regression test).
+- 2026-11-22 C2 paid: knip 6.45.1 (parses with oxc, so TypeScript 7's missing JavaScript API does not matter) in
+  `make check` as `make knip`, config `knip.jsonc`, ADR 0005 line. Entries: package `exports` (services' `src/index.ts`,
+  `./testing`, `./providers`), tests, `scripts/*.ts`, `.railway/railway.ts`, `vitest.config.ts`; entry files' exports
+  are checked too. Found no dead files or dependencies, and about 120 exports no workspace imports: unexported or deleted
+  (unused contract types and `ErrorResponseSchema`, `taskNames`, service `start*` functions and type re-exports, package
+  index re-exports). Kept: the tool-read default exports (config ignore), `EgressError` and the vitest globalSetup
+  (`@public` with the reason), `@biomejs/biome` (the Makefile runs it).

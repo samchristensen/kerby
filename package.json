@@ -9,6 +9,7 @@
     "@kerby/db": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@types/node": "catalog:",
+    "knip": "catalog:",
     "railway": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",

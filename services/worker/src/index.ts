@@ -18,17 +18,14 @@ import { createScheduler, type Scheduler } from "./service/scheduler.ts";
 import type { WorkerDeps } from "./types/index.ts";
 
 export { createHandlers } from "./runtime/handlers.ts";
-export type { Scheduler } from "./service/scheduler.ts";
 export { createScheduler } from "./service/scheduler.ts";
-export { runTurn } from "./service/turn.ts";
 export type { WorkerDeps } from "./types/index.ts";
-export type { WorkerConfig };
 
 /** The development runtime: Pi Durable over the scripted fake model. Tests use it; production never does. */
 export const createDevelopmentRuntime = (): AgentRuntime =>
   createPiDurableRuntime({ models: createFakeModels() });
 
-export async function startWorker(config: WorkerConfig): Promise<{
+async function startWorker(config: WorkerConfig): Promise<{
   scheduler: Scheduler;
   deps: WorkerDeps;
   close(): Promise<void>;

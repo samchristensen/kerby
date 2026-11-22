@@ -5,7 +5,7 @@ review. A review comment you make twice becomes a check.
 
 1. **Boring.** The dull, well-known option. Fewer tools beat a better tool.
 2. **Rule of three.** Abstract on the third real use. The exceptions are the ports in ADRs 0002, 0003, and 0004.
-3. **Clean cutover.** Replacing something means migrating every caller and deleting the old path in the same change.
+3. **Clean cutover.** Replacing something means migrating every caller and deleting the old path in the same change. Dead files, unused exports and unused dependencies fail `make knip` **[check]**.
 4. **Fail loudly.** Parse at the boundary, throw with a clear message, name the bad key. Errors reach the log.
 5. **Types are documentation.** Strict TypeScript, no `any` (tsc, Biome) **[check]**.
 6. **One door per external system.** Postgres, Absurd, S3, and every harness sit behind one package **[check]**.

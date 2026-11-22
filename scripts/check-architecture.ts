@@ -7,7 +7,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 
 /** Lowest to highest. A layer may import its own layer and any layer to its left. */
-export const LAYERS = ["types", "config", "repo", "service", "runtime"] as const;
+const LAYERS = ["types", "config", "repo", "service", "runtime"] as const;
 
 /** Every rule id; docs that say a rule is enforced name one of these (`make docs` checks). */
 export const RULES = [
@@ -20,7 +20,7 @@ export const RULES = [
   "config",
   "docker",
 ] as const;
-export type Rule = (typeof RULES)[number];
+type Rule = (typeof RULES)[number];
 export type Violation = { rule: Rule; file: string; message: string };
 
 const DEP_FIELDS = [

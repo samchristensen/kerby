@@ -85,10 +85,10 @@ export function bearerToken(request: Request): string | undefined {
   return match?.[1];
 }
 
-export type Params = Record<string, string>;
+type Params = Record<string, string>;
 /** The peer of the TCP connection: behind a proxy, that is the proxy (see the api's `TRUST_PROXY`). */
-export type Client = { address: string };
-export type RouteHandler = (
+type Client = { address: string };
+type RouteHandler = (
   request: Request,
   params: Params,
   client: Client,

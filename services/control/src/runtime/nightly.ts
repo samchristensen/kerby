@@ -6,7 +6,7 @@ import { deleteExpiredExports } from "../service/export.ts";
 import { ConflictError, type ControlDeps } from "../types/index.ts";
 
 /** Quiet hours for tenants in the Americas and Europe. */
-export const NIGHTLY_HOUR_UTC = 3;
+const NIGHTLY_HOUR_UTC = 3;
 
 /** Milliseconds from `now` to the next `hour`:00 UTC (a full day when `now` is exactly on it). */
 export function untilNext(now: Date, hour: number): number {

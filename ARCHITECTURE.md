@@ -16,7 +16,9 @@ docs/       what an agent must know that the code does not say
 Every rule below is enforced by `make architecture` ([scripts/check-architecture.ts](scripts/check-architecture.ts))
 unless marked _review_. A failure message names the fix. Fix the code; changing a rule needs an ADR. Docs are checked
 by `make docs` ([scripts/check-docs.ts](scripts/check-docs.ts)): relative links resolve, and every `make` target and
-rule a doc names exists.
+rule a doc names exists. `make knip` ([knip.jsonc](knip.jsonc)) fails on dead files, exports no workspace imports
+(package entry files included), and unused or undeclared dependencies: delete them, or tag a deliberate keep `@public`
+with the reason.
 
 ## Workspaces
 
