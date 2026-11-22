@@ -2,7 +2,7 @@
 import { createBlobs } from "@kerby/blobs";
 import { getTenant, tenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
-import { log } from "@kerby/observability";
+import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { createSealer } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { type ApiConfig, loadApiConfig } from "./config/index.ts";
@@ -14,6 +14,11 @@ export type { ApiDeps } from "./types/index.ts";
 export type { ApiConfig };
 
 export async function startApi(config: ApiConfig) {
+  configureAlerts({
+    service: "api",
+    environment: config.railwayEnvironmentName,
+    webhookUrl: config.alertWebhookUrl,
+  });
   const control = createControlDb(config.controlDatabaseUrl);
   const blobs = createBlobs({
     endpoint: config.s3Endpoint,
@@ -51,6 +56,7 @@ export async function startApi(config: ApiConfig) {
       await server.close();
       await pools.close();
       await control.close();
+      await flushAlerts();
     },
   };
 }

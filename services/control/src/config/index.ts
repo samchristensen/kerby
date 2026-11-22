@@ -30,6 +30,13 @@ export const controlConfigSchema = z.object({
   s3Bucket: z.string().min(1),
   s3AccessKeyId: z.string().min(1),
   s3SecretAccessKey: z.string().min(1),
+  /** Where alerts are posted: Slack, Discord or any JSON webhook (docs/deploy.md#alerts). Unset or empty: log lines only. */
+  alertWebhookUrl: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.url({ protocol: /^https?$/ }).optional(),
+  ),
+  /** Set by Railway on every deployment; names the environment in alerts. */
+  railwayEnvironmentName: z.string().min(1).optional(),
   exportDir: z.string().min(1).default("/var/lib/kerby/exports"),
   pgDumpPath: z.string().min(1).default("pg_dump"),
 });

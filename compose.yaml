@@ -14,6 +14,9 @@ x-tenant-env: &tenant-env
   S3_BUCKET: kerby
   S3_ACCESS_KEY_ID: devkey
   S3_SECRET_ACCESS_KEY: devsecret123
+  # Where alerts are posted (docs/deploy.md#alerts); empty, alerts are log lines only. A listener on this machine is
+  # http://host.docker.internal:<port>/.
+  ALERT_WEBHOOK_URL: ${KERBY_ALERT_WEBHOOK_URL:-}
 
 services:
   postgres:

@@ -13,6 +13,7 @@ import {
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
 import { type TenantDb, TenantPools } from "@kerby/db";
+import { configureLogging } from "@kerby/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerConfigSchema } from "./config/index.ts";
 import {
@@ -26,6 +27,14 @@ const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
+
+/** The log lines written from here to the end of the test, parsed. */
+function captureLogs(): Record<string, unknown>[] {
+  const lines: Record<string, unknown>[] = [];
+  configureLogging({ write: (line) => lines.push(JSON.parse(line)) });
+  cleanups.push(() => configureLogging({ write: (line) => process.stdout.write(line) }));
+  return lines;
+}
 
 async function eventually<T>(
   what: string,
@@ -279,6 +288,7 @@ describe("recovery", () => {
       },
     };
     const h = await harness({ runtime: failing });
+    const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
     await h.post(t, conversation.id, "hello", false);
@@ -297,6 +307,15 @@ describe("recovery", () => {
     ).toBe("the turn failed after 2 attempts");
     expect(await isBusy(t.ctx.db, conversation.id)).toBe(false);
     expect(await h.messages(t, conversation.id)).toHaveLength(1);
+    expect(logs.filter((l) => l.alert)).toEqual([
+      expect.objectContaining({
+        level: "error",
+        alert: "turn failed for good",
+        tenantId: t.id,
+        attempt: 2,
+        errorMessage: "provider is down",
+      }),
+    ]);
   });
 
   it("a refused request ends the turn with the reason on the conversation, without retrying", async () => {
@@ -462,6 +481,7 @@ describe("fencing", () => {
       runtime: stale,
       settings: { claimTimeoutSeconds: 1, heartbeatEveryMs: 600_000 },
     });
+    const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
     await h.post(t, conversation.id, "hello", false);
@@ -491,6 +511,9 @@ describe("fencing", () => {
     release.resolve();
     await eventually("the stale worker to give up", async () => h.scheduler.inFlight(t.id) === 0);
     expect((await t.ctx.db.query("select 1 from messages")).rowCount).toBe(1);
+    expect(logs.filter((l) => l.alert)).toContainEqual(
+      expect.objectContaining({ alert: "lease lost", tenantId: t.id }),
+    );
 
     releaseSecond.resolve();
     const answered = await h.settled(t, conversation.id, 2);

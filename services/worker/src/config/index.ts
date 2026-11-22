@@ -14,6 +14,13 @@ export const workerConfigSchema = z
     s3Bucket: z.string().min(1),
     s3AccessKeyId: z.string().min(1),
     s3SecretAccessKey: z.string().min(1),
+    /** Where alerts are posted: Slack, Discord or any JSON webhook (docs/deploy.md#alerts). Unset or empty: log lines only. */
+    alertWebhookUrl: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.url({ protocol: /^https?$/ }).optional(),
+    ),
+    /** Set by Railway on every deployment; names the environment in alerts. */
+    railwayEnvironmentName: z.string().min(1).optional(),
     /** Names this worker in Absurd's run rows. */
     workerId: z
       .string()

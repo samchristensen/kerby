@@ -20,6 +20,7 @@ import {
   TenantPools,
 } from "@kerby/db";
 import { adminUrl } from "@kerby/db/testing";
+import { configureLogging } from "@kerby/observability";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createControlApp } from "./index.ts";
@@ -32,6 +33,14 @@ const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
+
+/** The log lines written from here to the end of the test, parsed. */
+function captureLogs(): Record<string, unknown>[] {
+  const lines: Record<string, unknown>[] = [];
+  configureLogging({ write: (line) => lines.push(JSON.parse(line)) });
+  cleanups.push(() => configureLogging({ write: (line) => process.stdout.write(line) }));
+  return lines;
+}
 
 async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   const control: TestControlDb = await createTestControlDb();
@@ -163,8 +172,17 @@ describe("provisioning", () => {
         throw new Error("disk full");
       },
     }));
+    const logs = captureLogs();
     const response = await call("POST", "/v1/operator/tenants", { name: "doomed" });
     expect(response.status).toBe(500);
+    expect(logs.filter((l) => l.alert)).toEqual([
+      expect.objectContaining({
+        level: "error",
+        alert: "provisioning failed",
+        tenantId: expect.any(String),
+        errorMessage: "disk full",
+      }),
+    ]);
     expect(await cluster.roleExists(created.role ?? "r_missing")).toBe(false);
     expect(await cluster.databaseExists(created.database ?? "t_missing")).toBe(false);
     expect((await control.db.query("select 1 from tenants")).rowCount).toBe(0);
@@ -305,12 +323,22 @@ describe("migration fan-out", () => {
     ]);
     await cluster.dropDatabase(goneRow.dbName);
 
+    const logs = captureLogs();
     const run = (await (await call("POST", "/v1/operator/migrate")).json()) as {
       migrated: number;
       failed: { tenantId: string }[];
     };
     expect(run.migrated).toBe(1);
     expect(run.failed.map((f) => f.tenantId)).toEqual([gone.tenant.id]);
+    expect(logs.filter((l) => l.level === "error")).toEqual([
+      expect.objectContaining({ msg: "tenant migration failed", tenantId: gone.tenant.id }),
+      expect.objectContaining({
+        alert: "migration fan-out failed",
+        failed: 1,
+        migrated: 1,
+        firstFailedTenant: gone.tenant.id,
+      }),
+    ]);
 
     const after = createTenantDb(tenantDbUrl(behindRow, SECRET));
     cleanups.push(() => after.close());

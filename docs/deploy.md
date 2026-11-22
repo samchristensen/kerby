@@ -137,7 +137,42 @@ real figure rather than an estimate here.
 worse), `MSG=<substring>`, `SERVICE=<control|api|worker>`, `SINCE=`/`UNTIL=` (`30m`, `2h`, `1d` back from now, or ISO
 8601; Railway's default here is the last hour), one JSON line each, oldest first. Run it from a checkout linked with
 `railway link`; Railway serves the current deployment's logs this way, older ones are in the dashboard. Without `ENV`
-it reads the local stack. There are no alarms yet (tech debt).
+it reads the local stack. An alert's `msg` is its kind (below), so `MSG='turn failed'` finds those too.
+
+## Alerts
+
+Everything goes to one channel (a Slack or Discord channel the operator watches):
+
+1. **Railway notifications** (workspace settings, Notifications): email and in-app, on by default for build failures,
+   crashed deployments, OOM kills and volume usage. Keep them on.
+2. **One project webhook** (project settings, Webhooks) to the channel's incoming-webhook URL: deployment status changes
+   (`Deployment.failed`, `Deployment.crashed`), volume usage alerts and monitor alerts. Railway formats Slack and Discord
+   URLs itself. The webhook is unsigned.
+3. **Monitors** (Pro plan; per service in the dashboard): CPU, RAM, disk and egress thresholds, alerting through the
+   webhook.
+4. **`ALERT_WEBHOOK_URL`** on `control`, `api` and `worker`, the same channel URL: Railway cannot alert on log lines, so
+   Kerby posts its own failures. `alert(kind, fields)` (`@kerby/observability`) writes an error line with
+   `alert: <kind>` and posts it: `turn failed for good` and `lease lost` (worker), `provisioning failed` and
+   `migration fan-out failed` (control). A Slack URL (`hooks.slack.com`) gets `{"text"}`, Discord
+   (`discord.com/api/webhooks`) `{"content"}`, anything else the alert as JSON (`alert`, `service`, `environment`,
+   `at`, `tenantId`, `fields`, `suppressed`). One post per kind per process per five minutes; the next post counts the
+   ones held back, and every one is still a log line (`make logs-query ENV=production LEVEL=error`). Posts carry tenant
+   ids and error names, never content or secrets; a failed post is logged (`alert post failed`) and never breaks the
+   caller. Unset, alerts are log lines only.
+
+The URL is a secret (whoever has it can post to the channel). It is `preserve()` in the IaC file, so set it per
+environment; setting a variable redeploys the service with the image it already runs:
+
+```sh
+for s in control api worker; do
+  printf %s "$URL" | railway variable set ALERT_WEBHOOK_URL --stdin --service $s --environment production
+done
+```
+
+A copy made by `make railway-setup ENV=pr-123` inherits production's value; its posts name the environment
+(`kerby worker (pr-123): ...`, from Railway's `RAILWAY_ENVIRONMENT_NAME`). Remove it there with
+`railway variable delete ALERT_WEBHOOK_URL --service <s> --environment pr-123` if the channel should stay quiet.
+Locally, `KERBY_ALERT_WEBHOOK_URL=http://host.docker.internal:<port>/ make up` posts to a listener on your machine.
 
 ## Do not do
 

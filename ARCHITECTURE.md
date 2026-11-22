@@ -169,7 +169,9 @@ then provisions a `default` tenant through the operator API and prints its key. 
 - Every process writes JSON lines (`@kerby/observability`: `at`, `level`, `msg`, `tenantId`, scalar fields, never
   content). `make logs-query` filters them: `TENANT=<id>`, `LEVEL=warn` (that level and worse), `MSG=<substring>`,
   `SERVICE=api`, `SINCE=30m`/`UNTIL=` (a duration back from now or ISO 8601); it reads this stack's `docker compose logs`
-  (honoring `KERBY_PROJECT`), or Railway's with `ENV=<environment>`.
+  (honoring `KERBY_PROJECT`), or Railway's with `ENV=<environment>`. A failure an operator must hear about is an
+  `alert(kind, fields)`: an error line with `alert: <kind>`, also posted to `ALERT_WEBHOOK_URL` when set
+  (`KERBY_ALERT_WEBHOOK_URL` here) and debounced per kind; see docs/deploy.md#alerts.
 
 ## Hosting
 
