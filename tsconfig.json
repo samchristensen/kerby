@@ -17,6 +17,6 @@
     "noEmit": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["packages", "services", "scripts"],
+  "include": ["packages", "services", "scripts", ".railway"],
   "exclude": ["**/node_modules"]
 }

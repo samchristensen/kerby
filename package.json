@@ -8,6 +8,7 @@
     "@kerby/control-plane": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@types/node": "catalog:",
+    "railway": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "yaml": "catalog:"

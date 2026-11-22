@@ -1,6 +1,6 @@
 # Deploying to Railway
 
-What `scripts/railway.ts` creates and how to run it. Why: [ADR 0007](adr/0007-railway-hosting.md). Status: deployed and
+What `.railway/railway.ts` (Railway Infrastructure as Code) and `scripts/railway.ts` create, and how to run them. Why: [ADR 0007](adr/0007-railway-hosting.md). Status: deployed and
 smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 ## What exists
@@ -20,22 +20,26 @@ health-checked on `/healthz`. Postgres is reached at `postgres.railway.internal`
 
 ## First time
 
-You need the Railway CLI, signed in (`railway login`), and Node (the scripts run TypeScript directly).
+You need the Railway CLI (5.42.1 or newer), signed in (`railway login`), and Node (the scripts run TypeScript directly).
 
 ```sh
 railway init --name kerby                  # creates the project and links this checkout to it
-make railway-setup                         # Postgres, bucket, the three services, every variable, a domain for api
+make railway-plan                          # preview: what .railway/railway.ts would change
+make railway-setup                         # apply it, add api's domain, create the secrets once
 make deploy                                # control first, then api and worker; waits for each to report SUCCESS
 ```
 
-`railway-setup` is safe to run again: it creates only what is missing, keeps the secrets it generated, and refreshes the
-bucket's endpoint and keys; changing a variable redeploys that service. Kerby holds no model provider keys: each tenant
+The infrastructure lives in [`.railway/railway.ts`](../.railway/railway.ts): edit it, `make railway-plan`, then `make
+railway-setup`. The CLI shows the diff and applies it; a deletion (a service, a variable) is refused without a person
+confirming it, so run `railway config apply` yourself for those. Do not change infrastructure in the dashboard: the next plan
+shows it as drift, and `railway config pull` imports it if you did. `railway-setup` is safe to run again; it never replaces
+a secret. Kerby holds no model provider keys: each tenant
 stores its own (`PUT /v1/model-keys/<provider>`, [ADR 0008](adr/0008-byok-sealed-secrets.md)). The setup makes a secrets key
 pair once: the private key is `SECRETS_PRIVATE_KEYS` on `worker`, the public half `SECRETS_PUBLIC_KEY` on `api`. Never delete
 the private key from `worker`: every stored tenant key is sealed to it. Back it up somewhere other than Railway.
 
-The api's address is in `railway service list --json` (`url`). A custom domain: `railway domain api.example.com
---service api`, then add the DNS records it prints.
+The api's address is in `railway service list --json` (`url`). A custom domain: add `domains: ["api.example.com"]` to the
+`api` service in `.railway/railway.ts` and apply, then add the DNS records Railway prints.
 
 ## Provision a tenant
 
@@ -58,8 +62,8 @@ while it runs.
 
 ## Environments
 
-`make railway-setup ENV=pr-123` creates `pr-123` as a copy of `production`, then gives it a bucket, a Postgres volume and
-secrets of its own (a copy starts with production's secrets, and the script replaces them). `make deploy ENV=pr-123`
+`make railway-setup ENV=pr-123` creates `pr-123` as a copy of `production` (Railway gives the copy its own Postgres volume
+and bucket), applies `.railway/railway.ts` to it, and replaces the secrets it inherited with ones of its own. `make deploy ENV=pr-123`
 deploys to it; its api has its own Railway domain. `make env-down ENV=pr-123` deletes it with its data. `production` is
 never deleted by `make`.
 
@@ -72,13 +76,14 @@ with `railway logs --service <name>`.
 ## Secrets
 
 Generated once by `railway-setup` (24 random bytes, hex), stored as service variables, readable with
-`railway variable list --service control`: whoever can run that can read every secret.
+`railway variable list --service control`: whoever can run that can read every secret. They are `preserve()` in the IaC file
+on purpose: a generated value there would be made again on every apply.
 
 - Do not change `TENANT_DB_SECRET`: every tenant role's password derives from it, so every tenant would be locked out
   of its database until each role's password is reset.
 - Only `control` holds the administrative database URL. `api` and `worker` connect to the control database as the limited
   `kerby_app` role, which control creates (migration 0002) and gives its password at start: deploy control first.
-- The bucket's keys are copied into each service. After `railway bucket credentials --reset`, run `make railway-setup`.
+- The bucket's keys are references (`${{kerby.ACCESS_KEY_ID}}`), so resetting them needs no change here; redeploy the services.
 
 ## Postgres
 

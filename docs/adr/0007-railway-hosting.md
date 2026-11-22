@@ -19,8 +19,8 @@ already do.
   and `control`, `api`, `worker`, each built by Railway from its own `services/<name>/Dockerfile` (the last stage, `prod`)
   and uploaded with `railway up`; there is no Git connection, so a deploy is what is on disk. `make deploy` deploys
   control first (it creates the limited `kerby_app` role that api and worker connect as), then the other two.
-- **One bucket per environment**, a Railway bucket (S3-compatible, `@kerby/blobs` unchanged). The setup script copies its
-  endpoint and keys into `S3_*` variables on each service. Keys stay under `t/<tenantId>/`.
+- **One bucket per environment**, a Railway bucket (S3-compatible, `@kerby/blobs` unchanged). `S3_*` on each service are
+  references to the bucket's variables. Keys stay under `t/<tenantId>/`.
 - **Networking.** Only `api` has a public domain. `control` (the operator API) and `worker` have none: operators reach
   control with `railway ssh`. Services reach Postgres over Railway's private network, which does not use TLS, so
   `TENANT_DB_SSLMODE` stays unset.
@@ -31,9 +31,18 @@ already do.
   every later run. `TENANT_DB_SECRET` is never regenerated on a live system: every tenant role's password derives from it.
   The secrets key pair ([ADR 0008](0008-byok-sealed-secrets.md)) is made once the same way: the private key on `worker`, the public
   key on `api`. Kerby holds no model provider keys: tenants bring theirs.
-- **Provisioning is a script, not declarative state.** `scripts/railway.ts` (`setup`, `deploy`) drives the CLI and is safe
-  to run again. Rejected: Terraform (a third-party Railway provider plus a state backend to hold four services and their
-  passwords is more than 250 lines of script); Git-connected auto-deploys (needs a remote the repo does not have yet).
+- **Infrastructure is Railway Infrastructure as Code** ([`.railway/railway.ts`](../../.railway/railway.ts), the `railway` SDK pinned
+  in the catalog): the database, its volume, the bucket, the three services (Dockerfile builds, health checks) and every
+  variable, with references between them. `make railway-plan` previews and `make railway-setup` applies it (the Railway CLI
+  compares the file with the environment and shows the diff first; deletions need a person). One file describes every environment.
+- **What the file leaves to `scripts/railway.ts`.** Secrets: a generated variable (`${{secret(n)}}`) is made again on every
+  apply (verified), which would rotate `TENANT_DB_SECRET`, so they are `preserve()` and the script creates each once and
+  never replaces it. The api's generated domain (the IaC does not manage generated domains). Code: services have no
+  `source`; `make deploy` uploads the checkout. A new environment: a copy of production (`environment new --duplicate`),
+  because an empty environment filled in by the file never gets its bucket deployed (verified); the script then replaces the
+  secrets the copy inherited.
+- Rejected: Terraform (a third-party Railway provider plus a state backend); an imperative script alone (what this replaced:
+  drift between what the script made and what Railway held, and no preview); Git-connected auto-deploys (no remote yet).
 
 ## Consequences
 

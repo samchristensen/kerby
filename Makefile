@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant secrets-key railway-setup deploy env-down
+.PHONY: help setup check typecheck lint format architecture test up down down-v psql logs e2e multitenant secrets-key railway-plan railway-setup deploy env-down
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -55,7 +55,10 @@ multitenant: ## Cross-tenant attempts, suspension within the cache TTL, and a 20
 secrets-key: ## Make a secrets key pair for the workers (private) and the api (public)
 	node scripts/secrets-key.ts
 
-railway-setup: ## Create and wire Kerby's Railway services for ENV (default production); safe to run again
+railway-plan: ## Preview what .railway/railway.ts would change in ENV (default production); changes nothing
+	node scripts/railway.ts plan $(ENV)
+
+railway-setup: ## Make ENV match .railway/railway.ts (IaC), add its domain and secrets; safe to run again
 	node scripts/railway.ts setup $(ENV)
 
 deploy: ## Upload this checkout to Railway for ENV (default production): control, then api and worker

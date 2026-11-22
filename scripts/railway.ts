@@ -1,21 +1,20 @@
-// Create, wire and deploy Kerby on Railway (ADR 0007). Run through `make railway-setup` and `make deploy`.
-//   node scripts/railway.ts setup  [environment]   create what is missing and set every variable; safe to run again
-//   node scripts/railway.ts deploy [environment]   upload this checkout: control first, then api and worker
-// `environment` defaults to production. A name that does not exist yet is created as a copy of production and given
-// secrets of its own. Needs the `railway` CLI, signed in, with the project linked (`railway init --name kerby`).
+// Operate Kerby on Railway (ADR 0007). Run through `make railway-plan`, `make railway-setup` and `make deploy`.
+//   node scripts/railway.ts plan    [environment]   preview what `.railway/railway.ts` would change
+//   node scripts/railway.ts setup   [environment]   make the environment match `.railway/railway.ts`, add its domain and secrets
+//   node scripts/railway.ts secrets [environment]   create the secrets the IaC file leaves to preserve(); never replaces one
+//   node scripts/railway.ts deploy  [environment]   upload this checkout: control first, then api and worker
+// The infrastructure is Railway Infrastructure as Code in `.railway/railway.ts`; this script does only what that file cannot:
+// make an environment, generate secrets once, add the generated domain, and roll code out. `environment` defaults to
+// production; a new name is a copy of it with secrets of its own.
+// Needs the `railway` CLI, signed in, with the project linked (`railway init --name kerby`).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 
 const PRODUCTION = "production";
-const BUCKET = "kerby";
-const BUCKET_REGION = "iad";
-const APP_ROLE = "kerby_app";
 const SERVICES = ["control", "api", "worker"] as const;
 type Service = (typeof SERVICES)[number];
-/** The port each service listens on: Railway's health check and routing read `PORT`. */
-const PORTS: Record<Service, number> = { control: 8081, api: 8080, worker: 8082 };
 
 type Vars = Record<string, string>;
 
@@ -52,13 +51,6 @@ function text(value: Record<string, unknown>, key: string, what: string): string
 }
 
 const secret = () => randomBytes(24).toString("hex");
-/** A reference Railway resolves at deploy time, to a variable of the Postgres service. */
-const postgres = (name: string) => `\${{Postgres.${name}}}`;
-
-function serviceIds(environment: string): Map<string, string> {
-  const services = list(railwayJson(["service", "list", "--environment", environment]), "services");
-  return new Map(services.map((s) => [text(s, "name", "service"), text(s, "id", "service")]));
-}
 
 function variablesOf(service: string, environment: string): Vars {
   const all = record(
@@ -72,8 +64,17 @@ function variablesOf(service: string, environment: string): Vars {
   );
 }
 
-/** Make `environment` exist (a copy of production when new) and be the CLI's linked environment, which `add` and `bucket create` act on. */
-async function ensureEnvironment(environment: string): Promise<void> {
+function serviceNames(environment: string): Set<string> {
+  const services = list(railwayJson(["service", "list", "--environment", environment]), "services");
+  return new Set(services.map((s) => text(s, "name", "service")));
+}
+
+/**
+ * Make `environment` exist and be the CLI's linked environment. A new one is a copy of production: Railway gives a copy its
+ * own Postgres and bucket instances, which an empty environment filled in by the IaC file does not get (the bucket is
+ * never deployed). The IaC file then reconciles the copy, and `ensureSecrets` replaces the secrets it inherited.
+ */
+function ensureEnvironment(environment: string): void {
   const listed = record(railwayJson(["environment", "list"]), "environments");
   const known = list(listed.environments, "environments").map((e) =>
     text(e, "name", "environment"),
@@ -83,128 +84,68 @@ async function ensureEnvironment(environment: string): Promise<void> {
       throw new Error(`there is no "${PRODUCTION}" environment to copy "${environment}" from`);
     }
     railway(["environment", "new", environment, "--duplicate", PRODUCTION, "--json"]);
-    // The copy's services appear a little later; creating them again would leave strays.
+    // The copy's services appear a little later; applying before they do would create strays.
     for (let attempt = 0; ; attempt++) {
-      const have = serviceIds(environment);
+      const have = serviceNames(environment);
       if (["Postgres", ...SERVICES].every((name) => have.has(name))) break;
       if (attempt >= 30) throw new Error(`the services of "${environment}" did not appear`);
-      await sleep(2000);
+      execFileSync("sleep", ["2"]);
     }
   }
   railway(["environment", "link", environment]);
 }
 
-function ensureResources(environment: string): Map<string, string> {
-  const have = serviceIds(environment);
-  if (!have.has("Postgres")) railway(["add", "--database", "postgres", "--json"]);
-  for (const name of SERVICES) {
-    if (!have.has(name)) railway(["add", "--service", name, "--json"]);
-  }
-  const buckets = list(railwayJson(["bucket", "list", "--environment", environment]), "buckets");
-  if (!buckets.some((b) => b.name === BUCKET)) {
-    railway(["bucket", "create", BUCKET, "--region", BUCKET_REGION, "--json"]);
-  }
-  return serviceIds(environment);
+/** `railway config <plan|apply>` on the linked environment, shown as it runs. Deletions need a human: no --confirm-destructive. */
+function iac(command: "plan" | "apply", ...flags: string[]): void {
+  // The SDK reads `$_` (the shell's last command) as the CLI to ask for its version; under node that is node. Name the CLI.
+  execFileSync("railway", ["config", command, ...flags], {
+    stdio: "inherit",
+    env: { ...process.env, _: "railway" },
+  });
 }
 
 /**
- * Secrets already on the control service are kept: the tenant secret in particular must never change on a live system.
- * A copy of production starts with production's secrets, which it must not share: those are replaced.
- * The secrets private key lives on the worker, the only service that opens tenants' model keys. Replacing it on a live
- * system would strand every key sealed to it, so it is kept like the tenant secret and is only made when there is none.
+ * Create each secret the IaC file leaves to `preserve()`, once. A secret that exists is never replaced: TENANT_DB_SECRET
+ * derives every tenant role's password and SECRETS_PRIVATE_KEYS opens every stored tenant key. Variables are set without
+ * a deploy: `deploy` is what rolls them out.
  */
-function secretsFor(environment: string) {
-  const existing = variablesOf("control", environment);
+function ensureSecrets(environment: string): void {
+  const set = (service: Service, name: string, value: string) =>
+    railway(
+      [
+        "variable",
+        "set",
+        name,
+        "--stdin",
+        "--service",
+        service,
+        "--environment",
+        environment,
+        "--skip-deploys",
+      ],
+      value,
+    );
+  const control = variablesOf("control", environment);
+  // A copy of production starts with production's secrets, which it must not share: those are replaced.
   const copied =
     environment !== PRODUCTION &&
-    existing.TENANT_DB_SECRET !== undefined &&
-    existing.TENANT_DB_SECRET === variablesOf("control", PRODUCTION).TENANT_DB_SECRET;
-  const keep = copied ? {} : existing;
-  const secretsPrivateKeys =
-    (copied ? undefined : variablesOf("worker", environment).SECRETS_PRIVATE_KEYS) ??
-    generateSecretsKeyPair().privateKey;
-  return {
-    secretsPrivateKeys,
-    operatorToken: keep.OPERATOR_TOKEN ?? secret(),
-    tenantDbSecret: keep.TENANT_DB_SECRET ?? secret(),
-    appDatabasePassword: keep.APP_DATABASE_PASSWORD ?? secret(),
-  };
+    control.TENANT_DB_SECRET !== undefined &&
+    control.TENANT_DB_SECRET === variablesOf("control", PRODUCTION).TENANT_DB_SECRET;
+  for (const name of ["OPERATOR_TOKEN", "TENANT_DB_SECRET", "APP_DATABASE_PASSWORD"]) {
+    if (control[name] === undefined || copied) set("control", name, secret());
+  }
+  const existing = copied ? undefined : variablesOf("worker", environment).SECRETS_PRIVATE_KEYS;
+  const privateKeys = existing ?? generateSecretsKeyPair().privateKey;
+  if (existing === undefined) set("worker", "SECRETS_PRIVATE_KEYS", privateKeys);
+  // The public half is not a secret and always follows the key new secrets are sealed to (the first of the list).
+  const publicKey = publicKeyOf(privateKeys.split(",")[0] ?? "");
+  if (variablesOf("api", environment).SECRETS_PUBLIC_KEY !== publicKey) {
+    set("api", "SECRETS_PUBLIC_KEY", publicKey);
+  }
 }
 
-async function setup(environment: string): Promise<void> {
-  await ensureEnvironment(environment);
-  const ids = ensureResources(environment);
-  const id = (name: string): string => {
-    const found = ids.get(name);
-    if (!found) throw new Error(`service ${name} is missing after creating it`);
-    return found;
-  };
-
-  const { operatorToken, tenantDbSecret, appDatabasePassword, secretsPrivateKeys } =
-    secretsFor(environment);
-  const bucket = record(
-    railwayJson(["bucket", "credentials", "--bucket", BUCKET, "--environment", environment]),
-    "bucket credentials",
-  );
-  // Every service reads the same keys (`@kerby/config`); the bucket's own values are copied in.
-  const shared: Vars = {
-    TENANT_DB_SECRET: tenantDbSecret,
-    S3_ENDPOINT: text(bucket, "endpoint", "bucket credentials"),
-    S3_REGION: text(bucket, "region", "bucket credentials"),
-    S3_BUCKET: text(bucket, "bucketName", "bucket credentials"),
-    S3_ACCESS_KEY_ID: text(bucket, "accessKeyId", "bucket credentials"),
-    S3_SECRET_ACCESS_KEY: text(bucket, "secretAccessKey", "bucket credentials"),
-  };
-  const host = postgres("RAILWAY_PRIVATE_DOMAIN");
-  const port = postgres("PGPORT");
-  const limitedUrl = `postgresql://${APP_ROLE}:${appDatabasePassword}@${host}:${port}/${postgres("PGDATABASE")}`;
-
-  const variables: Record<Service, Vars> = {
-    // Only control holds the administrative credentials: it creates the limited role and every tenant database.
-    control: {
-      ...shared,
-      CONTROL_DATABASE_URL: postgres("DATABASE_URL"),
-      CLUSTER_ADMIN_URL: `postgresql://${postgres("PGUSER")}:${postgres("POSTGRES_PASSWORD")}@${host}:${port}/postgres`,
-      CLUSTER_HOST: host,
-      CLUSTER_PORT: port,
-      OPERATOR_TOKEN: operatorToken,
-      APP_DATABASE_PASSWORD: appDatabasePassword,
-    },
-    // The api seals tenants' model keys to the public half and cannot open them.
-    api: {
-      ...shared,
-      CONTROL_DATABASE_URL: limitedUrl,
-      SECRETS_PUBLIC_KEY: publicKeyOf(secretsPrivateKeys.split(",")[0] ?? ""),
-    },
-    worker: {
-      ...shared,
-      CONTROL_DATABASE_URL: limitedUrl,
-      HEALTH_PORT: String(PORTS.worker),
-      SECRETS_PRIVATE_KEYS: secretsPrivateKeys,
-    },
-  };
-
-  const patch = {
-    services: Object.fromEntries(
-      SERVICES.map((name) => [
-        id(name),
-        {
-          build: { builder: "DOCKERFILE", dockerfilePath: `services/${name}/Dockerfile` },
-          deploy: { healthcheckPath: "/healthz", restartPolicyType: "ON_FAILURE" },
-          variables: Object.fromEntries(
-            Object.entries({ PORT: String(PORTS[name]), ...variables[name] }).map(
-              ([key, value]) => [key, { value }],
-            ),
-          ),
-        },
-      ]),
-    ),
-  };
-  railway(
-    ["environment", "edit", "--environment", environment, "--json", "-m", "kerby: wire services"],
-    JSON.stringify(patch),
-  );
-
+/** The api's Railway-generated domain; the IaC file does not manage generated domains. */
+function ensureDomain(environment: string): void {
   const domains = record(
     railwayJson(["domain", "list", "--service", "api", "--environment", environment]),
     "domains",
@@ -212,7 +153,16 @@ async function setup(environment: string): Promise<void> {
   if (list(domains.domains, "domains").length === 0) {
     railway(["domain", "--service", "api", "--environment", environment, "--json"]);
   }
-  console.log(`railway "${environment}" is configured. Next: make deploy ENV=${environment}`);
+}
+
+function setup(environment: string): void {
+  ensureEnvironment(environment);
+  iac("apply", "--yes");
+  ensureDomain(environment);
+  ensureSecrets(environment);
+  console.log(
+    `railway "${environment}" matches .railway/railway.ts. Next: make deploy ENV=${environment}`,
+  );
 }
 
 /** Statuses a deployment does not leave. */
@@ -272,9 +222,13 @@ async function deploy(environment: string): Promise<void> {
 }
 
 const [command, environment = PRODUCTION] = process.argv.slice(2);
-if (command === "setup") await setup(environment);
+if (command === "plan") {
+  ensureEnvironment(environment);
+  iac("plan");
+} else if (command === "setup") setup(environment);
+else if (command === "secrets") ensureSecrets(environment);
 else if (command === "deploy") await deploy(environment);
 else {
-  console.error("usage: node scripts/railway.ts <setup|deploy> [environment]");
+  console.error("usage: node scripts/railway.ts <plan|setup|secrets|deploy> [environment]");
   process.exit(1);
 }
