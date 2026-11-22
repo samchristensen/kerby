@@ -5,7 +5,6 @@ One line each: what, why it matters, what fixes it. Remove the line in the commi
 
 - `knip` (dead code, unused dependencies) is not wired into `make check`. Add it with the first service.
 - The import scanner in `check-architecture.ts` is regex-based and also reads strings in comments. Replace it with a parser if a false positive appears.
-- No automated doc-freshness pass. A recurring agent task could compare ADR claims and AGENTS.md invariants with the checks.
 - `AgentRuntime` has one adapter and no conformance suite. Write the suite when the second adapter lands.
 - A tenant role can still `connect` to the maintenance databases `postgres` and `template1` and to the tenant template (`kerby_tenant_template`); the control database is restricted at control startup. It has no grants there, but a session held in the template makes provisioning fail (`55006`, retried for 5 s).
 - `reassignOwned` (packages/db) moves ownership by hand because a superuser cannot `REASSIGN OWNED` its own objects; it runs on every host, Railway included. Only `grant <role> to current_user` in `createRole` serves a non-superuser admin, which Railway's superuser `postgres` does not need: delete it if the HA decision (plan 0003, H1) keeps a superuser.
