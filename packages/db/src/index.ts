@@ -23,7 +23,7 @@ export {
   type TenantQueryable,
   type TenantTx,
 } from "./handles.ts";
-export type { ListenOptions, Subscription } from "./listen.ts";
+export { LISTEN_APPLICATION_NAME, type ListenOptions, type Subscription } from "./listen.ts";
 export {
   type FanOutResult,
   type Migration,

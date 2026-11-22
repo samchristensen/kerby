@@ -108,7 +108,7 @@ describe("TenantExecutor", () => {
     let stolen = 0;
     for (let i = 0; i < 8; i++) {
       await sleep(500);
-      stolen += (await b.claim(1)).length;
+      stolen += (await b.claim(5)).length; // a limit with room: only the lease keeps b out
     }
     await running;
     expect(stolen).toBe(0);
@@ -117,6 +117,21 @@ describe("TenantExecutor", () => {
       [taskId],
     );
     expect(rows[0]).toEqual({ attempts: 1, state: "completed" });
+  });
+
+  it("claims within the tenant's limit counted across workers, and concurrent claims never overshoot it", async () => {
+    const db = await tenant();
+    const handlers: Partial<TaskHandlers> = { "run-turn": async () => {} };
+    const executors = ["a", "b", "c", "d"].map((workerId) =>
+      createTenantExecutor(db, handlers, { workerId }),
+    );
+    for (let i = 0; i < 6; i++) await spawn(db, `k${i}`);
+    const claimed = (await Promise.all(executors.map((e) => e.claim(3)))).flat();
+    expect(claimed).toHaveLength(3);
+    expect(await executors[0]?.claim(3)).toEqual([]);
+    // A finished run frees its slot for any worker.
+    await executors[0]?.execute(claimed[0] as NonNullable<(typeof claimed)[number]>);
+    expect(await executors[1]?.claim(3)).toHaveLength(1);
   });
 
   it("fences the first run out once its lease lapsed and a second worker took over", async () => {

@@ -58,4 +58,5 @@ already do.
   structured JSON with tenant ids and no content (`make logs-query`).
 - Whoever holds the Railway login can read every variable, so every secret. There is no least-privilege agent role yet
   (tech debt): a project token (`RAILWAY_TOKEN`) is the starting point.
-- Not yet exercised here: Postgres `max_connections` at the template's default against the budget in docs/deploy.md.
+- Postgres `max_connections` is raised to 500 with `ALTER SYSTEM` once per environment, against the connection budget in
+  docs/deploy.md#postgres. The template's start command stays as shipped, so Railway keeps managing the database.

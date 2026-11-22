@@ -18,7 +18,7 @@ import {
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import { notifyLive } from "@kerby/conversations";
 import { completeTurnWith, createTestTenant, type TestTenant } from "@kerby/conversations/testing";
-import { TenantPools } from "@kerby/db";
+import { LISTEN_APPLICATION_NAME, TenantPools } from "@kerby/db";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
@@ -43,6 +43,7 @@ async function harness(
     providers?: string[];
     failedAuthPerMinute?: number;
     trustProxy?: boolean;
+    maxStreamsPerProcess?: number;
   } = {},
 ) {
   const keys = generateSecretsKeyPair();
@@ -66,6 +67,7 @@ async function harness(
       defaultSystem: "Be helpful.",
       authCacheMs: options.authCacheMs ?? 0,
       maxStreamsPerTenant: options.maxStreams ?? 20,
+      maxStreamsPerProcess: options.maxStreamsPerProcess ?? 100,
       streamRecheckMs: 100,
       defaultRequestsPerMinute: 10_000,
       defaultStorageBytes: 1024 ** 3,
@@ -370,26 +372,30 @@ describe("event stream", () => {
     expect(events[0]?.event.event).toMatchObject({ message: { content: [{ text: "two" }] } });
   });
 
-  it("releases its LISTEN connection when the client goes away", async () => {
+  it("shares one LISTEN connection among a tenant's streams and releases it when the last client goes away", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
-    const { id } = await newConversation(h, t.secret);
+    const conversations = [await newConversation(h, t.secret), await newConversation(h, t.secret)];
     const listening = async () =>
-      Number(
-        (
-          await t.ctx.db.query<{ n: string }>(
-            "select count(*)::text as n from pg_stat_activity where query like 'listen %' and datname = current_database()",
-          )
-        ).rows[0]?.n,
+      (
+        await t.ctx.db.query<{ n: number }>(
+          "select count(*)::int as n from pg_stat_activity where application_name = $1 and datname = current_database()",
+          [LISTEN_APPLICATION_NAME],
+        )
+      ).rows[0]?.n;
+    const controllers = Array.from({ length: 6 }, () => new AbortController());
+    for (const [i, controller] of controllers.entries()) {
+      const response = await fetch(
+        `${h.base}/v1/conversations/${conversations[i % 2]?.id}/events`,
+        { headers: { authorization: `Bearer ${t.secret}` }, signal: controller.signal },
       );
-    const controller = new AbortController();
-    const response = await fetch(`${h.base}/v1/conversations/${id}/events`, {
-      headers: { authorization: `Bearer ${t.secret}` },
-      signal: controller.signal,
-    });
-    await response.body?.getReader().read(); // the stream is open
+      await response.body?.getReader().read(); // the stream is open
+    }
     expect(await listening()).toBe(1);
-    controller.abort();
+    for (const controller of controllers.slice(1)) controller.abort();
+    await sleep(200);
+    expect(await listening()).toBe(1);
+    controllers[0]?.abort();
     for (let i = 0; i < 40 && (await listening()) !== 0; i++) await sleep(50);
     expect(await listening()).toBe(0);
   });
@@ -429,6 +435,42 @@ describe("event stream limits", () => {
     }
     expect(status).toBe(200);
     await b.body?.cancel().catch(() => {});
+  });
+
+  it("caps open streams per process across tenants with a 503, and frees a slot when one closes", async () => {
+    const h = await harness({ maxStreams: 2, maxStreamsPerProcess: 3 });
+    const t = await h.tenant("acme");
+    const other = await h.tenant("other");
+    const { id } = await newConversation(h, t.secret);
+    const { id: otherId } = await newConversation(h, other.secret);
+    const first = new AbortController();
+    const opened = [
+      await open(h, t.secret, id, first.signal),
+      await open(h, t.secret, id),
+      await open(h, other.secret, otherId),
+    ];
+    expect(opened.map((r) => r.status)).toEqual([200, 200, 200]);
+    // `other` is under its own cap, but the process is full.
+    const refused = await open(h, other.secret, otherId);
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        code: "server_busy",
+        message: expect.stringMatching(/maximum of 3 open event streams/),
+      },
+    });
+
+    first.abort();
+    await opened[0]?.body?.cancel().catch(() => {});
+    let status = 503;
+    for (let i = 0; i < 40 && status === 503; i++) {
+      await sleep(50);
+      const retry = await open(h, other.secret, otherId);
+      status = retry.status;
+      await retry.body?.cancel().catch(() => {});
+    }
+    expect(status).toBe(200);
+    for (const response of opened.slice(1)) await response.body?.cancel().catch(() => {});
   });
 
   it.each([

@@ -126,7 +126,9 @@ flowchart LR
 ```
 
 1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` (a periodic sweep catches missed ones) and
-   claims from that tenant's database only while the tenant is under its concurrency limit.
+   claims from that tenant's database only while the tenant is under its concurrency limit, counted across every
+   worker: the claim runs in a tenant-database transaction holding an advisory lock, counts the turns running there
+   under a live lease and claims at most the difference. A worker already at the limit by itself does not ask.
 2. **Rehydrate.** The task reads the conversation's messages from the tenant's index (bodies from S3) and starts a
    fresh in-memory harness with them as `AgentRun.history`. Workers hold no state, so any worker takes any turn. A tool
    call in the history without a persisted result is resolved first through `executeTool` (a cached step), never left to the harness.
@@ -156,7 +158,9 @@ flowchart LR
 - **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
   then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
   events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
-  a poll every 5 s is the backstop for a lost notification.
+  a poll every 5 s is the backstop for a lost notification. All streams on one tenant database in an api process share
+  one `LISTEN` connection; a process caps its open streams per tenant (429) and in all (503), to stay inside the
+  connection budget in [docs/deploy.md](docs/deploy.md#postgres).
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
@@ -188,7 +192,8 @@ then provisions a `default` tenant through the operator API and prints its key. 
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
   on conversations, streams, database roles, tasks, object prefixes and keys, suspension within the auth cache TTL
-  (`AUTH_CACHE_SECONDS`, 3 s locally, 30 s by default), then a load run (`KERBY_LOAD_TENANTS`, default 200).
+  (`AUTH_CACHE_SECONDS`, 3 s locally, 30 s by default), then a load run (`KERBY_LOAD_TENANTS`, default 200) with a
+  stream-saturation phase: a second api process, both filled to their stream cap, peak connections per process and role.
 - `make e2e` (scripts/e2e.ts) is the proof on the real stack: two workers, an SSE stream, `docker kill` of the worker
   holding a turn mid-flight, then checks that the turn finished elsewhere, the tool ran once and every message exists once.
 - `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e` and

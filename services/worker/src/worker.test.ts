@@ -653,6 +653,40 @@ describe("scheduling", () => {
     for (const c of noisyConversations) await h.settled(noisy, c.id, 2);
     expect(peak).toBe(1);
   });
+
+  it("counts a tenant's limit across workers: two workers never run more than the limit at once", async () => {
+    const h = await harness();
+    await h.extraWorker({ runtime: createDevelopmentRuntime() });
+    const t = await h.tenant("acme", { maxConcurrentTurns: 2 });
+    const conversations = await Promise.all([1, 2, 3, 4, 5].map(() => h.conversation(t)));
+
+    // Sample the tenant's database, not either worker: what counts is every worker together.
+    let peak = 0;
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) {
+        const { rows } = await t.ctx.db.query<{ running: number }>(
+          "select count(*)::int as running from absurd.r_turns where state = 'running'",
+        );
+        peak = Math.max(peak, rows[0]?.running ?? 0);
+        await sleep(20);
+      }
+    })();
+    cleanups.push(async () => {
+      sampling = false;
+      await sampler;
+    });
+
+    for (const c of conversations) await h.post(t, c.id, "[slow:700] work");
+    for (const c of conversations) await h.settled(t, c.id, 2);
+    sampling = false;
+    await sampler;
+    expect(peak).toBe(2);
+    const { rows } = await t.ctx.db.query<{ state: string; runs: number }>(
+      "select state, count(*)::int as runs from absurd.t_turns group by state",
+    );
+    expect(rows).toEqual([{ state: "completed", runs: 5 }]);
+  });
 });
 
 describe("worker config", () => {

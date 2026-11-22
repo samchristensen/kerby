@@ -3,11 +3,14 @@
 //   2. the cross-tenant attempt suite: conversations, event streams, database roles, tasks, object prefixes, keys;
 //   3. a database password rotation: the old password is refused and api and worker log in with the new one;
 //   4. suspension takes effect within the API's auth cache TTL, and only for that tenant;
-//   5. a load run with N tenants (default 200): provisioning, a turn each, connections, memory, then deletion.
+//   5. a load run with N tenants (default 200): provisioning, a turn each, connections, memory, then deletion;
+//   6. inside it, stream saturation on two api processes: both filled to their stream cap over many tenants,
+//      peak Postgres connections per process and per tenant role (the budget in docs/deploy.md#postgres).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { openTenantDbPassword } from "@kerby/control-plane";
+import { LISTEN_APPLICATION_NAME, TENANT_ROLE_CONNECTION_LIMIT } from "@kerby/db";
 import { createSecretBox, splitKeys } from "@kerby/secrets";
 
 const API = `http://127.0.0.1:${process.env.KERBY_API_PORT ?? "8080"}`;
@@ -16,6 +19,9 @@ const box = createSecretBox(
   splitKeys(process.env.KERBY_TENANT_DB_KEYS ?? "Ga5JSSydS48D60HoBOzAmEPJeUKLm3s44q+oguVov0M="),
 );
 const TENANTS = Number(process.env.KERBY_LOAD_TENANTS ?? "200");
+/** Tenants whose streams fill the two api processes in the saturation phase; above the process cap, so the second
+ * process fills with one stream per tenant: its worst case. */
+const STREAM_TENANTS = Number(process.env.KERBY_STREAM_TENANTS ?? "100");
 const KEEP = process.env.KERBY_E2E_KEEP === "1";
 const AUTH_TTL_MS = 3_000; // AUTH_CACHE_SECONDS in compose.yaml
 
@@ -309,6 +315,244 @@ async function suspensionSuite(a: Tenant, b: Tenant): Promise<void> {
 const percentile = (sorted: number[], p: number) =>
   sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;
 
+type Stream = { controller: AbortController; reader: ReadableStreamDefaultReader<Uint8Array> };
+type Opened = { stream: Stream } | { status: number; code: string };
+
+/** Open a conversation's event stream on `base` and wait for its first bytes. */
+async function openStream(base: string, key: string, conversationId: string): Promise<Opened> {
+  const controller = new AbortController();
+  const response = await fetch(`${base}/v1/conversations/${conversationId}/events`, {
+    headers: { authorization: `Bearer ${key}` },
+    signal: controller.signal,
+  });
+  if (response.status !== 200 || !response.body) {
+    const body = (await response.json()) as { error?: { code?: string } };
+    return { status: response.status, code: body.error?.code ?? "" };
+  }
+  const reader = response.body.getReader();
+  await reader.read(); // ": open"
+  return { stream: { controller, reader } };
+}
+
+/** Read `stream` until it carries the persisted message `seq` (replayed or live). */
+async function waitForSeq(stream: Stream, seq: number): Promise<void> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + 30_000;
+  while (!text.includes(`id: ${seq}\n`)) {
+    if (Date.now() > deadline) throw new Error(`stream never carried message ${seq}`);
+    const { done, value } = await stream.reader.read();
+    if (done) throw new Error(`stream ended before message ${seq}`);
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
+/**
+ * A second api process. Compose publishes the api on one fixed port, so `--scale api=2` cannot bind a second
+ * replica: this is a one-off container of the same service and image on a random loopback port.
+ */
+async function secondApi(): Promise<{ container: string; base: string }> {
+  const container = compose("run", "-d", "--no-deps", "-p", "127.0.0.1::8080", "api");
+  const port = sh("docker", ["port", container, "8080/tcp"]).split("\n")[0]?.split(":").at(-1);
+  const base = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 60; i++) {
+    const healthy = await fetch(`${base}/healthz`).then(
+      (r) => r.ok,
+      () => false,
+    );
+    if (healthy) return { container, base };
+    await sleep(500);
+  }
+  throw new Error(`the second api (${container}) never became healthy`);
+}
+
+/** Client connections to Postgres right now, by process (container name), application and role. */
+function activity(names: ReadonlyMap<string, string>) {
+  const rows = psql(
+    "postgres",
+    `select host(client_addr), application_name, usename, count(*) from pg_stat_activity
+      where backend_type = 'client backend' and client_addr is not null group by 1, 2, 3`,
+  );
+  return rows
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [addr = "", app = "", role = "", n = "0"] = line.split("|");
+      return { process: names.get(addr) ?? addr, app, role, n: Number(n) };
+    });
+}
+
+type LoadTenant = { id: string; secret: string; conversationId: string };
+
+/**
+ * Fill two api processes with event streams over `tenants` (round robin, one tenant database each) until each refuses
+ * with 503, hold them while sampling `pg_stat_activity`, check a live message reaches every stream of one tenant on
+ * both processes, then close everything and check the listening connections are gone.
+ */
+async function streamSaturation(tenants: readonly LoadTenant[]): Promise<string> {
+  console.log(`stream saturation: two api processes, streams over ${tenants.length} tenants`);
+  const first = tenants[0];
+  if (!first) throw new Error("stream saturation needs at least one tenant");
+  const second = await secondApi();
+  const ipOf = (container: string) =>
+    sh("docker", [
+      "inspect",
+      "-f",
+      "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+      container,
+    ]);
+  const names = new Map<string, string>([
+    [ipOf(compose("ps", "-q", "api")), "api-1"],
+    [ipOf(second.container), "api-2"],
+    [ipOf(compose("ps", "-q", "worker")), "worker"],
+    [ipOf(compose("ps", "-q", "control")), "control"],
+  ]);
+  const streams: { tenantId: string; stream: Stream }[] = [];
+  const closeAll = () => {
+    for (const { stream } of streams.splice(0)) stream.controller.abort();
+  };
+  try {
+    // One tenant up to its own cap on one process.
+    let perTenant = 0;
+    for (;;) {
+      const opened = await openStream(API, first.secret, first.conversationId);
+      if ("stream" in opened) {
+        streams.push({ tenantId: first.id, stream: opened.stream });
+        perTenant++;
+        continue;
+      }
+      check(
+        opened.status === 429 && opened.code === "too_many_streams",
+        `one tenant is refused (429 too_many_streams) past ${perTenant} streams on one process`,
+      );
+      break;
+    }
+
+    // Both processes up to their own cap, round robin over every tenant.
+    const perProcess: number[] = [];
+    for (const [name, base] of [
+      ["api-1", API],
+      ["api-2", second.base],
+    ] as const) {
+      let open = base === API ? perTenant : 0;
+      let refused: { status: number; code: string } | undefined;
+      while (!refused) {
+        let openedThisRound = 0;
+        for (const tenant of tenants) {
+          const opened = await openStream(base, tenant.secret, tenant.conversationId);
+          if ("stream" in opened) {
+            streams.push({ tenantId: tenant.id, stream: opened.stream });
+            open++;
+            openedThisRound++;
+          } else if (opened.status !== 429) {
+            refused = opened;
+            break;
+          }
+        }
+        if (!refused && openedThisRound === 0)
+          throw new Error(
+            `every tenant is at its stream cap before ${name} is full: raise KERBY_STREAM_TENANTS`,
+          );
+      }
+      check(
+        refused.status === 503 && refused.code === "server_busy",
+        `${name} is refused (503 server_busy) past ${open} streams`,
+      );
+      perProcess.push(open);
+    }
+
+    // Hold at saturation for longer than the pools' idle timeout (10 s) and the streams' poll period (5 s).
+    let peakTotal = 0;
+    let peakPerRole = 0;
+    let peakPerRoleProcess = 0;
+    const peakByProcess = new Map<string, number>();
+    const peakListeners = new Map<string, number>();
+    const raise = (peaks: Map<string, number>, sums: Map<string, number>) => {
+      for (const [key, n] of sums) peaks.set(key, Math.max(peaks.get(key) ?? 0, n));
+    };
+    for (let i = 0; i < 15; i++) {
+      const rows = activity(names);
+      const sumBy = (key: (row: (typeof rows)[number]) => string | undefined) => {
+        const sums = new Map<string, number>();
+        for (const row of rows) {
+          const k = key(row);
+          if (k !== undefined) sums.set(k, (sums.get(k) ?? 0) + row.n);
+        }
+        return sums;
+      };
+      const tenantRole = (row: (typeof rows)[number]) => row.role.startsWith("r_");
+      peakTotal = Math.max(
+        peakTotal,
+        rows.reduce((sum, row) => sum + row.n, 0),
+      );
+      raise(
+        peakByProcess,
+        sumBy((row) => row.process),
+      );
+      raise(
+        peakListeners,
+        sumBy((row) => (row.app === LISTEN_APPLICATION_NAME ? row.process : undefined)),
+      );
+      for (const n of sumBy((row) => (tenantRole(row) ? row.role : undefined)).values())
+        peakPerRole = Math.max(peakPerRole, n);
+      for (const n of sumBy((row) =>
+        tenantRole(row) ? `${row.role}@${row.process}` : undefined,
+      ).values())
+        peakPerRoleProcess = Math.max(peakPerRoleProcess, n);
+      await sleep(1000);
+    }
+    const memory = sh("docker", [
+      "stats",
+      "--no-stream",
+      "--format",
+      "{{.MemUsage}}",
+      compose("ps", "-q", "postgres"),
+    ]);
+    check(
+      peakPerRole <= TENANT_ROLE_CONNECTION_LIMIT,
+      `no tenant role held more than TENANT_ROLE_CONNECTION_LIMIT (${TENANT_ROLE_CONNECTION_LIMIT}) connections (peak ${peakPerRole})`,
+    );
+    for (const name of ["api-1", "api-2"])
+      check(
+        (peakListeners.get(name) ?? 0) <= tenants.length,
+        `${name} held at most one listening connection per tenant (${peakListeners.get(name) ?? 0} for ${tenants.length} tenants)`,
+      );
+
+    // A message posted now reaches every stream the first tenant holds, on both processes.
+    const posted = await api(
+      first.secret,
+      "POST",
+      `/v1/conversations/${first.conversationId}/messages`,
+      { content: "to every stream" },
+    );
+    check(posted.status === 202, "a message posted during saturation is accepted");
+    const mine = streams.filter((s) => s.tenantId === first.id);
+    await Promise.all(mine.map(({ stream }) => waitForSeq(stream, Number(posted.body.seq))));
+    check(true, `all ${mine.length} of that tenant's streams on both processes carried it`);
+
+    closeAll();
+    let listening = -1;
+    for (let i = 0; i < 40 && listening !== 0; i++) {
+      await sleep(250);
+      listening = activity(names)
+        .filter((row) => row.app === LISTEN_APPLICATION_NAME && row.process.startsWith("api"))
+        .reduce((sum, row) => sum + row.n, 0);
+    }
+    check(listening === 0, "closing every stream closed both api processes' listening connections");
+
+    const list = (peaks: Map<string, number>) =>
+      [...peaks].map(([name, n]) => `${name} ${n}`).join(", ");
+    return [
+      `Stream saturation: per-tenant cap ${perTenant}, process caps ${perProcess.join(" and ")} streams over ${tenants.length} tenants;`,
+      `peak ${peakTotal} client connections (${list(peakByProcess)}; listening: ${list(peakListeners)});`,
+      `peak per tenant role ${peakPerRole} in all, ${peakPerRoleProcess} from one process; Postgres memory ${memory}.`,
+    ].join(" ");
+  } finally {
+    closeAll();
+    sh("docker", ["rm", "-f", second.container]);
+  }
+}
+
 async function loadRun(): Promise<string> {
   console.log(`load run: ${TENANTS} tenants`);
   const memory = () =>
@@ -347,14 +591,19 @@ async function loadRun(): Promise<string> {
   const provisioningMs = performance.now() - t0;
 
   const t1 = performance.now();
-  const latencies = (
-    await pool(tenants, 40, (tenant) => converse(tenant.secret, "hello from the load run"))
-  )
-    .map((r) => r.ms)
-    .sort((x, y) => x - y);
+  const answered = await pool(tenants, 40, (tenant) =>
+    converse(tenant.secret, "hello from the load run"),
+  );
+  const latencies = answered.map((r) => r.ms).sort((x, y) => x - y);
   const turnsMs = performance.now() - t1;
   clearInterval(sampler);
   const during = memory();
+
+  const saturation = await streamSaturation(
+    tenants
+      .slice(0, STREAM_TENANTS)
+      .map((tenant, i) => ({ ...tenant, conversationId: answered[i]?.id ?? "" })),
+  );
 
   const t2 = performance.now();
   await pool(tenants, 8, async (tenant) => {
@@ -369,6 +618,7 @@ async function loadRun(): Promise<string> {
     `one turn each in ${seconds(turnsMs)} s (post to answer p50 ${Math.round(percentile(latencies, 0.5))} ms, p95 ${Math.round(percentile(latencies, 0.95))} ms, max ${Math.round(latencies.at(-1) ?? 0)} ms),`,
     `peak ${peakConnections} Postgres connections, deleted in ${seconds(deletionMs)} s.`,
     `Memory before: ${before.replaceAll("\n", "; ")}. During: ${during.replaceAll("\n", "; ")}.`,
+    saturation,
   ].join(" ");
 }
 

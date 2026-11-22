@@ -18,8 +18,10 @@ export type ApiDeps = {
     keylessProviders: readonly string[];
     defaultSystem: string;
     authCacheMs: number;
-    /** Open event streams one tenant may hold on one api process; each keeps a database connection. */
+    /** Open event streams one tenant may hold on one api process; each leases the tenant's pool. */
     maxStreamsPerTenant: number;
+    /** Open event streams this api process holds in all; past it a new stream is a 503 (docs/deploy.md#postgres). */
+    maxStreamsPerProcess: number;
     /** How often an open event stream confirms its key and tenant are still allowed. */
     streamRecheckMs: number;
     /** Requests per minute for a tenant whose limits do not set `requestsPerMinute`; counted per api process. */

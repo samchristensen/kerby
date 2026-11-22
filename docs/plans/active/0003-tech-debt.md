@@ -61,14 +61,14 @@ flowchart LR
   only warns, so the proof is a refused connection, not the statement.
   Proof: a control test where a provisioned tenant role is refused by all three (over the network address, as
   `make multitenant` does); the same check added to `scripts/multitenant.ts`.
-- [ ] **B2 Turn limit across workers** ("A tenant's concurrent-turn limit is counted per worker process"). M.
+- [x] **B2 Turn limit across workers** ("A tenant's concurrent-turn limit is counted per worker process"). M.
   Now: `services/worker/src/service/scheduler.ts:50` subtracts this process's `running` map from `maxConcurrentTurns`.
   Fix: `packages/durable`'s executor claims inside a tenant-database transaction holding `pg_advisory_xact_lock`, counts
   `absurd.r_turns` rows with `state = 'running' and claim_expires_at > now()`, and claims at most the difference (through
   the SDK on the pool's other connection). Keep the local count as a fast path: local at limit means global at limit.
   Proof: two schedulers over one tenant (the `worker.test.ts` pattern), limit 2, five slow turns: never more than two
   running, all five finish. Update ADR 0004's "worker serves many databases" and ARCHITECTURE.md step 1.
-- [ ] **B3 Connection budget** ("Hosting: Postgres runs with the template's `max_connections`", "The tenant-role
+- [x] **B3 Connection budget** ("Hosting: Postgres runs with the template's `max_connections`", "The tenant-role
   connection limit ... is a guess", "Connections per api process have no ceiling"). L.
   Now: `ctx.db.listen` opens a new `pg.Client` per call (`packages/db/src/handles.ts:129`), so each event stream holds
   one connection and leases its tenant's pool; `TenantPools` evicts only idle pools, so `maxPools` (50) is soft. Streams
@@ -270,3 +270,11 @@ No work until the trigger; the debt line stays and names it.
   random database passwords sealed under `TENANT_DB_KEYS` (ADR 0009), with operator rotation, a startup backfill and
   re-seal, and pools that look the password up at every login; `TENANT_DB_SECRET` deleted. Non-superuser admin path
   deleted (H1 keeps Railway's superuser).
+- 2026-11-22 B2, B3 paid (PR #11). B2: a claim counts the tenant's running turns (live lease) and claims the difference
+  in one tenant-database transaction under an advisory lock; two schedulers, limit 2, five slow turns: peak 2, all
+  finish. B3: one `LISTEN` connection per tenant database per process; `MAX_STREAMS_PER_PROCESS` 60 (503
+  `server_busy`); budget formula and `max_connections` 500 by `ALTER SYSTEM` in docs/deploy.md#postgres (PgBouncer
+  not used: transaction pooling breaks `LISTEN`). Measured (`make multitenant`, two api processes): 3 connections per
+  streaming tenant per api process however many streams (46 tenants 156, 60 tenants 181 to 183; bound 190), peak 421 to
+  426 in all, one tenant role at most 8; so `MAX_STREAMS_PER_TENANT` 15 (was 20) and `TENANT_ROLE_CONNECTION_LIMIT` 20
+  (was 50). Also: a connection lost while a pooled client is checked out no longer crashes the process (regression test).
