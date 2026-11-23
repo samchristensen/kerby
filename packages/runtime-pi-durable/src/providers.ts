@@ -7,6 +7,7 @@ import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { groqProvider } from "@earendil-works/pi-ai/providers/groq";
 import { mistralProvider } from "@earendil-works/pi-ai/providers/mistral";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { togetherProvider } from "@earendil-works/pi-ai/providers/together";
 import { xaiProvider } from "@earendil-works/pi-ai/providers/xai";
@@ -26,6 +27,7 @@ export const PROVIDERS: Record<SupportedProvider, () => AnyProvider> = {
   groq: groqProvider,
   mistral: mistralProvider,
   openai: openaiProvider,
+  opencode: opencodeProvider,
   openrouter: openrouterProvider,
   together: togetherProvider,
   xai: xaiProvider,

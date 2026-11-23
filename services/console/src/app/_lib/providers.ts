@@ -7,6 +7,7 @@ const names: Record<string, string> = {
   groq: "Groq",
   mistral: "Mistral",
   openai: "OpenAI",
+  opencode: "OpenCode Models",
   openrouter: "OpenRouter",
   together: "Together AI",
   xai: "xAI",
