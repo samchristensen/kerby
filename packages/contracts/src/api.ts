@@ -1,6 +1,7 @@
 // The tenant-facing HTTP API (services/api). Request and response bodies, and the SSE event envelope.
 import { z } from "zod";
 import { AgentEventSchema, AgentMessageSchema, ContentPartSchema } from "./agent.ts";
+import { GuardrailsSchema } from "./judgment.ts";
 
 const Id = z.string().min(1).max(128);
 
@@ -10,6 +11,8 @@ export const CreateConversationRequestSchema = z.object({
   /** A Kerby model id, `<provider>/<modelId>`; the tenant must hold a key for the provider. Defaults to the deployment default. */
   model: z.string().min(1).max(200).optional(),
   system: z.string().max(100_000).optional(),
+  /** Guardrails for this conversation; the tenant must hold a key for the default judgment provider. */
+  guardrails: GuardrailsSchema.optional(),
 });
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
 
@@ -23,11 +26,16 @@ const ConversationSchema = z.object({
   createdAt: z.iso.datetime(),
   /** When a message was last added (creation time until then): the order of `GET /v1/conversations`. */
   updatedAt: z.iso.datetime(),
+  /** Conditions checked before the assistant acts on a user message or runs a tool (ADR 0016). Empty for none. */
+  guardrails: GuardrailsSchema.default([]),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
 
-/** A conversation in a list: everything but the system prompt, with how many messages it holds. */
-const ConversationSummarySchema = ConversationSchema.omit({ system: true }).extend({
+/** A conversation in a list: everything but the system prompt and guardrails, with how many messages it holds. */
+const ConversationSummarySchema = ConversationSchema.omit({
+  system: true,
+  guardrails: true,
+}).extend({
   messageCount: z.number().int().nonnegative(),
 });
 export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;

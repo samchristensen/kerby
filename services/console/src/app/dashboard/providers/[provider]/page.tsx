@@ -12,6 +12,20 @@ import { ModelKeyForm } from "./form.tsx";
 
 export const metadata: Metadata = { title: "Model provider" };
 
+/** What a provider's key is used for, in words. */
+const uses = (provider: { chat: boolean; decisions: boolean }): string =>
+  provider.chat && provider.decisions
+    ? "chats and decisions"
+    : provider.decisions
+      ? "decisions (judgments and guardrails)"
+      : "chats";
+
+const removeConsequence = (provider: { chat: boolean; decisions: boolean }): string =>
+  provider.chat && provider.decisions
+    ? "Conversations and decisions on its models will fail"
+    : provider.decisions
+      ? "Decisions on its models will fail"
+      : "Conversations on its models will fail";
 export default async function ProviderPage({ params }: { params: Promise<{ provider: string }> }) {
   const session = await requireSession();
   const { provider: id } = await params;
@@ -24,7 +38,7 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
     <Workspace>
       <PageHeader
         title={name}
-        description={`Model ids for this provider start with ${provider.id}/.`}
+        description={`Model ids for this provider start with ${provider.id}/. It runs ${uses(provider)}.`}
         actions={
           provider.configured ? (
             <Badge tone="green">Key set</Badge>
@@ -62,17 +76,31 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
               <ConfirmAction
                 action={removeModelKeyAction.bind(null, provider.id)}
                 label="Remove key"
-                question={`Remove the ${name} key? Conversations on ${name} models will fail until you add one again.`}
+                question={`Remove the ${name} key? ${removeConsequence(provider)} until you add one again.`}
                 confirmLabel="Remove"
               />
             </div>
           ) : null}
         </Card>
         <Card title="Usage">
-          <p className="mb-3 text-sm text-zinc-500">
-            Name the model when you start a conversation:
-          </p>
-          <CodeBlock>{`{"model": "${provider.id}/<model-id>"}`}</CodeBlock>
+          {provider.chat ? (
+            <>
+              <p className="mb-3 text-sm text-zinc-500">
+                Name the model when you start a conversation:
+              </p>
+              <CodeBlock>{`{"model": "${provider.id}/<model-id>"}`}</CodeBlock>
+            </>
+          ) : null}
+          {provider.decisions ? (
+            <>
+              <p className={`${provider.chat ? "mt-6 " : ""}mb-3 text-sm text-zinc-500`}>
+                Name the model of a decision (
+                <code className="font-mono text-xs">POST /v1/judgments</code>, or a guardrail's{" "}
+                <code className="font-mono text-xs">model</code>):
+              </p>
+              <CodeBlock>{`{"model": "${provider.id}/<model-id>"}`}</CodeBlock>
+            </>
+          ) : null}
         </Card>
       </div>
     </Workspace>

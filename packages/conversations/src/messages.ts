@@ -197,6 +197,8 @@ export type PersistInput = {
   /** Must be the conversation's next position. */
   seq: number;
   message: AgentMessage;
+  /** Guardrails that blocked the exchange this message belongs to (the refusal): it is kept out of later turns' history. */
+  blockedBy?: readonly string[] | undefined;
   /** The run writing it: the insert is refused unless this run is still the task's current attempt. */
   run: Pick<RunContext, "taskId" | "runId" | "queue">;
 };
@@ -218,11 +220,11 @@ export async function persistMessage(
     if (!(await holdsRun(tx, run)))
       throw new LeaseLostError(`run ${run.runId} no longer owns task ${run.taskId}`);
     const inserted = await tx.query(
-      `insert into messages (conversation_id, seq, role, blob_id, run_id)
-       select $1, $2, $3, $4, $5
+      `insert into messages (conversation_id, seq, role, blob_id, run_id, blocked_by)
+       select $1, $2, $3, $4, $5, $6
         where $2 = (select coalesce(max(seq), 0) + 1 from messages where conversation_id = $1)
        on conflict (conversation_id, seq) do nothing`,
-      [conversationId, seq, message.role, blobId, run.runId],
+      [conversationId, seq, message.role, blobId, run.runId, input.blockedBy ?? null],
     );
     if (inserted.rowCount === 1) {
       await tx.query("update conversations set updated_at = now() where id = $1", [conversationId]);
@@ -243,6 +245,24 @@ export async function persistMessage(
         `message ${seq} of ${conversationId} already holds different content`,
       );
     return "exists";
+  });
+}
+
+/**
+ * Flag a user message as blocked by `names`, so no later turn rehydrates it. Fenced like `persistMessage`: refused with
+ * `LeaseLostError` once the run's lease has lapsed. Idempotent.
+ */
+export async function blockMessage(
+  ctx: TenantContext,
+  input: Pick<PersistInput, "conversationId" | "seq" | "run"> & { blockedBy: readonly string[] },
+): Promise<void> {
+  await ctx.db.transaction(async (tx) => {
+    if (!(await holdsRun(tx, input.run)))
+      throw new LeaseLostError(`run ${input.run.runId} no longer owns task ${input.run.taskId}`);
+    await tx.query(
+      "update messages set blocked_by = $3 where conversation_id = $1 and seq = $2 and role = 'user'",
+      [input.conversationId, input.seq, input.blockedBy],
+    );
   });
 }
 
@@ -326,7 +346,9 @@ export async function readHistory(
   conversationId: string,
   budgetBytes: number,
 ): Promise<History> {
-  const rows = await listMessageRowsNewestFirst(ctx.db, conversationId);
+  const all = await listMessageRowsNewestFirst(ctx.db, conversationId);
+  // A blocked message and its refusal keep their positions in the index but are never shown to the model again.
+  const rows = all.filter((row) => row.blockedBy === null);
   let keep = 0;
   let bytes = 0;
   let pending = 0;
@@ -347,7 +369,7 @@ export async function readHistory(
   const total = rows.reduce((sum, row) => sum + row.size, 0);
   return {
     messages: await withBodies(ctx, blobs, rows.slice(0, keep).reverse()),
-    lastSeq: rows[0]?.seq ?? 0,
+    lastSeq: all[0]?.seq ?? 0,
     bytes,
     dropped: { messages: rows.length - keep, bytes: total - bytes },
   };

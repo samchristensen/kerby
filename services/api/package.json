@@ -13,6 +13,8 @@
     "@kerby/control-plane": "workspace:*",
     "@kerby/conversations": "workspace:*",
     "@kerby/db": "workspace:*",
+    "@kerby/durable": "workspace:*",
+    "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
     "@kerby/secrets": "workspace:*",

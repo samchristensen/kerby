@@ -14,6 +14,8 @@
     "@kerby/conversations": "workspace:*",
     "@kerby/db": "workspace:*",
     "@kerby/durable": "workspace:*",
+    "@kerby/judgment": "workspace:*",
+    "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",

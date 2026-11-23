@@ -10,7 +10,7 @@ export const metadata: Metadata = { title: "New chat" };
 export default async function NewChatPage() {
   const session = await requireSession();
   const providers = (await consoleService().providers(session))
-    .filter((provider) => provider.configured)
+    .filter((provider) => provider.configured && provider.chat)
     .map((provider) => provider.id);
   return (
     <Workspace>

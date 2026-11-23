@@ -1,6 +1,7 @@
 import type { TenantContext } from "@kerby/db";
 import type { TaskHandlers } from "@kerby/durable";
 import { withTenant } from "@kerby/observability";
+import { runJudgmentTask } from "../service/judgments.ts";
 import { runTurn } from "../service/turn.ts";
 import type { WorkerDeps } from "../types/index.ts";
 
@@ -8,5 +9,7 @@ import type { WorkerDeps } from "../types/index.ts";
 export function createHandlers(deps: WorkerDeps): (ctx: TenantContext) => TaskHandlers {
   return (ctx) => ({
     "run-turn": (params, run) => withTenant(ctx.tenantId, () => runTurn(deps, ctx, params, run)),
+    "run-judgment": (params, run) =>
+      withTenant(ctx.tenantId, () => runJudgmentTask(deps, ctx, params, run)),
   });
 }

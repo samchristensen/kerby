@@ -65,7 +65,8 @@ async function harness(
     signups,
     api,
     settings: {
-      modelProviders: ["anthropic", "openai"],
+      modelProviders: ["anthropic", "openai", "opencode"],
+      judgmentProviders: ["typesafe", "opencode"],
       apiPublicUrl: "https://api.example.com",
       sessionTtlMs: 60_000,
       passwordCost: COST,
@@ -243,11 +244,23 @@ describe("workspace", () => {
     expect(await readModelKey(h.control.db, h.opener, session.tenantId, "anthropic")).toBe(
       "sk-ant-test-123456",
     );
-    expect((await h.service.providers(session)).map((p) => [p.id, p.configured])).toEqual([
-      ["anthropic", true],
-      ["openai", false],
+    const providers = await h.service.providers(session);
+    // OpenCode is both a chat and a decision provider, and is listed once.
+    expect(providers.map((p) => [p.id, p.configured, p.chat, p.decisions])).toEqual([
+      ["anthropic", true, true, false],
+      ["openai", false, true, false],
+      ["opencode", false, true, true],
+      ["typesafe", false, false, true],
     ]);
-    expect((await h.service.overview(session)).modelKeys).toBe(1);
+    // A judgment provider takes a key the same way.
+    expect(await h.service.setModelKey(session, "typesafe", { apiKey: "ts-key-123456" })).toEqual({
+      ok: true,
+    });
+    expect(await readModelKey(h.control.db, h.opener, session.tenantId, "typesafe")).toBe(
+      "ts-key-123456",
+    );
+    expect((await h.service.overview(session)).modelKeys).toBe(2);
+    expect(await h.service.removeModelKey(session, "typesafe")).toBe(true);
     expect(await h.service.removeModelKey(session, "anthropic")).toBe(true);
     expect(await h.service.removeModelKey(session, "anthropic")).toBe(false);
 
@@ -257,6 +270,8 @@ describe("workspace", () => {
     );
     expect(rows).toEqual([
       { action: "model_key.set", actor: `user:${session.userId}` },
+      { action: "model_key.set", actor: `user:${session.userId}` },
+      { action: "model_key.delete", actor: `user:${session.userId}` },
       { action: "model_key.delete", actor: `user:${session.userId}` },
     ]);
   });

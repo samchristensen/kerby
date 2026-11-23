@@ -12,8 +12,10 @@ export type ApiDeps = {
   settings: {
     /** The model a conversation gets when the request names none; without one, a request must name its model. */
     defaultModel: string | undefined;
-    /** Providers a tenant may store a key for: the harness adapter's list, injected by the composition root. */
+    /** Providers whose models run conversations, and so may hold a key: the harness adapter's list, injected by the composition root. */
     modelProviders: readonly string[];
+    /** Providers that run judgments (ADR 0015), and so may hold a key: the judgment adapters' lists, injected likewise. */
+    judgmentProviders: readonly string[];
     /** Providers whose runs need no tenant key (the development fake model). Empty in production. */
     keylessProviders: readonly string[];
     defaultSystem: string;

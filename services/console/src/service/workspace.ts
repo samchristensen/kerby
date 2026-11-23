@@ -43,6 +43,8 @@ const CreateKeyForm = CreateKeyRequestSchema.extend({
 
 export function createWorkspace(deps: ConsoleDeps) {
   const { control, sealer, settings } = deps;
+  /** Every provider a tenant may store a key for: chat models and judgments. One of both kinds (OpenCode) is listed once. */
+  const keyProviders = [...new Set([...settings.modelProviders, ...settings.judgmentProviders])];
 
   return {
     async overview(session: Session): Promise<Overview> {
@@ -103,9 +105,11 @@ export function createWorkspace(deps: ConsoleDeps) {
       const stored = new Map(
         (await listModelKeys(control, session.tenantId)).map((k) => [k.provider, k.createdAt]),
       );
-      return settings.modelProviders.map((id) => ({
+      return keyProviders.map((id) => ({
         id,
         configured: stored.has(id),
+        chat: settings.modelProviders.includes(id),
+        decisions: settings.judgmentProviders.includes(id),
         updatedAt: stored.get(id)?.toISOString() ?? null,
       }));
     },
@@ -115,8 +119,8 @@ export function createWorkspace(deps: ConsoleDeps) {
       provider: string,
       form: FormInput,
     ): Promise<{ ok: true } | FormFailure> {
-      // The harness adapter's list (ADR 0008): a key for a provider no run can use would fail only at the first turn.
-      if (!settings.modelProviders.includes(provider)) return refuse("Unknown model provider.");
+      // The adapters' lists (ADR 0008, 0015): a key for a provider nothing can use would fail only at the first call.
+      if (!keyProviders.includes(provider)) return refuse("Unknown model provider.");
       // A pasted key often carries a newline.
       const apiKey = typeof form.apiKey === "string" ? form.apiKey.trim() : form.apiKey;
       const parsed = parseForm(PutModelKeyRequestSchema, { apiKey });
@@ -137,7 +141,7 @@ export function createWorkspace(deps: ConsoleDeps) {
     },
 
     async removeModelKey(session: Session, provider: string): Promise<boolean> {
-      if (!settings.modelProviders.includes(provider)) return false;
+      if (!keyProviders.includes(provider)) return false;
       const removed = await deleteModelKey(control, session.tenantId, provider);
       if (removed) {
         await audit(control, {

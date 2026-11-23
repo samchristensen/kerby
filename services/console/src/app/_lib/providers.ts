@@ -10,6 +10,7 @@ const names: Record<string, string> = {
   opencode: "OpenCode Models",
   openrouter: "OpenRouter",
   together: "Together AI",
+  typesafe: "TypeSafe",
   xai: "xAI",
 };
 

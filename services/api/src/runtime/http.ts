@@ -3,6 +3,7 @@
 import {
   CreateConversationRequestSchema,
   GetConversationQuerySchema,
+  JudgmentRequestSchema,
   ListConversationsQuerySchema,
   ModelProviderSchema,
   PostMessageRequestSchema,
@@ -30,17 +31,19 @@ import {
   readJson,
   TokenBuckets,
 } from "@kerby/serve";
+import { z } from "zod";
 import { createAuthenticator } from "../service/auth.ts";
 import {
   conversationEvents,
   createConversation,
   getConversation,
-  InvalidModelError,
   listTenantConversations,
   postMessage,
   type StreamItem,
 } from "../service/conversations.ts";
+import { getJudgment, submitJudgment } from "../service/judgments.ts";
 import { listTenantModelKeys, removeModelKey, setModelKey } from "../service/model-keys.ts";
+import { InvalidModelError } from "../service/models.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -51,6 +54,9 @@ import {
 
 /** Body limit for posting a message: the schema allows 1 million characters of text, up to 4 bytes each. */
 const MESSAGE_BODY_BYTES = 4_100_000;
+
+/** Body limit for a judgment: its request is stored as the task's params, so it stays small (ADR 0015). */
+const JUDGMENT_BODY_BYTES = 262_144;
 
 const encoder = new TextEncoder();
 
@@ -239,13 +245,16 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       "PUT",
       "/v1/model-keys/:provider",
       authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
-        // The harness adapter's list (ADR 0008): a key for a provider no run can use would fail only at the first turn.
+        // The adapters' lists (ADR 0008, 0015): a key for a provider nothing can use would fail only at the first call.
         const provider = params.provider ?? "";
-        if (!deps.settings.modelProviders.includes(provider))
+        const providers = [
+          ...new Set([...deps.settings.modelProviders, ...deps.settings.judgmentProviders]),
+        ];
+        if (!providers.includes(provider))
           throw new HttpError(
             400,
             "unknown_provider",
-            `unknown model provider; supported: ${deps.settings.modelProviders.join(", ")}`,
+            `unknown model provider; supported: ${providers.join(", ")}`,
           );
         const body = await readJson(request, PutModelKeyRequestSchema, { maxBytes: 16_384 });
         await setModelKey(deps, principal, provider, body.apiKey);
@@ -384,6 +393,25 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           await release();
           throw error;
         }
+      }),
+    ],
+    [
+      "POST",
+      "/v1/judgments",
+      authed("POST /v1/judgments", async (request, _params, principal) => {
+        const body = await readJson(request, JudgmentRequestSchema, {
+          maxBytes: JUDGMENT_BODY_BYTES,
+        });
+        return json(202, await inTenant(principal, (ctx) => submitJudgment(deps, ctx, body)));
+      }),
+    ],
+    [
+      "GET",
+      "/v1/judgments/:id",
+      authed("GET /v1/judgments/:id", async (_request, params, principal) => {
+        const id = z.uuid().safeParse(params.id);
+        if (!id.success) throw new HttpError(404, "not_found", "judgment not found");
+        return json(200, await inTenant(principal, (ctx) => getJudgment(ctx, id.data)));
       }),
     ],
   ];

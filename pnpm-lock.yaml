@@ -139,6 +139,9 @@ importers:
       '@kerby/agent':
         specifier: workspace:*
         version: link:../agent
+      '@kerby/judgment':
+        specifier: workspace:*
+        version: link:../judgment
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -200,6 +203,9 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../db
+      '@kerby/judgment':
+        specifier: workspace:*
+        version: link:../judgment
       '@kerby/observability':
         specifier: workspace:*
         version: link:../observability
@@ -208,6 +214,17 @@ importers:
         version: 0.5.1(pg@8.23.1)
 
   packages/egress: {}
+
+  packages/judgment: {}
+
+  packages/judgment-systemone:
+    dependencies:
+      '@kerby/judgment':
+        specifier: workspace:*
+        version: link:../judgment
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   packages/observability: {}
 
@@ -260,6 +277,12 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@kerby/durable':
+        specifier: workspace:*
+        version: link:../../packages/durable
+      '@kerby/judgment-systemone':
+        specifier: workspace:*
+        version: link:../../packages/judgment-systemone
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -290,6 +313,9 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@kerby/judgment-systemone':
+        specifier: workspace:*
+        version: link:../../packages/judgment-systemone
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -387,6 +413,12 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../../packages/durable
+      '@kerby/judgment':
+        specifier: workspace:*
+        version: link:../../packages/judgment
+      '@kerby/judgment-systemone':
+        specifier: workspace:*
+        version: link:../../packages/judgment-systemone
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability

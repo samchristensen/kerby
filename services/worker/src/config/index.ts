@@ -38,6 +38,10 @@ export const workerConfigSchema = z
      * to first, older ones after it while a rotation finishes. Not needed with the fake model.
      */
     secretsPrivateKeys: z.string().min(1).optional(),
+    /** TypeSafe's API (judgments, ADR 0015). Unset: https://api.typesafe.ai. Local stacks and tests point it at a stand-in. */
+    typesafeBaseUrl: z.url({ protocol: /^https?$/ }).optional(),
+    /** OpenCode Console's System One gateway (judgments, ADR 0015). Unset: https://opencode.ai/inference/systemone. */
+    opencodeSystemoneBaseUrl: z.url({ protocol: /^https?$/ }).optional(),
     /** Port of the liveness endpoint (`GET /healthz`) for the container health check. */
     healthPort: z.coerce.number().int().min(0).default(8082),
     /** How often to look at every active tenant for work a notification missed. */

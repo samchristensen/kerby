@@ -10,7 +10,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { rawPool, type TenantDb, type TenantQueryable, withConnectRetry } from "@kerby/db";
 import { errorFields, log } from "@kerby/observability";
 import { Absurd, type ClaimedTask } from "absurd-sdk";
-import { type Queue, TASKS, type TaskName, type TaskParams } from "./tasks.ts";
+import { type Queue, TASKS, type TaskName, type TaskParams, type TaskResults } from "./tasks.ts";
 
 /** What a running task knows about itself. */
 export type RunContext = {
@@ -28,7 +28,7 @@ export type RunContext = {
 };
 
 export type TaskHandlers = {
-  [N in TaskName]: (params: TaskParams[N], run: RunContext) => Promise<void>;
+  [N in TaskName]: (params: TaskParams[N], run: RunContext) => Promise<TaskResults[N]>;
 };
 
 type ClaimedRun = ClaimedTask;
@@ -81,7 +81,7 @@ export function createTenantExecutor(
 
   for (const [name, handler] of Object.entries(handlers) as [
     TaskName,
-    (params: never, run: RunContext) => Promise<void>,
+    (params: never, run: RunContext) => Promise<unknown>,
   ][]) {
     absurd.registerTask({ name, queue: TASKS[name].queue }, async (params, ctx) => {
       const claim = claims.getStore();
@@ -100,7 +100,7 @@ export function createTenantExecutor(
       }, heartbeatEvery);
       timer.unref();
       try {
-        await handler(params as never, {
+        return await handler(params as never, {
           taskId: claim.task.task_id,
           runId: claim.task.run_id,
           attempt: claim.task.attempt,

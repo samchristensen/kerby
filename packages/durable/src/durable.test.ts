@@ -7,6 +7,7 @@ import {
   createTenantExecutor,
   durableMigrationsDir,
   holdsRun,
+  readTask,
   spawnInTx,
   type TaskHandlers,
 } from "./index.ts";
@@ -66,6 +67,49 @@ describe("spawnInTx", () => {
     expect(again).toEqual({ ...first, created: false });
     expect(other.taskId).not.toBe(first.taskId);
     expect((await db.query("select 1 from absurd.t_turns")).rowCount).toBe(2);
+  });
+});
+
+describe("readTask", () => {
+  const request = {
+    model: "typesafe/jev-latest",
+    state: "I was charged twice.",
+    questions: { billing: { type: "noul", instructions: "Is this about billing?" } },
+  } as const;
+  const outcome = {
+    type: "answered",
+    model: "jev",
+    answers: { billing: { type: "noul", probability: 0.9 } },
+    usage: { inputTokens: 1, outputTokens: 1 },
+  } as const;
+
+  it("shows a task pending, then completed with what its handler returned", async () => {
+    const db = await tenant();
+    const { taskId } = await db.transaction((tx) =>
+      spawnInTx(tx, "run-judgment", request, { idempotencyKey: "j1" }),
+    );
+    const pending = await readTask(db, "run-judgment", taskId);
+    expect(pending).toMatchObject({ id: taskId, state: "pending", params: request, result: null });
+    expect(pending?.createdAt).toBeInstanceOf(Date);
+
+    const executor = createTenantExecutor(
+      db,
+      { "run-judgment": async () => outcome },
+      { workerId: "w" },
+    );
+    const [claimed] = await executor.claim(1);
+    await executor.execute(claimed as NonNullable<typeof claimed>);
+    const done = await readTask(db, "run-judgment", taskId);
+    expect(done).toMatchObject({ state: "completed", result: outcome });
+    expect(done?.createdAt).toEqual(pending?.createdAt);
+  });
+
+  it("does not find a task of another name, or an id that is not one", async () => {
+    const db = await tenant();
+    const { taskId } = await spawn(db, "turn");
+    expect(await readTask(db, "run-judgment", taskId)).toBeUndefined();
+    expect(await readTask(db, "run-turn", taskId)).toMatchObject({ state: "pending" });
+    expect(await readTask(db, "run-judgment", crypto.randomUUID())).toBeUndefined();
   });
 });
 

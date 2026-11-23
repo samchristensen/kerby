@@ -89,6 +89,21 @@ Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-
 verification, password reset or second person per tenant yet (tech debt). To see who signed up:
 `select email, tenant_id, created_at, last_login_at from console_users order by created_at` (psql below).
 
+## Judgments
+
+[ADR 0015](adr/0015-judgment-port.md), [ADR 0016](adr/0016-guardrails.md). A tenant stores a key for a judgment provider
+(`PUT /v1/model-keys/typesafe` or `/opencode`, or the console's Model providers, which says what each key is for) and calls
+`POST /v1/judgments`, or its agent calls the `judge` tool, or a conversation created with `guardrails` checks every message and
+tool call. Only a `worker` calls a provider, so it needs outbound HTTPS to `api.typesafe.ai` and `opencode.ai`;
+`TYPESAFE_BASE_URL` and `OPENCODE_SYSTEMONE_BASE_URL` on the worker point it elsewhere (stand-ins for local runs; unset in
+production). An OpenCode key is the one key a tenant already uses for OpenCode chat models. A judgment is a task on the `turns`
+queue: it counts against the tenant's `maxConcurrentTurns` and the worker's `MAX_RUNNING_TURNS`, and Absurd keeps its request
+and outcome in the tenant's database for 30 days. Usage lands in the `usage` table as `<provider>/<served model>`
+(`guardrail:...` rows for guardrail checks). A guardrail that cannot be checked fails closed, so a provider outage or a removed
+key stops answers on those conversations: it shows as `the turn failed after 5 attempts` or `a guardrail could not be checked`
+in the conversation's `lastError`. There is no alert; judgments `failed` after five attempts are
+`select state, count(*) from absurd.t_turns where task_name = 'run-judgment' group by 1` in a tenant database.
+
 ## Export a tenant
 
 `POST /v1/operator/tenants/<id>/export` (run as above) dumps the tenant's database and lists its objects into the
@@ -269,7 +284,7 @@ real figure rather than an estimate here.
 
 `railway logs --service <name>` (add `--lines N`), `railway metrics --service <name> --since 1h`. Logs are JSON with
 `tenantId` and never message content: a `request` line per API request (status 429 for a tenant over its request
-rate), `turn completed`, `turn failed for good`, `history cut to its budget` (a turn started without its oldest turns).
+rate), `turn completed`, `turn failed for good`, `judgment completed` (outcome `answered` or `refused`, question count, duration), `history cut to its budget` (a turn started without its oldest turns).
 `api` and `console` run with `TRUST_PROXY=true`: Railway's edge sets `X-Forwarded-For` with the client first, and the
 failed-auth limit (api) and the sign-up and sign-in limits (console) count that address; without it every client would
 share the proxy's. The console logs `console sign-up` (tenant id and person id, never the email) and `request failed`;

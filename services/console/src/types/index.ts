@@ -42,8 +42,10 @@ export type ConsoleDeps = {
   signups: SignupClient;
   api: ApiClient;
   settings: {
-    /** Providers a tenant may store a key for: the harness adapter's list, injected by the composition root. */
+    /** Providers whose models run chats: the harness adapter's list, injected by the composition root. */
     modelProviders: readonly string[];
+    /** Providers that run judgments (ADR 0015): a tenant stores a key for these too, but cannot chat with them. */
+    judgmentProviders: readonly string[];
     /** The tenant API's public address, shown in the quickstart. */
     apiPublicUrl: string;
     sessionTtlMs: number;
@@ -88,6 +90,10 @@ export type ProviderView = {
   /** As a model id spells it: `anthropic` in `anthropic/<model>`. */
   id: string;
   configured: boolean;
+  /** Its models run chats (a conversation's model id starts with `<id>/`). */
+  chat: boolean;
+  /** Its models run judgments and guardrails (`POST /v1/judgments`). A provider can be both: one key serves both. */
+  decisions: boolean;
   /** When the key was last set. */
   updatedAt: string | null;
 };

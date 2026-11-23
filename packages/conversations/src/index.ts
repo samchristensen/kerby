@@ -23,6 +23,7 @@ export {
 } from "./errors.ts";
 export { conversationChannel, notifyLive, parseNotice } from "./events.ts";
 export {
+  blockMessage,
   MAX_CONVERSATION_BYTES,
   MAX_PAGE_MESSAGES,
   persistMessage,
@@ -32,6 +33,7 @@ export {
   type StoredMessage,
 } from "./messages.ts";
 export {
+  type ConversationRecord,
   findConversation,
   insertConversation,
   isBusy,

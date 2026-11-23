@@ -37,7 +37,11 @@ export default async function ProvidersLayout({ children }: { children: ReactNod
                   {provider.configured ? "Key set" : "No key"}
                 </span>
               </span>
-              <code className="mt-0.5 block font-mono text-xs text-zinc-500">{provider.id}</code>
+              <code className="mt-0.5 block font-mono text-xs text-zinc-500">
+                {provider.id}
+                {provider.chat ? " · chat" : ""}
+                {provider.decisions ? " · decisions" : ""}
+              </code>
             </NavLink>
           </li>
         ))}

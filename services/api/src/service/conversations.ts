@@ -10,7 +10,7 @@ import type {
   PostMessageRequest,
   PostMessageResponse,
 } from "@kerby/contracts";
-import { PublicMessageSchema, parseModelId } from "@kerby/contracts";
+import { DEFAULT_JUDGMENT_MODEL, PublicMessageSchema, parseModelId } from "@kerby/contracts";
 import { hasModelKey } from "@kerby/control-plane";
 import {
   ConversationNotFoundError,
@@ -27,10 +27,7 @@ import {
 import type { TenantContext } from "@kerby/db";
 import { errorFields, log } from "@kerby/observability";
 import { type ApiDeps, NotFoundError } from "../types/index.ts";
-
-export class InvalidModelError extends Error {
-  override name = "InvalidModelError";
-}
+import { assertJudgmentModel, InvalidModelError } from "./models.ts";
 
 function conversationResource(record: {
   id: string;
@@ -40,6 +37,7 @@ function conversationResource(record: {
   title: string | null;
   createdAt: Date;
   updatedAt: Date;
+  guardrails: Conversation["guardrails"];
 }): Conversation {
   return {
     id: record.id,
@@ -49,6 +47,7 @@ function conversationResource(record: {
     title: record.title,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
+    guardrails: record.guardrails,
   };
 }
 
@@ -81,6 +80,15 @@ export async function createConversation(
   if (!model) throw new InvalidModelError("model is required: <provider>/<modelId>");
   const parsed = parseModelId(model);
   if (!parsed) throw new InvalidModelError(`model "${model}" must look like <provider>/<modelId>`);
+  // A provider that only runs judgments holds a key but answers no chat: say so now, not at the first turn. (One that
+  // does both, like OpenCode, is a chat provider too.)
+  if (
+    deps.settings.judgmentProviders.includes(parsed.provider) &&
+    !deps.settings.modelProviders.includes(parsed.provider)
+  )
+    throw new InvalidModelError(
+      `"${parsed.provider}" runs judgments, not conversations: use POST /v1/judgments`,
+    );
   // Bring your own key: a conversation needs the tenant's key for its provider, so a missing one fails here and
   // not on the first turn.
   if (
@@ -91,10 +99,15 @@ export async function createConversation(
       `no model key for provider "${parsed.provider}": PUT /v1/model-keys/${parsed.provider} first`,
     );
   }
+  // Guardrails are judgments: each runs on the tenant's key for its judgment model, and fails closed without it.
+  const guardrails = request.guardrails ?? [];
+  for (const model of new Set(guardrails.map((g) => g.model ?? DEFAULT_JUDGMENT_MODEL)))
+    await assertJudgmentModel(deps, ctx.tenantId, model);
   const record = await insertConversation(ctx.db, {
     externalUserId: request.externalUserId,
     model,
     system: request.system ?? deps.settings.defaultSystem,
+    guardrails,
   });
   return conversationResource(record);
 }

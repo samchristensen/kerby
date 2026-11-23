@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -57,16 +57,19 @@ would hold second copies of packages the composition root already built (enforce
 
 Each external system lives behind exactly one package; nothing else imports the SDK.
 
-| System                       | Only `packages/...`  | Package offers                                                              |
-| ---------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| Postgres (`pg`)              | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes) |
-| Absurd (`absurd-sdk`)        | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
-| S3 (`@aws-sdk/client-s3`)    | `blobs`              | `put`/`get`/`delete` by tenant context; raw-key `Bucket` for control only   |
-| Pi Durable and its libraries | `runtime-pi-durable` | an `AgentRuntime`                                                           |
-| Tenant-supplied URLs         | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
+| System                              | Only `packages/...`  | Package offers                                                              |
+| ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
+| Postgres (`pg`)                     | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes) |
+| Absurd (`absurd-sdk`)               | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
+| S3 (`@aws-sdk/client-s3`)           | `blobs`              | `put`/`get`/`delete` by tenant context; raw-key `Bucket` for control only   |
+| Pi Durable and its libraries        | `runtime-pi-durable` | an `AgentRuntime`                                                           |
+| Tenant-supplied URLs                | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
+| System One API (TypeSafe, OpenCode) | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`            |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
+Judgment providers follow the same rule: `packages/judgment` defines `JudgmentProvider` (types only),
+`packages/judgment-<provider>` adapts one provider to it, and only a service's `src/index.ts` may import an adapter.
 
 ## Tenancy
 
@@ -87,7 +90,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
   nightly backup copy ([ADR 0013](docs/adr/0013-exports-and-bucket-backup.md)).
-- Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)); Kerby holds no provider key. A key is
+- Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)), for chat and judgment providers alike; Kerby holds no provider key. A key is
   sealed by `packages/secrets` to a public key the api and the console hold, stored in the control plane's `tenant_secrets`, and
   opened only by a worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the
   tenant id, never message content or secrets; the worker scrubs the key from provider errors. _review_
@@ -186,6 +189,17 @@ flowchart LR
   a poll every 5 s is the backstop for a lost notification. All streams on one tenant database in an api process share
   one `LISTEN` connection; a process caps its open streams per tenant (429) and in all (503), to stay inside the
   connection budget in [docs/deploy.md](docs/deploy.md#postgres).
+- **Judgments** ([ADR 0015](docs/adr/0015-judgment-port.md)). A narrow, typed question about some state, answered by a
+  provider behind `packages/judgment` (TypeSafe's Jev first, then OpenCode's decision models: `packages/judgment-systemone`) as typed probabilities, not
+  prose. `POST /v1/judgments` enqueues a `run-judgment` task (the same `turns` queue, so it counts against the tenant's
+  concurrent turns) and answers 202; a worker opens the tenant's key, calls the provider inside a step and stores the
+  outcome as the task's result; `GET /v1/judgments/:id` reads it (`pending`, `running`, `answered`, `refused`, `failed`).
+  The agent's `judge` tool runs the same code inside its tool step. No table: params and result live in Absurd (30 days).
+- **Guardrails** ([ADR 0016](docs/adr/0016-guardrails.md)). A conversation may carry yes/no conditions, set at creation, checked
+  by a judgment before the assistant acts. The worker judges the user message first thing in `runTurn` (a step); a block
+  flags it (`messages.blocked_by`), persists a flagged refusal and ends the turn, and `readHistory` never rehydrates a
+  flagged message again. A tool call is judged inside its own step and, if blocked, never runs. Fail closed: no key means no
+  answer and no tool run.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).

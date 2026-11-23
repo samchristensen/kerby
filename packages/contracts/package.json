@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@kerby/agent": "workspace:*",
+    "@kerby/judgment": "workspace:*",
     "zod": "catalog:"
   }
 }

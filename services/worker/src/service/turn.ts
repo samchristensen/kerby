@@ -1,7 +1,7 @@
 // The `run-turn` task body and its supervisor (ARCHITECTURE.md#durability-the-turn-lifecycle): rehydrate from the
 // tenant's index, run through the AgentRuntime port, and persist every `message_end` before pulling the next event,
 // which is what makes the runtime's "no tool before its message is stored" gate hold.
-import type { AgentEvent, AgentRun, ToolResult } from "@kerby/agent";
+import type { AgentEvent, AgentMessage, AgentRun, ToolResult } from "@kerby/agent";
 import { parseModelId } from "@kerby/contracts";
 import { recordUsage } from "@kerby/control-plane";
 import {
@@ -18,6 +18,8 @@ import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
 import { alert, errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
+import { checkUserMessage, guardToolCall } from "./guardrails.ts";
+import { judgeTool } from "./judgments.ts";
 import { tenantTools } from "./tools.ts";
 
 /** Live events are batched: text deltas arrive many times a second and each notification is a round trip. */
@@ -110,7 +112,10 @@ export async function runTurn(
     });
   }
   let nextSeq = history.lastSeq + 1;
-  const tools = tenantTools({ enableEcho: deps.settings.enableEchoTool });
+  const tools = tenantTools({
+    enableEcho: deps.settings.enableEchoTool,
+    judge: await judgeTool(deps, ctx.tenantId, conversationId),
+  });
 
   // Bring your own key: the tenant's key for the model's provider, opened for this run only.
   let apiKey: string | undefined;
@@ -143,6 +148,9 @@ export async function runTurn(
     // does not repeat a side effect. `recordToolExecution` counts real runs inside the step.
     executeTool: (call, signal): Promise<ToolResult> =>
       run.step(`tool:${call.id}`, async () => {
+        // A guardrail that stops the call answers in the tool's place: the model reads why, and the tool never runs.
+        const stopped = await guardToolCall(deps, ctx.tenantId, conversation, call, signal);
+        if (stopped) return stopped;
         await recordToolExecution(ctx.db, { conversationId, callId: call.id, name: call.name });
         return tools.execute(call, signal);
       }),
@@ -152,6 +160,47 @@ export async function runTurn(
 
   const live = new LiveEvents(ctx, conversationId, run.runId, () => nextSeq);
   try {
+    // Guardrails on the user message come first: nothing is sent to the model, or paid for, until it has passed.
+    const verdict = await checkUserMessage(deps, ctx, conversation, params.seq, run);
+    if (verdict.type === "unavailable") {
+      // The same message gets the same answer until the tenant fixes the key or the policy: no retry.
+      await setLastError(
+        ctx.db,
+        conversationId,
+        `a guardrail could not be checked, so the message was not answered: ${scrub(verdict.error)}`,
+      );
+      log("warn", "turn refused: a guardrail could not be checked");
+      return;
+    }
+    if (verdict.type === "blocked") {
+      // The user sees an answer, not silence; both messages are flagged, so no later turn sends either to a model.
+      const seq = params.seq + 1;
+      nextSeq = seq;
+      const refusal: AgentMessage = {
+        role: "assistant",
+        model: conversation.model,
+        stopReason: "end",
+        content: [
+          {
+            type: "text",
+            text: `This message was blocked by ${verdict.by.length === 1 ? "guardrail" : "guardrails"} ${verdict.by.map((name) => `"${name}"`).join(", ")}.`,
+          },
+        ],
+      };
+      await live.send({ type: "run_start" });
+      await run.step(`persist:${seq}`, () =>
+        persistMessage(ctx, deps.blobs, {
+          conversationId,
+          seq,
+          message: refusal,
+          blockedBy: verdict.by,
+          run,
+        }),
+      );
+      await live.send({ type: "run_end", reason: "done" });
+      log("info", "message blocked by guardrails", { guardrails: verdict.by.length });
+      return;
+    }
     for await (const event of deps.runtime.run(agentRun)) {
       if (event.type !== "message_end") {
         const safe =

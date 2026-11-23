@@ -2,6 +2,7 @@
 // config, builds the real adapters natively (Next.js never bundles them) and installs the service the pages call.
 import { join } from "node:path";
 import { createControlDb } from "@kerby/db";
+import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
 import { createSealer } from "@kerby/secrets";
@@ -24,8 +25,9 @@ async function startConsole(config: ConsoleConfig) {
       signups: createSignupClient(config.controlUrl, config.consoleToken),
       api: createApiClient(config.apiUrl),
       settings: {
-        // The harness adapter owns the provider list (ADR 0008); its `providers` subpath loads no harness code.
+        // The adapters own the provider lists (ADR 0008, 0015); their `providers` subpaths load no adapter code.
         modelProviders: SUPPORTED_PROVIDERS,
+        judgmentProviders: JUDGMENT_PROVIDERS,
         apiPublicUrl: config.apiPublicUrl,
         sessionTtlMs: SESSION_TTL_MS,
         passwordCost: PASSWORD_COST,

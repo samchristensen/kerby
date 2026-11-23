@@ -1,0 +1,13 @@
+{
+  "name": "@kerby/judgment-systemone",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./providers": "./src/provider-ids.ts"
+  },
+  "dependencies": {
+    "@kerby/judgment": "workspace:*",
+    "zod": "catalog:"
+  }
+}

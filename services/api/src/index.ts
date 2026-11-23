@@ -2,6 +2,7 @@
 import { createBlobs } from "@kerby/blobs";
 import { resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
 import { createSealer, createSecretBox, splitKeys } from "@kerby/secrets";
@@ -37,8 +38,9 @@ async function startApi(config: ApiConfig) {
     sealer: createSealer(config.secretsPublicKey),
     settings: {
       defaultModel: config.defaultModel,
-      // The harness adapter owns the provider list (ADR 0008); its `providers` subpath loads no harness code.
+      // The adapters own the provider lists (ADR 0008, 0015); their `providers` subpaths load no adapter code.
       modelProviders: SUPPORTED_PROVIDERS,
+      judgmentProviders: JUDGMENT_PROVIDERS,
       keylessProviders: config.keylessProviders,
       defaultSystem: config.defaultSystem,
       authCacheMs: config.authCacheSeconds * 1000,

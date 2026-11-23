@@ -10,6 +10,7 @@
     "@kerby/contracts": "workspace:*",
     "@kerby/control-plane": "workspace:*",
     "@kerby/db": "workspace:*",
+    "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
     "@kerby/secrets": "workspace:*",

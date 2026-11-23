@@ -7,6 +7,7 @@ export {
   type RunContext,
   type TaskHandlers,
 } from "./executor.ts";
+export { readTask } from "./read.ts";
 export { spawnInTx } from "./spawn.ts";
 export type { TaskParams } from "./tasks.ts";
 

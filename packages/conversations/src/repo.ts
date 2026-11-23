@@ -1,3 +1,4 @@
+import type { Guardrail } from "@kerby/contracts";
 import type { TenantQueryable } from "@kerby/db";
 import { InvalidCursorError } from "./errors.ts";
 
@@ -10,6 +11,7 @@ export type ConversationRecord = {
   lastError: string | null;
   createdAt: Date;
   updatedAt: Date;
+  guardrails: Guardrail[];
 };
 
 type ConversationRow = {
@@ -21,9 +23,11 @@ type ConversationRow = {
   last_error: string | null;
   created_at: Date;
   updated_at: Date;
+  guardrails: Guardrail[];
 };
 
-const COLUMNS = "id, external_user_id, model, system, title, last_error, created_at, updated_at";
+const COLUMNS =
+  "id, external_user_id, model, system, title, last_error, created_at, updated_at, guardrails";
 
 const fromRow = (row: ConversationRow): ConversationRecord => ({
   id: row.id,
@@ -34,10 +38,14 @@ const fromRow = (row: ConversationRow): ConversationRecord => ({
   lastError: row.last_error,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  guardrails: row.guardrails,
 });
 
 /** A conversation in a list: no system prompt (it may be 100 000 characters), with how many messages it holds. */
-export type ConversationSummaryRecord = Omit<ConversationRecord, "system" | "lastError"> & {
+export type ConversationSummaryRecord = Omit<
+  ConversationRecord,
+  "system" | "lastError" | "guardrails"
+> & {
   messageCount: number;
 };
 
@@ -107,11 +115,21 @@ export const isConversationId = (value: string): boolean => UUID.test(value);
 
 export async function insertConversation(
   db: TenantQueryable,
-  input: { externalUserId?: string | undefined; model: string; system: string },
+  input: {
+    externalUserId?: string | undefined;
+    model: string;
+    system: string;
+    guardrails?: Guardrail[] | undefined;
+  },
 ): Promise<ConversationRecord> {
   const { rows } = await db.query<ConversationRow>(
-    `insert into conversations (external_user_id, model, system) values ($1, $2, $3) returning ${COLUMNS}`,
-    [input.externalUserId ?? null, input.model, input.system],
+    `insert into conversations (external_user_id, model, system, guardrails) values ($1, $2, $3, $4::jsonb) returning ${COLUMNS}`,
+    [
+      input.externalUserId ?? null,
+      input.model,
+      input.system,
+      JSON.stringify(input.guardrails ?? []),
+    ],
   );
   const row = rows[0];
   if (!row) throw new Error("conversation insert returned no row");
@@ -136,6 +154,8 @@ export type MessageRowRecord = {
   blobId: string;
   runId: string | null;
   createdAt: Date;
+  /** The guardrails that blocked it, or null. A blocked message is never part of a turn's history. */
+  blockedBy: string[] | null;
 };
 
 type MessageRow = {
@@ -144,6 +164,7 @@ type MessageRow = {
   blob_id: string;
   run_id: string | null;
   created_at: Date;
+  blocked_by: string[] | null;
 };
 
 const fromMessageRow = (row: MessageRow): MessageRowRecord => ({
@@ -152,6 +173,7 @@ const fromMessageRow = (row: MessageRow): MessageRowRecord => ({
   blobId: row.blob_id,
   runId: row.run_id,
   createdAt: row.created_at,
+  blockedBy: row.blocked_by,
 });
 
 /** Up to `limit` index rows of a conversation after seq `after`, oldest first. Bodies live in S3: see `readMessages`. */
@@ -161,7 +183,7 @@ export async function listMessageRows(
   page: { after: number; limit: number },
 ): Promise<MessageRowRecord[]> {
   const { rows } = await db.query<MessageRow>(
-    "select seq, role, blob_id, run_id, created_at from messages where conversation_id = $1 and seq > $2 order by seq limit $3",
+    "select seq, role, blob_id, run_id, created_at, blocked_by from messages where conversation_id = $1 and seq > $2 order by seq limit $3",
     [conversationId, page.after, page.limit],
   );
   return rows.map(fromMessageRow);
@@ -173,7 +195,7 @@ export async function listMessageRowsNewestFirst(
   conversationId: string,
 ): Promise<(MessageRowRecord & { size: number })[]> {
   const { rows } = await db.query<MessageRow & { size: string }>(
-    `select m.seq, m.role, m.blob_id, m.run_id, m.created_at, b.size::text as size
+    `select m.seq, m.role, m.blob_id, m.run_id, m.created_at, m.blocked_by, b.size::text as size
        from messages m join blobs b on b.id = m.blob_id
       where m.conversation_id = $1 order by m.seq desc`,
     [conversationId],

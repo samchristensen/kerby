@@ -4,6 +4,7 @@ import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
 import { readModelKey, resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import { createSystemOneJudgments } from "@kerby/judgment-systemone";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
   createFakeModels,
@@ -63,6 +64,18 @@ async function startWorker(config: WorkerConfig): Promise<{
       models: config.kerbyFakeModel ? createFakeModels() : createTenantModels,
       onReport: (type) => log("debug", "harness report", { type }),
     }),
+    judgments: [
+      createSystemOneJudgments(
+        "typesafe",
+        config.typesafeBaseUrl === undefined ? {} : { baseUrl: config.typesafeBaseUrl },
+      ),
+      createSystemOneJudgments(
+        "opencode",
+        config.opencodeSystemoneBaseUrl === undefined
+          ? {}
+          : { baseUrl: config.opencodeSystemoneBaseUrl },
+      ),
+    ],
     settings: {
       workerId: config.workerId,
       claimTimeoutSeconds: config.claimTimeoutSeconds,

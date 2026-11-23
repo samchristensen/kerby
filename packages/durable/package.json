@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@kerby/db": "workspace:*",
+    "@kerby/judgment": "workspace:*",
     "@kerby/observability": "workspace:*",
     "absurd-sdk": "catalog:"
   }

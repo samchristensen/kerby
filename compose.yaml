@@ -120,6 +120,9 @@ services:
       # Short, so a killed worker's turn moves to another worker in seconds (the default is two minutes).
       CLAIM_TIMEOUT_SECONDS: "10"
       SECRETS_PRIVATE_KEYS: "oLJooOTi5uJQL4lbxdJoXNIFChaniiOI87/7rlz341o="
+      # Judgments (ADR 0015) call TypeSafe and OpenCode with the tenant's own key; point these at stand-ins to exercise them offline.
+      TYPESAFE_BASE_URL: ${KERBY_TYPESAFE_BASE_URL:-https://api.typesafe.ai}
+      OPENCODE_SYSTEMONE_BASE_URL: ${KERBY_OPENCODE_SYSTEMONE_BASE_URL:-https://opencode.ai/inference/systemone}
     depends_on:
       control: { condition: service_healthy }
 
