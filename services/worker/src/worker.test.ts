@@ -17,7 +17,7 @@ import {
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
 import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
-import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
+import { readTask, spawnInTx, type TaskHandlers, type TaskParams } from "@kerby/durable";
 import type {
   JudgmentOutcome,
   JudgmentProvider,
@@ -71,6 +71,8 @@ type Options = {
   judgments?: WorkerDeps["judgments"];
   /** Wrap the object store the worker and the test share, to make part of it fail. */
   wrapBlobs?: (blobs: Blobs) => Blobs;
+  /** Handlers in place of the worker's own for some tasks, in every worker of the harness. */
+  handlers?: (ctx: TenantContext) => Partial<TaskHandlers>;
 };
 
 async function harness(options: Options = {}) {
@@ -84,6 +86,10 @@ async function harness(options: Options = {}) {
   });
   cleanups.push(() => pools.close());
   const runtime = options.runtime ?? createDevelopmentRuntime();
+  const handlersFor = (workerDeps: WorkerDeps) => {
+    const own = createHandlers(workerDeps);
+    return (ctx: TenantContext): TaskHandlers => ({ ...own(ctx), ...options.handlers?.(ctx) });
+  };
   const deps: WorkerDeps = {
     control: control.db,
     pools,
@@ -91,18 +97,21 @@ async function harness(options: Options = {}) {
     runtime,
     modelKeys: options.modelKeys,
     judgments: options.judgments ?? [],
+    embeddings: [],
     settings: {
       workerId: "test-worker",
       claimTimeoutSeconds: 30,
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
       maxRunningTurns: 50,
+      maxRunningIndexTasks: 2,
+      maxRunningSearches: 4,
       sweepIntervalMs: 200,
       enableEchoTool: options.echo ?? true,
       historyBudgetBytes: 8 * 1024 * 1024,
       ...options.settings,
     },
   };
-  const scheduler = createScheduler(deps, createHandlers(deps));
+  const scheduler = createScheduler(deps, handlersFor(deps));
   await scheduler.start();
   cleanups.push(() => scheduler.stop(0));
 
@@ -146,6 +155,19 @@ async function harness(options: Options = {}) {
       return all.length >= count ? all : false;
     });
 
+  /** Spawn a task the way the api or a turn does, and notify the workers. */
+  async function spawn<N extends keyof TaskParams>(
+    t: Awaited<ReturnType<typeof tenant>>,
+    name: N,
+    params: TaskParams[N],
+  ) {
+    const { taskId } = await t.ctx.db.transaction((tx) =>
+      spawnInTx(tx, name, params, { idempotencyKey: `${name}:${crypto.randomUUID()}` }),
+    );
+    await control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    return taskId;
+  }
+
   /** A second worker process over the same databases, with its own runtime and settings. */
   async function extraWorker(extra: {
     runtime: AgentRuntime;
@@ -156,7 +178,7 @@ async function harness(options: Options = {}) {
       runtime: extra.runtime,
       settings: { ...deps.settings, ...extra.settings, workerId: "second-worker" },
     };
-    const other = createScheduler(second, createHandlers(second));
+    const other = createScheduler(second, handlersFor(second));
     await other.start();
     cleanups.push(() => other.stop(0));
     return other;
@@ -173,6 +195,7 @@ async function harness(options: Options = {}) {
     messages,
     settled,
     extraWorker,
+    spawn,
   };
 }
 
@@ -870,6 +893,130 @@ describe("scheduling", () => {
   });
 });
 
+describe("lanes", () => {
+  it("runs an index task while slow turns fill every turn slot of the worker", async () => {
+    const indexed: string[] = [];
+    const h = await harness({
+      settings: { maxRunningTurns: 1 },
+      handlers: () => ({
+        "index-conversation": async ({ conversationId }) => {
+          indexed.push(conversationId);
+        },
+      }),
+    });
+    const t = await h.tenant("acme");
+    const conversations = await Promise.all([1, 2].map(() => h.conversation(t)));
+    for (const c of conversations) await h.post(t, c.id, "[slow:1500] work");
+    await eventually("a turn to fill the worker", async () => h.scheduler.inFlight(t.id) === 1);
+
+    await h.spawn(t, "index-conversation", { conversationId: "probe" });
+    await eventually("the index task to run", async () => indexed.includes("probe"));
+    expect(h.scheduler.inFlight(t.id)).toBe(1);
+    const unfinished = await Promise.all(
+      conversations.map(async (c) => (await h.messages(t, c.id)).length < 2),
+    );
+    expect(unfinished.some(Boolean)).toBe(true);
+
+    for (const c of conversations) await h.settled(t, c.id, 2);
+  });
+
+  it("runs a turn while a slow index task holds every index slot of the worker", async () => {
+    const release = Promise.withResolvers<void>();
+    const h = await harness({
+      settings: { maxRunningIndexTasks: 1 },
+      handlers: () => ({
+        "index-conversation": async ({ conversationId }) => {
+          if (conversationId === "probe") await release.promise;
+        },
+      }),
+    });
+    cleanups.push(() => release.resolve());
+    const t = await h.tenant("acme");
+    const probe = await h.spawn(t, "index-conversation", { conversationId: "probe" });
+    await eventually("the index task to start", async () => {
+      return h.scheduler.inFlight(t.id, "index") === 1;
+    });
+
+    const started = Date.now();
+    const c = await h.conversation(t);
+    await h.post(t, c.id, "hi");
+    await h.settled(t, c.id, 2);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(h.scheduler.inFlight(t.id, "index")).toBe(1);
+
+    release.resolve();
+    await eventually("the index task to finish", async () => {
+      return (await readTask(t.ctx.db, "index-conversation", probe))?.state === "completed";
+    });
+  });
+
+  it("runs one index task per tenant at a time, counted across workers", async () => {
+    const h = await harness({
+      handlers: () => ({
+        "index-conversation": async () => {
+          await sleep(300);
+        },
+      }),
+    });
+    // Two workers with two index slots each: only the tenant's limit keeps a second task from starting.
+    await h.extraWorker({ runtime: createDevelopmentRuntime() });
+    const t = await h.tenant("acme");
+
+    let peak = 0;
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) {
+        const { rows } = await t.ctx.db.query<{ running: number }>(
+          "select count(*)::int as running from absurd.r_index where state = 'running'",
+        );
+        peak = Math.max(peak, rows[0]?.running ?? 0);
+        await sleep(20);
+      }
+    })();
+    cleanups.push(async () => {
+      sampling = false;
+      await sampler;
+    });
+
+    for (const n of [1, 2, 3, 4]) {
+      await h.spawn(t, "index-conversation", { conversationId: `c${n}` });
+    }
+    await eventually("every index task to finish", async () => {
+      const { rows } = await t.ctx.db.query<{ state: string; tasks: number }>(
+        "select state, count(*)::int as tasks from absurd.t_index group by state",
+      );
+      return rows.length === 1 && rows[0]?.state === "completed" && rows[0].tasks === 4;
+    });
+    sampling = false;
+    await sampler;
+    expect(peak).toBe(1);
+  });
+
+  it("answers a search promptly while the tenant's turns are at its limit", async () => {
+    const h = await harness({
+      handlers: () => ({
+        "run-search": async () => ({ mode: "keyword", notice: null, hits: [] }),
+      }),
+    });
+    const t = await h.tenant("acme", { maxConcurrentTurns: 1 });
+    const conversations = await Promise.all([1, 2].map(() => h.conversation(t)));
+    for (const c of conversations) await h.post(t, c.id, "[slow:1500] work");
+    await eventually("the tenant to reach its limit", async () => h.scheduler.inFlight(t.id) === 1);
+
+    const started = Date.now();
+    const id = await h.spawn(t, "run-search", { query: "work", limit: 10, externalUserId: null });
+    const search = await eventually("the search to finish", async () => {
+      const task = await readTask(t.ctx.db, "run-search", id);
+      return task?.state === "completed" ? task : false;
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(search.result).toEqual({ mode: "keyword", notice: null, hits: [] });
+    expect(h.scheduler.inFlight(t.id)).toBe(1);
+
+    for (const c of conversations) await h.settled(t, c.id, 2);
+  });
+});
+
 describe("judgments", () => {
   const request: JudgmentRequest = {
     model: "typesafe/jev-latest",
@@ -1423,13 +1570,17 @@ describe("worker config", () => {
     expect(refused.error?.issues[0]?.path).toEqual(["secretsPrivateKeys"]);
   });
 
-  it("refuses a worker-wide turn cap that is not a positive integer", () => {
-    const refused = workerConfigSchema.safeParse({
-      ...base,
-      secretsPrivateKeys: "a2V5",
-      maxRunningTurns: "0",
-    });
-    expect(refused.success).toBe(false);
-    expect(refused.error?.issues[0]?.path).toEqual(["maxRunningTurns"]);
+  it("refuses a worker-wide lane cap that is not a positive integer", () => {
+    for (const key of ["maxRunningTurns", "maxRunningIndexTasks", "maxRunningSearches"]) {
+      for (const value of ["0", "1.5"]) {
+        const refused = workerConfigSchema.safeParse({
+          ...base,
+          secretsPrivateKeys: "a2V5",
+          [key]: value,
+        });
+        expect(refused.success).toBe(false);
+        expect(refused.error?.issues[0]?.path).toEqual([key]);
+      }
+    }
   });
 });

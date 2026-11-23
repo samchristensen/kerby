@@ -23,6 +23,7 @@ import { appendTrace, notifyLive } from "@kerby/conversations";
 import { completeTurnWith, createTestTenant, type TestTenant } from "@kerby/conversations/testing";
 import { LISTEN_APPLICATION_NAME, TenantPools } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
+import { chunkText, writeChunks, writeEmbeddings } from "@kerby/search";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +49,7 @@ async function harness(
     failedAuthPerMinute?: number;
     trustProxy?: boolean;
     maxStreamsPerProcess?: number;
+    searchWaitMs?: number;
   } = {},
 ) {
   const keys = generateSecretsKeyPair();
@@ -67,6 +69,8 @@ async function harness(
     settings: {
       defaultModel: "faux/faux-1",
       modelProviders: options.providers ?? ["anthropic", "openai", "opencode"],
+      embeddingProviders: ["openai"],
+      searchWaitMs: options.searchWaitMs ?? 10_000,
       judgmentProviders: ["typesafe", "opencode"],
       keylessProviders: options.keyless ?? ["faux"],
       defaultSystem: "Be helpful.",
@@ -1607,5 +1611,239 @@ describe("prompts", () => {
       prompt: { name: "triage/billing", version: 1 },
     });
     expect(mixed.status).toBe(400);
+  });
+});
+
+describe("chat search", () => {
+  type Searched = {
+    hits: {
+      conversationId: string;
+      seq: number;
+      role: string;
+      snippet: string;
+      createdAt: string;
+    }[];
+    mode: "hybrid" | "keyword";
+    notice: string | null;
+  };
+  type Settings = {
+    embeddingModel: string | null;
+    lastError: string | null;
+    chunks: number;
+    embedded: number;
+  };
+
+  /** A conversation whose one user message is `content`, indexed the way the worker would after its turn. */
+  async function indexed(h: Harness, t: Tenant, content: string, body: object = {}) {
+    const conversation = await newConversation(h, t.secret, body);
+    const posted = await h.call(t.secret, "POST", `/v1/conversations/${conversation.id}/messages`, {
+      content,
+    });
+    expect(posted.status).toBe(202);
+    const batch = {
+      from: 0,
+      through: 1,
+      messages: [
+        { seq: 1, role: "user" as const, createdAt: new Date(), chunks: chunkText(content) },
+      ],
+    };
+    expect(await writeChunks(t.ctx.db, conversation.id, batch)).toBe(true);
+    return conversation.id;
+  }
+
+  const search = async (h: Harness, credential: string, body: object) => {
+    const response = await h.call(credential, "POST", "/v1/search", body);
+    expect(response.status).toBe(200);
+    return (await response.json()) as Searched;
+  };
+
+  const putModel = (h: Harness, t: Tenant, embeddingModel: string | null) =>
+    h.call(t.secret, "PUT", "/v1/search/settings", { embeddingModel });
+
+  /** Claim the tenant's next search and run it the way a worker would, with `handler` as its body. */
+  async function answerSearch(t: Tenant, handler: TaskHandlers["run-search"]) {
+    const executor = createTenantExecutor(
+      t.ctx.db,
+      { "run-search": handler },
+      { workerId: "w", queue: "search" },
+    );
+    for (let tries = 0; tries < 200; tries++) {
+      const [task] = await executor.claim(4);
+      if (task) return executor.execute(task);
+      await sleep(20);
+    }
+    throw new Error("no search to claim");
+  }
+
+  const backfills = async (t: Tenant) =>
+    (await t.ctx.db.query("select 1 from absurd.t_index where task_name = 'index-backfill'"))
+      .rowCount;
+
+  it("finds a conversation by its words, for a key or a console session, filtered by end user", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.", {
+      externalUserId: "u1",
+    });
+    const other = await indexed(h, t, "The Acme renewal call moved to Friday.", {
+      externalUserId: "u2",
+    });
+    await indexed(h, t, "Lunch options near the office.");
+
+    const person = await h.signIn(t.id);
+    for (const credential of [t.secret, person]) {
+      const found = await search(h, credential, { query: "priced renewal" });
+      expect(found).toMatchObject({ mode: "keyword", notice: null });
+      expect(found.hits[0]).toMatchObject({ conversationId: renewal, seq: 1, role: "user" });
+      expect(found.hits[0]?.snippet).toContain("renewal");
+      expect(Number.isNaN(Date.parse(found.hits[0]?.createdAt ?? ""))).toBe(false);
+    }
+    const all = await search(h, t.secret, { query: "renewal" });
+    expect(all.hits.map((hit) => hit.conversationId).sort()).toEqual([renewal, other].sort());
+    const u2 = await search(h, t.secret, { query: "renewal", externalUserId: "u2" });
+    expect(u2.hits.map((hit) => hit.conversationId)).toEqual([other]);
+    expect((await search(h, t.secret, { query: "zeppelin" })).hits).toEqual([]);
+  });
+
+  it("refuses an empty query or no credential, and never searches another tenant's chats", async () => {
+    const h = await harness();
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    await indexed(h, a, "The Acme renewal is priced.");
+    expect((await h.call(a.secret, "POST", "/v1/search", { query: "   " })).status).toBe(400);
+    expect((await h.call(a.secret, "POST", "/v1/search", { query: "x", limit: 0 })).status).toBe(
+      400,
+    );
+    expect((await h.call(null, "POST", "/v1/search", { query: "renewal" })).status).toBe(401);
+    expect((await search(h, b.secret, { query: "renewal" })).hits).toEqual([]);
+    expect((await search(h, a.secret, { query: "renewal" })).hits).toHaveLength(1);
+  });
+
+  it("with an embedding model, answers with the worker's hits read back here", async () => {
+    const h = await harness({ keyless: ["faux", "fake"] });
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.", {
+      externalUserId: "u1",
+    });
+    expect((await putModel(h, t, "fake/embed-1")).status).toBe(200);
+    const { rows } = await t.ctx.db.query<{ part: number }>(
+      "select min(part) as part from search_chunks where conversation_id = $1",
+      [renewal],
+    );
+    const part = rows[0]?.part ?? 0;
+
+    const seen: unknown[] = [];
+    const [found] = await Promise.all([
+      search(h, t.secret, { query: "what did the big customer cost", externalUserId: "u1" }),
+      answerSearch(t, async (params) => {
+        seen.push(params);
+        return {
+          mode: "hybrid",
+          notice: null,
+          hits: [{ conversationId: renewal, seq: 1, part, score: 0.5 }],
+        };
+      }),
+    ]);
+    expect(seen).toEqual([
+      { query: "what did the big customer cost", limit: 20, externalUserId: "u1" },
+    ]);
+    expect(found).toMatchObject({ mode: "hybrid", notice: null });
+    expect(found.hits).toHaveLength(1);
+    expect(found.hits[0]).toMatchObject({ conversationId: renewal, seq: 1, role: "user" });
+    expect(found.hits[0]?.snippet).not.toBe("");
+
+    // A worker that fails: keyword matches, and why.
+    const [failed] = await Promise.all([
+      search(h, t.secret, { query: "renewal" }),
+      answerSearch(t, async () => {
+        throw new Error("provider down");
+      }),
+    ]);
+    expect(failed).toMatchObject({ mode: "keyword", notice: expect.stringMatching(/failed/) });
+    expect(failed.hits.map((hit) => hit.conversationId)).toEqual([renewal]);
+  });
+
+  it("falls back to keyword matches with a notice when no worker answers in time", async () => {
+    const h = await harness({ keyless: ["faux", "fake"], searchWaitMs: 100 });
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.");
+    expect((await putModel(h, t, "fake/embed-1")).status).toBe(200);
+    const found = await search(h, t.secret, { query: "renewal" });
+    expect(found).toMatchObject({ mode: "keyword", notice: expect.stringMatching(/timed out/) });
+    expect(found.hits.map((hit) => hit.conversationId)).toEqual([renewal]);
+  });
+
+  it("sets an embedding model the tenant holds a key for, backfills once per change, audits it and reports counts", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const errorOf = async (response: Response) => {
+      expect(response.status).toBe(400);
+      return z
+        .object({ error: z.object({ code: z.string(), message: z.string() }) })
+        .parse(await response.json()).error;
+    };
+    expect(await errorOf(await putModel(h, t, "mystery/embed"))).toMatchObject({
+      code: "invalid_model",
+      message: expect.stringContaining("not an embedding provider"),
+    });
+    expect(await errorOf(await putModel(h, t, "no-slash"))).toMatchObject({
+      code: "invalid_model",
+    });
+    expect(await errorOf(await putModel(h, t, "openai/text-embedding-3-small"))).toMatchObject({
+      code: "invalid_model",
+      message: expect.stringContaining("PUT /v1/model-keys/openai"),
+    });
+    expect(await backfills(t)).toBe(0);
+    // A new tenant has never set a model: no time to report (its row is a copy of the template's).
+    expect(await (await h.call(t.secret, "GET", "/v1/search/settings")).json()).toMatchObject({
+      embeddingModel: null,
+      updatedAt: null,
+    });
+
+    expect(
+      (
+        await h.call(t.secret, "PUT", "/v1/model-keys/openai", {
+          apiKey: "sk-test-0123456789abcdef",
+        })
+      ).status,
+    ).toBe(204);
+    const model = "openai/text-embedding-3-small";
+    const put = await putModel(h, t, model);
+    expect(put.status).toBe(200);
+    expect(await put.json()).toMatchObject({
+      embeddingModel: model,
+      lastError: null,
+      updatedAt: expect.any(String),
+    });
+    expect(await backfills(t)).toBe(1);
+    expect((await putModel(h, t, model)).status).toBe(200);
+    expect(await backfills(t)).toBe(1);
+    const audited = await h.control.db.query<{ actor: string; detail: unknown }>(
+      "select actor, detail from audit_log where tenant_id = $1 and action = 'search.settings.put'",
+      [t.id],
+    );
+    expect(audited.rows).toEqual([{ actor: `key:${t.key.id}`, detail: { embeddingModel: model } }]);
+
+    const conversation = await indexed(h, t, "We priced the Acme renewal at twelve thousand.");
+    const chunks = await t.ctx.db.query<{ seq: number; part: number }>(
+      "select seq, part from search_chunks where conversation_id = $1",
+      [conversation],
+    );
+    await writeEmbeddings(
+      t.ctx.db,
+      conversation,
+      model,
+      chunks.rows.map((chunk) => ({ ...chunk, vector: [1, 0, 0] })),
+    );
+    const settings = (await (
+      await h.call(t.secret, "GET", "/v1/search/settings")
+    ).json()) as Settings;
+    expect(settings).toMatchObject({ embeddingModel: model, chunks: chunks.rowCount });
+    expect(settings.chunks).toBeGreaterThan(0);
+    expect(settings.embedded).toBe(settings.chunks);
+
+    const off = await putModel(h, t, null);
+    expect(await off.json()).toMatchObject({ embeddingModel: null, embedded: 0 });
+    expect(await backfills(t)).toBe(1);
   });
 });

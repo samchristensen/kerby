@@ -9,7 +9,7 @@ export {
 } from "./executor.ts";
 export { readTask } from "./read.ts";
 export { spawnInTx } from "./spawn.ts";
-export type { TaskParams } from "./tasks.ts";
+export type { Queue, TaskParams } from "./tasks.ts";
 
 /** Absurd's schema and Kerby's queues: tenant migrations, applied first. */
 export const durableMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");

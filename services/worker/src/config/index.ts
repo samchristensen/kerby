@@ -66,6 +66,17 @@ export const workerConfigSchema = z
      * count the budget is sized for. Past it a worker claims nothing more and waiting tenants are served in turn.
      */
     maxRunningTurns: z.coerce.number().int().positive().default(50),
+    /**
+     * Index tasks (ADR 0019) this worker runs at once across all tenants, one per tenant. Each holds its tenant's pool
+     * like a turn, so it adds to the worker's connection budget (docs/deploy.md#postgres). Default 2: indexing may lag
+     * behind turns; it never takes their slots.
+     */
+    maxRunningIndexTasks: z.coerce.number().int().positive().default(2),
+    /**
+     * Searches (ADR 0019) this worker runs at once across all tenants, up to 4 per tenant. Each holds its tenant's pool
+     * while it embeds the query, so it adds to the worker's connection budget (docs/deploy.md#postgres). Default 4.
+     */
+    maxRunningSearches: z.coerce.number().int().positive().default(4),
   })
   .refine((config) => config.kerbyFakeModel || config.secretsPrivateKeys !== undefined, {
     message:

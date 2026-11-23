@@ -104,6 +104,26 @@ key stops answers on those conversations: it shows as `the turn failed after 5 a
 in the conversation's `lastError`. There is no alert; judgments `failed` after five attempts are
 `select state, count(*) from absurd.t_turns where task_name = 'run-judgment' group by 1` in a tenant database.
 
+## Chat search
+
+[ADR 0019](adr/0019-chat-search.md). Every tenant database holds a search index of its chats (`search_chunks`), built by
+the worker after each turn on the Absurd queue `index` and queried with `POST /v1/search` (or the console's chat list).
+Keyword search needs nothing. Semantic search needs an embedding model (`PUT /v1/search/settings`, or the console's Search
+page) and the tenant's key for its provider (`openai`, `google`, `mistral`, `fireworks`, `openrouter`: the same key as for
+chat), so the worker needs outbound HTTPS to those providers too. Setting a model starts a backfill that re-embeds every
+chat; `GET /v1/search/settings` shows `chunks`, `embedded` and the last refusal (`lastError`, e.g. a key that was removed).
+The worker runs indexing and searches in their own lanes (`MAX_RUNNING_INDEX_TASKS`, default 2, one per tenant;
+`MAX_RUNNING_SEARCHES`, default 4, four per tenant), never in a turn's slot. Usage lands in `usage` as the embedding model
+(`embed:...` and `search:...` dedupe keys). Stuck or failed indexing: `select task_name, state, count(*) from absurd.t_index
+group by 1, 2` in the tenant database; a conversation's watermark is `search_progress.indexed_seq`. Rebuild one from
+scratch with `delete from search_progress where conversation_id = ...` and `delete from search_chunks where ...`, then
+any new turn (or a model change) indexes it again.
+
+`vector` (pgvector, in Railway's `postgres-ssl:18` image) is not a trusted extension: the template gets it from control's
+superuser migration, and `POST /v1/operator/migrate` installs it in each tenant database as the cluster admin before the
+tenant migrations run. A tenant migrated any other way fails at `search/0001_search.sql` with `permission denied to
+create extension "vector"`: run the operator migrate.
+
 ## Export a tenant
 
 `POST /v1/operator/tenants/<id>/export` (run as above) dumps the tenant's database and lists its objects into the
@@ -236,20 +256,20 @@ on purpose: a generated value there would be made again on every apply.
   (`ENV=pr-123`) gets its own volume: check `show max_connections` there and run the same two commands if it says 100.
 - **Connection budget.** Every process opens at most (upper bounds, from the code's defaults):
 
-  | Process | Connections                             | Terms                                                                                                                                                                                                                                               |
-  | ------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | api     | `2 × max(maxPools, D + R) + D + 10`     | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                   |
-  | worker  | `2 × max(maxPools, min(C, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50); `W` tenants with a turn running or being claimed here, each holding its pool for as long as it does, so at most `C`; the control pool; one `LISTEN` on the control database |
-  | control | `2 × maxPools + 10 + 2 + 1`             | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                            |
-  | console | `5`                                     | the control pool, as `kerby_console`; the console opens no tenant database                                                                                                                                                                          |
+  | Process | Connections                                     | Terms                                                                                                                                                                                                                                                                                                                                                    |
+  | ------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | api     | `2 × max(maxPools, D + R) + D + 10`             | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                                                                                                                        |
+  | worker  | `2 × max(maxPools, min(C + I + S, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50), `I` index tasks (`MAX_RUNNING_INDEX_TASKS`, 2) and `S` searches (`MAX_RUNNING_SEARCHES`, 4); `W` tenants with a task running or being claimed here, each holding its pool for as long as it does, so at most `C + I + S`; the control pool; one `LISTEN` on the control database |
+  | control | `2 × maxPools + 10 + 2 + 1`                     | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                                                                                                                                 |
+  | console | `5`                                             | the control pool, as `kerby_console`; the console opens no tenant database                                                                                                                                                                                                                                                                               |
 
   The sum over all processes, plus `superuser_reserved_connections` (3) and room for operators' `psql` (say 17), must
-  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 111 + control 113 + console 5 +
-  20 = 459 of 500. Each extra worker adds 111 and each extra api 210: raise `max_connections` by as much first (and
-  `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api. The worker's 111 holds at
-  `MAX_RUNNING_TURNS` 50 however many tenants run at once: past the cap a worker claims nothing more and queues the
-  tenants that ask, longest-waiting first. Raising it to `C` above 50 costs 2 connections per extra tenant, up to
-  `2 × C + 11` for the worker: raise `max_connections` first.
+  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 123 + control 113 + console 5 +
+  20 = 471 of 500. Each extra worker adds 123 and each extra api 210: raise `max_connections` by as much first (and
+  `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api. The worker's 123 holds at
+  its caps (50 + 2 + 4) however many tenants run at once: past a cap a worker claims nothing more on that lane and queues
+  the tenants that ask, longest-waiting first. Raising a cap costs 2 connections per extra tenant, up to
+  `2 × (C + I + S) + 11` for the worker: raise `max_connections` first.
 - **Measured** (`make multitenant`, stream saturation, 2026-11-22; two api processes, 200 tenants provisioned, local
   `max_connections` 500): an open stream costs its tenant 3 connections on that api process (the pool of 2 and the
   listener) however many streams it has: 46 tenants with 60 streams held 156 connections on one process, 60 tenants
@@ -284,7 +304,9 @@ real figure rather than an estimate here.
 
 `railway logs --service <name>` (add `--lines N`), `railway metrics --service <name> --since 1h`. Logs are JSON with
 `tenantId` and never message content: a `request` line per API request (status 429 for a tenant over its request
-rate), `turn completed`, `turn failed for good`, `judgment completed` (outcome `answered` or `refused`, question count, duration), `history cut to its budget` (a turn started without its oldest turns).
+rate), `turn completed`, `turn failed for good`, `judgment completed` (outcome `answered` or `refused`, question count, duration), `history cut to its budget` (a turn started without its oldest turns),
+`conversation indexed`, `chat index backfill page done`, `chat index could not embed` (the reason is the tenant's `lastError`)
+and `search completed` (mode, hit count, duration; never the query).
 `api` and `console` run with `TRUST_PROXY=true`: Railway's edge sets `X-Forwarded-For` with the client first, and the
 failed-auth limit (api) and the sign-up and sign-in limits (console) count that address; without it every client would
 share the proxy's. The console logs `console sign-up` (tenant id and person id, never the email) and `request failed`;

@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-chat-search.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -65,20 +65,23 @@ Each external system lives behind exactly one package; nothing else imports the 
 | Pi Durable and its libraries        | `runtime-pi-durable` | an `AgentRuntime`                                                           |
 | Tenant-supplied URLs                | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 | System One API (TypeSafe, OpenCode) | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`            |
+| OpenAI-format embeddings APIs       | `embeddings-openai`  | an `EmbeddingProvider` (ADR 0019); the port is `packages/embeddings`        |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
-Judgment providers follow the same rule: `packages/judgment` defines `JudgmentProvider` (types only),
-`packages/judgment-<provider>` adapts one provider to it, and only a service's `src/index.ts` may import an adapter.
+Judgment and embedding providers follow the same rule: `packages/judgment` and `packages/embeddings` define
+`JudgmentProvider` and `EmbeddingProvider` (types only, plus the embeddings fake at `@kerby/embeddings/fake`),
+`packages/judgment-<provider>` and `packages/embeddings-<wire format>` adapt providers to them, and only a service's
+`src/index.ts` may import an adapter.
 
 ## Tenancy
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                          |
-| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                        |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                                                                        | Migrations                                                                 |
+| ------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions`                                             | `packages/control-plane/migrations/control/`                               |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the chat search index (`search_chunks`, `search_progress`, `search_settings`; pgvector), the Absurd schema | `packages/{durable,blobs,conversations,prompts,search}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -155,6 +158,8 @@ flowchart LR
    also caps its running turns across all tenants (`MAX_RUNNING_TURNS`, default 50), which bounds its tenant
    connection pools: it reserves slots before a claim and never claims more than it can run, and a tenant that asks
    while the worker is full waits its turn (longest-waiting first), so a busy tenant cannot hold the slots against others.
+   The same rules run in a lane per Absurd queue, each with its own limits: `turns` (above), `index` (one per tenant,
+   `MAX_RUNNING_INDEX_TASKS`) and `search` (four per tenant, `MAX_RUNNING_SEARCHES`), so search work never takes a turn's slot.
 2. **Rehydrate.** The task reads the conversation's messages from the tenant's index (bodies from S3) and starts a
    fresh in-memory harness with them as `AgentRun.history`. Workers hold no state, so any worker takes any turn. A tool
    call in the history without a persisted result is resolved first through `executeTool` (a cached step), never left to the harness.
@@ -218,6 +223,16 @@ flowchart LR
   `POST /v1/judgments { state, prompt }` resolve a label once, when they are made, and record `{ name, version }`; a
   conversation keeps the rendered system prompt, model and guardrails in its own row, so a turn never reads the prompt
   tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
+- **Search** ([ADR 0019](docs/adr/0019-chat-search.md)). Every tenant database holds an index of its chats
+  (`packages/search`): user and assistant text cut into chunks, each with an English `tsvector` and, when the tenant has
+  chosen an embedding model, a pgvector embedding made with the tenant's own key. A finished turn spawns
+  `index-conversation` on the `index` queue; the task chunks messages past the conversation's watermark (never a
+  guardrail-blocked one) and embeds what the current model has not, holding no connection during a provider call and
+  advancing the watermark only from where it read it. Changing the model spawns `index-backfill`, a page of 50
+  conversations per task. `POST /v1/search` fuses full-text and cosine rankings (reciprocal rank) into the best chunk per
+  conversation: keyword-only in the api when no model is set, otherwise through a `run-search` task on the `search` queue,
+  since only a worker can open the key; the task returns references and the api reads the snippets. A worker that is
+  unavailable or refused degrades the answer to keyword matches with a `notice`.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
@@ -232,7 +247,7 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 
 ## Local stack
 
-`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, `console`, built from each service's
+`make up` runs [compose.yaml](compose.yaml): Postgres (pgvector's Postgres 18 image; Railway's ships pgvector too), RustFS, `control`, `api`, `worker`, `console`, built from each service's
 `Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
 then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
 

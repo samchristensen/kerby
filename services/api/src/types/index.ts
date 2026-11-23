@@ -14,6 +14,10 @@ export type ApiDeps = {
     defaultModel: string | undefined;
     /** Providers whose models run conversations, and so may hold a key: the harness adapter's list, injected by the composition root. */
     modelProviders: readonly string[];
+    /** Providers that embed text for chat search (ADR 0019), and so may hold a key: the embeddings adapter's list, injected likewise. */
+    embeddingProviders: readonly string[];
+    /** How long `POST /v1/search` waits for a worker to embed the query before answering with keyword matches. */
+    searchWaitMs: number;
     /** Providers that run judgments (ADR 0015), and so may hold a key: the judgment adapters' lists, injected likewise. */
     judgmentProviders: readonly string[];
     /** Providers whose runs need no tenant key (the development fake model). Empty in production. */

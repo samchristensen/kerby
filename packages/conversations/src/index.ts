@@ -3,15 +3,20 @@ import { join } from "node:path";
 import { blobsMigrationsDir } from "@kerby/blobs";
 import { durableMigrationsDir } from "@kerby/durable";
 import { promptsMigrationsDir } from "@kerby/prompts";
+import { searchMigrationsDir } from "@kerby/search";
 
 const conversationsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-/** Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, then prompts. */
+/**
+ * Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, prompts, then
+ * the search index over conversations' messages (ADR 0019).
+ */
 export const tenantMigrationDirs: readonly string[] = [
   durableMigrationsDir,
   blobsMigrationsDir,
   conversationsMigrationsDir,
   promptsMigrationsDir,
+  searchMigrationsDir,
 ];
 
 export {

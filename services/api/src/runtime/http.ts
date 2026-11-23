@@ -14,9 +14,11 @@ import {
   PromptVersionParamSchema,
   PublishPromptRequestSchema,
   PutModelKeyRequestSchema,
+  PutSearchSettingsRequestSchema,
   RenamePromptRequestSchema,
   RenderPromptRequestSchema,
   SaveDraftRequestSchema,
+  SearchRequestSchema,
   SetPromptLabelRequestSchema,
   STREAM_INCLUDES,
   StreamIncludeSchema,
@@ -83,6 +85,7 @@ import {
   saveTenantDraft,
   setTenantPromptLabel,
 } from "../service/prompts.ts";
+import { getSearchSettings, putSearchSettings, searchChats } from "../service/search.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -96,6 +99,9 @@ const MESSAGE_BODY_BYTES = 4_100_000;
 
 /** Body limit for a judgment: its request is stored as the task's params, so it stays small (ADR 0015). */
 const JUDGMENT_BODY_BYTES = 262_144;
+
+/** Body limit for a search or its settings: a query is at most 1000 characters. */
+const SEARCH_BODY_BYTES = 16_384;
 
 const encoder = new TextEncoder();
 
@@ -325,10 +331,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       "PUT",
       "/v1/model-keys/:provider",
       authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
-        // The adapters' lists (ADR 0008, 0015): a key for a provider nothing can use would fail only at the first call.
+        // The adapters' lists (ADR 0008, 0015, 0019): a key for a provider nothing can use would fail only at the first call.
         const provider = params.provider ?? "";
         const providers = [
-          ...new Set([...deps.settings.modelProviders, ...deps.settings.judgmentProviders]),
+          ...new Set([
+            ...deps.settings.modelProviders,
+            ...deps.settings.judgmentProviders,
+            ...deps.settings.embeddingProviders,
+          ]),
         ];
         if (!providers.includes(provider))
           throw new HttpError(
@@ -519,6 +529,39 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const id = z.uuid().safeParse(params.id);
         if (!id.success) throw new HttpError(404, "not_found", "judgment not found");
         return json(200, await inTenant(principal, (ctx) => getJudgment(ctx, id.data)));
+      }),
+    ],
+    [
+      "POST",
+      "/v1/search",
+      authed("POST /v1/search", async (request, _params, principal) => {
+        const body = await readJson(request, SearchRequestSchema, { maxBytes: SEARCH_BODY_BYTES });
+        return json(
+          200,
+          await inTenant(principal, (ctx) => searchChats(deps, ctx, body, request.signal)),
+        );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/search/settings",
+      authed("GET /v1/search/settings", async (_request, _params, principal) =>
+        json(200, await inTenant(principal, (ctx) => getSearchSettings(ctx))),
+      ),
+    ],
+    [
+      "PUT",
+      "/v1/search/settings",
+      authed("PUT /v1/search/settings", async (request, _params, principal) => {
+        const body = await readJson(request, PutSearchSettingsRequestSchema, {
+          maxBytes: SEARCH_BODY_BYTES,
+        });
+        return json(
+          200,
+          await inTenant(principal, (ctx) =>
+            putSearchSettings(deps, principal, ctx, body.embeddingModel),
+          ),
+        );
       }),
     ],
     [

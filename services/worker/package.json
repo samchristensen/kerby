@@ -14,11 +14,14 @@
     "@kerby/conversations": "workspace:*",
     "@kerby/db": "workspace:*",
     "@kerby/durable": "workspace:*",
+    "@kerby/embeddings": "workspace:*",
+    "@kerby/embeddings-openai": "workspace:*",
     "@kerby/judgment": "workspace:*",
     "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
-    "@kerby/secrets": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
+    "@kerby/search": "workspace:*",
+    "@kerby/secrets": "workspace:*",
     "@kerby/serve": "workspace:*",
     "zod": "catalog:"
   }

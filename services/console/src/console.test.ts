@@ -1,3 +1,4 @@
+import { PutSearchSettingsRequestSchema } from "@kerby/contracts";
 import {
   authenticateApiKey,
   createApiKey,
@@ -34,10 +35,12 @@ async function harness(
 ) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
-  await setRolePassword(control.db, "kerby_console", "console-role-password-for-tests");
+  // `kerby_console` is one role for the whole test cluster: every test file that logs in as it sets this same password
+  // (packages/control-plane's `asRole` too), so two files running at once cannot lock each other out.
+  await setRolePassword(control.db, "kerby_console", "kerby_console-password-for-tests");
   const url = new URL(control.url);
   url.username = "kerby_console";
-  url.password = "console-role-password-for-tests";
+  url.password = "kerby_console-password-for-tests";
   const asConsole = createControlDb(url.toString(), { max: 2 });
   cleanups.push(() => asConsole.close());
 
@@ -473,6 +476,110 @@ describe("chats", () => {
     expect(
       await h.service.createChat(h.access, { message: "hi", promptName: "a", promptVersion: "9" }),
     ).toMatchObject({ ok: false, fields: { promptVersion: expect.stringContaining("no longer") } });
+  });
+
+  it("searches with the query in a POST body only, and says why a search was refused", async () => {
+    const hit = {
+      conversationId: CONVERSATION_ID,
+      seq: 3,
+      role: "assistant",
+      title: null,
+      snippet: "the invoice was sent",
+      score: 0.5,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    let reply = () => json(200, { hits: [hit], mode: "keyword", notice: "No openai key." });
+    const h = await chatHarness(() => reply());
+    expect(await h.service.searchChats(h.access, { query: "   " })).toMatchObject({
+      ok: false,
+      fields: { query: expect.any(String) },
+    });
+    expect(h.calls).toEqual([]);
+
+    expect(await h.service.searchChats(h.access, { query: " invoice " })).toEqual({
+      ok: true,
+      result: {
+        mode: "keyword",
+        notice: "No openai key.",
+        hits: [
+          {
+            conversationId: CONVERSATION_ID,
+            seq: 3,
+            role: "assistant",
+            title: null,
+            snippet: "the invoice was sent",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(h.calls).toEqual([
+      {
+        method: "POST",
+        path: "/v1/search",
+        token: h.access.token,
+        body: { query: "invoice", limit: 20 },
+      },
+    ]);
+
+    reply = () => error(429, "rate_limited");
+    expect(await h.service.searchChats(h.access, { query: "invoice" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Too many"),
+    });
+    reply = () => error(503, "server_busy");
+    await expect(h.service.searchChats(h.access, { query: "invoice" })).rejects.toThrow(
+      /503 server_busy/,
+    );
+  });
+
+  it("reads the search settings with the suggested models whose key the tenant holds, and sets or clears the model", async () => {
+    const settings = (embeddingModel: string | null) => ({
+      embeddingModel,
+      lastError: null,
+      chunks: 10,
+      embedded: embeddingModel ? 4 : 0,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    let reply = (request: Parameters<ApiClient>[0]) =>
+      json(
+        200,
+        settings(
+          request.method === "PUT"
+            ? PutSearchSettingsRequestSchema.parse(request.body).embeddingModel
+            : null,
+        ),
+      );
+    const h = await chatHarness((request) => reply(request));
+    await h.service.setModelKey(h.access.session, "openai", { apiKey: "sk-test-123456" });
+
+    const read = await h.service.searchSettings(h.access);
+    expect(read).toMatchObject({ embeddingModel: null, chunks: 10, embedded: 0 });
+    expect(read.suggestions).toContainEqual({
+      provider: "openai",
+      model: "openai/text-embedding-3-small",
+      configured: true,
+    });
+    expect(read.suggestions.filter((s) => s.configured).map((s) => s.provider)).toEqual(["openai"]);
+
+    expect(
+      await h.service.setEmbeddingModel(h.access, {
+        embeddingModel: " openai/text-embedding-3-small ",
+      }),
+    ).toEqual({ ok: true, embeddingModel: "openai/text-embedding-3-small" });
+    expect(await h.service.setEmbeddingModel(h.access, { embeddingModel: "" })).toEqual({
+      ok: true,
+      embeddingModel: null,
+    });
+    expect(h.calls.filter((call) => call.method === "PUT").map((call) => call.body)).toEqual([
+      { embeddingModel: "openai/text-embedding-3-small" },
+      { embeddingModel: null },
+    ]);
+
+    reply = () => error(400, "invalid_model", "anthropic has no embedding models");
+    expect(
+      await h.service.setEmbeddingModel(h.access, { embeddingModel: "anthropic/claude-x" }),
+    ).toEqual({ ok: false, fields: { embeddingModel: "anthropic has no embedding models" } });
   });
 });
 

@@ -2,6 +2,7 @@
 import { createBlobs } from "@kerby/blobs";
 import { resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import { EMBEDDING_PROVIDERS } from "@kerby/embeddings-openai/providers";
 import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
@@ -38,9 +39,11 @@ async function startApi(config: ApiConfig) {
     sealer: createSealer(config.secretsPublicKey),
     settings: {
       defaultModel: config.defaultModel,
-      // The adapters own the provider lists (ADR 0008, 0015); their `providers` subpaths load no adapter code.
+      // The adapters own the provider lists (ADR 0008, 0015, 0019); their `providers` subpaths load no adapter code.
       modelProviders: SUPPORTED_PROVIDERS,
       judgmentProviders: JUDGMENT_PROVIDERS,
+      embeddingProviders: EMBEDDING_PROVIDERS,
+      searchWaitMs: 10_000,
       keylessProviders: config.keylessProviders,
       defaultSystem: config.defaultSystem,
       authCacheMs: config.authCacheSeconds * 1000,

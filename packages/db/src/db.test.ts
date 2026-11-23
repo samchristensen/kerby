@@ -342,6 +342,71 @@ describe("ClusterAdmin", () => {
     await expect(as("first").query("select 1")).rejects.toThrow(/password authentication failed/);
     expect((await as("it's-second").query("select 2 as two")).rows).toEqual([{ two: 2 }]);
   });
+
+  it("installs an untrusted extension a tenant role may not, and leaves extension members with the admin", async () => {
+    const root = createControlDb(adminUrl(), { max: 1 });
+    const cluster = createClusterAdmin(adminUrl());
+    const role = `r_${Math.random().toString(16).slice(2, 10)}`;
+    cleanups.push(async () => {
+      await cluster.dropRole(role);
+      await cluster.close();
+      await root.close();
+    });
+    await cluster.createRole(role, "pw");
+    const as = (db: TestDatabase) => {
+      const url = new URL(db.url);
+      url.username = role;
+      url.password = "pw";
+      const handle = createTenantDb(url.toString(), { max: 1 });
+      cleanups.push(() => handle.close());
+      return handle;
+    };
+
+    // A template holding the extension, a table that uses it and a function of the admin's own.
+    const template = await database();
+    const setup = createControlDb(template.url, { max: 1 });
+    await setup.query("create extension vector");
+    await setup.query("create table items (id int primary key, embedding halfvec)");
+    await setup.query("create function answer() returns int language sql as 'select 42'");
+    await setup.close();
+
+    const copy = await database(template.name);
+    await root.query(`alter database ${copy.name} owner to ${role}`);
+    await cluster.reassignOwned(copy.name, role);
+    const own = as(copy);
+    const owners = await own.query<{ name: string; owner: string }>(
+      `select 'items' as name, tableowner as owner from pg_tables where tablename = 'items'
+       union all select 'answer', pg_get_userbyid(proowner) from pg_proc where proname = 'answer'
+       union all select distinct 'vector members', pg_get_userbyid(p.proowner)
+         from pg_proc p join pg_depend d on d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e'
+         join pg_extension e on e.oid = d.refobjid and e.extname = 'vector'
+       order by name`,
+    );
+    const admin = new URL(adminUrl()).username;
+    expect(owners.rows).toEqual([
+      { name: "answer", owner: role },
+      { name: "items", owner: role },
+      { name: "vector members", owner: admin },
+    ]);
+    await own.query("insert into items values (1, '[1,0]'), (2, '[0,1]')");
+    const nearest = await own.query(
+      "select id from items order by embedding <=> '[1,0.1]' limit 1",
+    );
+    expect(nearest.rows).toEqual([{ id: 1 }]);
+
+    // An empty database: the role cannot create the extension; once the admin has, its own `if not exists` passes.
+    const fresh = await database();
+    await root.query(`alter database ${fresh.name} owner to ${role}`);
+    await expect(as(fresh).query("create extension if not exists vector")).rejects.toThrow(
+      /permission denied/,
+    );
+    await cluster.ensureExtension(fresh.name, "vector");
+    await cluster.ensureExtension(fresh.name, "vector"); // idempotent
+    await as(fresh).query("create extension if not exists vector");
+    await expect(cluster.ensureExtension(fresh.name, "vector; drop")).rejects.toThrow(
+      /invalid extension name/,
+    );
+  });
 });
 
 describe("listen", () => {

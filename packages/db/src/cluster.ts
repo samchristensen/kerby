@@ -48,8 +48,17 @@ export interface ClusterAdmin {
    * template. Revoking from a database the admin does not own only warns, so check the result with a refused login.
    */
   restrictToAdmin(database: string): Promise<void>;
-  /** Hand every object in `database` owned by the admin role to `role` (so the tenant owns its schema). */
+  /**
+   * Hand every object in `database` owned by the admin role to `role` (so the tenant owns its schema). Members of an
+   * extension stay with the admin: the extension owns them, and a tenant role could not have created them.
+   */
   reassignOwned(database: string, role: string): Promise<void>;
+  /**
+   * Install `extension` in `database` if it is not there yet, as the admin. For extensions a tenant role may not
+   * create (pgvector's `vector` is not trusted): the tenant migration's own `create extension if not exists` is then
+   * a no-op.
+   */
+  ensureExtension(database: string, extension: string): Promise<void>;
   /** The admin URL pointed at another database of the cluster. */
   urlFor(database: string): string;
   /** Drops connections, then the database. No error when it is absent. */
@@ -152,8 +161,10 @@ export function createClusterAdmin(url: string): ClusterAdmin {
                       where pg_get_userbyid(c.relowner) = current_user
                         and n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'
                         and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
-                        -- sequences owned by a column and indexes follow their table
-                        and not exists (select 1 from pg_depend d where d.objid = c.oid and d.deptype in ('a', 'i')) loop
+                        -- sequences owned by a column and indexes follow their table; extension members stay
+                        and not exists (select 1 from pg_depend d where d.objid = c.oid and d.deptype in ('a', 'i'))
+                        and not exists (select 1 from pg_depend d
+                                         where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e') loop
               execute format('alter %s %I.%I owner to ${quoted}',
                 case r.relkind when 'S' then 'sequence' when 'v' then 'view' when 'm' then 'materialized view'
                                when 'f' then 'foreign table' else 'table' end,
@@ -162,13 +173,25 @@ export function createClusterAdmin(url: string): ClusterAdmin {
             for r in select n.nspname, p.proname, p.prokind, pg_get_function_identity_arguments(p.oid) as args
                        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                       where pg_get_userbyid(p.proowner) = current_user
-                        and n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema' loop
+                        and n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'
+                        and not exists (select 1 from pg_depend d
+                                         where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e') loop
               execute format('alter %s %I.%I(%s) owner to ${quoted}',
                 case r.prokind when 'p' then 'procedure' else 'function' end,
                 r.nspname, r.proname, r.args);
             end loop;
           end
           $do$`);
+      } finally {
+        await inDatabase.close();
+      }
+    },
+    async ensureExtension(database, extension) {
+      const quoted = identifier(extension, "extension name");
+      identifier(database, "database name"); // validated: it becomes part of a URL
+      const inDatabase = createControlDb(urlFor(database), { max: 1 });
+      try {
+        await inDatabase.query(`create extension if not exists ${quoted}`);
       } finally {
         await inDatabase.close();
       }

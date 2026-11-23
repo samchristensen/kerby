@@ -10,6 +10,7 @@
     "@kerby/contracts": "workspace:*",
     "@kerby/control-plane": "workspace:*",
     "@kerby/db": "workspace:*",
+    "@kerby/embeddings-openai": "workspace:*",
     "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/prompts": "workspace:*",

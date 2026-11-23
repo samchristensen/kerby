@@ -262,6 +262,8 @@ export type StoredMessage = {
   message: AgentMessage;
   runId: string | null;
   createdAt: Date;
+  /** Guardrails that blocked the message (or the exchange it refuses); null when it was not blocked. */
+  blockedBy: string[] | null;
 };
 
 /** Bodies for index rows, eight S3 gets at a time, validated, in the rows' order. */
@@ -278,7 +280,13 @@ async function withBodies(
       if (!row) continue;
       const { body } = await blobs.get(ctx, row.blobId);
       const message = AgentMessageSchema.parse(JSON.parse(new TextDecoder().decode(body)));
-      out[i] = { seq: row.seq, message, runId: row.runId, createdAt: row.createdAt };
+      out[i] = {
+        seq: row.seq,
+        message,
+        runId: row.runId,
+        createdAt: row.createdAt,
+        blockedBy: row.blockedBy,
+      };
     }
   };
   await Promise.all(Array.from({ length: Math.min(8, rows.length) }, worker));

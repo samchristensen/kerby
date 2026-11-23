@@ -193,7 +193,11 @@ describe("api keys", () => {
   });
 });
 
-/** A handle on the control database as one of the limited service roles, given a password the way control does. */
+/**
+ * A handle on the control database as one of the limited service roles, given a password the way control does. The
+ * roles are global to the test cluster: other test files use this same `<role>-password-for-tests`, so files running
+ * at once never lock each other out.
+ */
 async function asRole(controlUrl: string, role: "kerby_app" | "kerby_console") {
   const admin = createControlDb(controlUrl, { max: 1 });
   await setRolePassword(admin, role, `${role}-password-for-tests`);

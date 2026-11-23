@@ -13,6 +13,7 @@
     "@kerby/db": "workspace:*",
     "@kerby/durable": "workspace:*",
     "@kerby/observability": "workspace:*",
-    "@kerby/prompts": "workspace:*"
+    "@kerby/prompts": "workspace:*",
+    "@kerby/search": "workspace:*"
   }
 }

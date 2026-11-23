@@ -6,4 +6,5 @@ export * from "./model.ts";
 export * from "./operator.ts";
 export * from "./prompt-ref.ts";
 export * from "./prompts.ts";
+export * from "./search.ts";
 export * from "./trace.ts";

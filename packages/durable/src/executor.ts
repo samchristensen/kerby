@@ -1,6 +1,6 @@
-// Claim and run tasks from one tenant's database. The worker's tenant scheduler decides whom to claim for;
-// this module does the claiming (within the tenant's limit across every worker), the lease heartbeat for the
-// whole run, and fencing.
+// Claim and run one queue's tasks from one tenant's database. The worker's tenant scheduler decides whom to claim for;
+// this module does the claiming (within the tenant's limit for that queue across every worker), the lease heartbeat for
+// the whole run, and fencing.
 //
 // Facts from plan 0001 S2 that shape it:
 //  - A lapsed lease lets a second worker claim while the first still runs; the first only fails at its next step.
@@ -36,6 +36,8 @@ type ClaimedRun = ClaimedTask;
 export type ExecutorOptions = {
   /** Identifies this worker in Absurd's run rows. */
   workerId: string;
+  /** The queue to claim from (default `turns`). Only its handlers are registered, and only its running tasks count. */
+  queue?: Queue;
   /** Lease length in seconds (default 120). Heartbeats extend it for as long as a handler runs. */
   claimTimeoutSeconds?: number;
   /** How often to extend the lease. Default a third of the lease. Tests lengthen it to let a lease lapse. */
@@ -44,9 +46,9 @@ export type ExecutorOptions = {
 
 export interface TenantExecutor {
   /**
-   * Claim runnable tasks while fewer than `limit` of this tenant's turns run, counted across every worker on the
-   * tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that is not
-   * run sits until its lease lapses). Each claimed task must be passed to `execute`.
+   * Claim runnable tasks while fewer than `limit` of this tenant's tasks on the queue run, counted across every worker
+   * on the tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that
+   * is not run sits until its lease lapses). Each claimed task must be passed to `execute`.
    */
   claim(limit: number, max?: number): Promise<ClaimedRun[]>;
   /** Run a claimed task to completion. Never throws: failures are recorded on the task and retried by Absurd. */
@@ -64,26 +66,35 @@ const absurdLog = {
 type Claim = { task: ClaimedRun; signal: AbortSignal; abort: (reason: Error) => void };
 const claims = new AsyncLocalStorage<Claim>();
 
-/** The queue whose running tasks count against a tenant's concurrency limit. */
-const QUEUE = "turns";
-/** Serializes claims within one tenant database (an advisory lock is scoped to its database). Any constant works. */
-const CLAIM_LOCK = 7_271_001;
+/**
+ * Serializes claims on one queue within one tenant database (an advisory lock is scoped to its database): one constant
+ * per queue, so a claim never waits on another queue's.
+ */
+const CLAIM_LOCKS: Record<Queue, number> = {
+  turns: 7_271_001,
+  system: 7_271_002,
+  index: 7_271_003,
+  search: 7_271_004,
+};
 
 export function createTenantExecutor(
   db: TenantDb,
   handlers: Partial<TaskHandlers>,
   options: ExecutorOptions,
 ): TenantExecutor {
+  const queue = options.queue ?? "turns";
   const claimTimeout = options.claimTimeoutSeconds ?? 120;
   const heartbeatEvery = options.heartbeatEveryMs ?? (claimTimeout * 1000) / 3;
   const pool = rawPool(db);
-  const absurd = new Absurd({ db: pool, queueName: QUEUE, log: absurdLog });
+  const absurd = new Absurd({ db: pool, queueName: queue, log: absurdLog });
 
   for (const [name, handler] of Object.entries(handlers) as [
     TaskName,
     (params: never, run: RunContext) => Promise<unknown>,
   ][]) {
-    absurd.registerTask({ name, queue: TASKS[name].queue }, async (params, ctx) => {
+    // Absurd refuses to run a task registered on another queue than its client's; this executor never claims one.
+    if (TASKS[name].queue !== queue) continue;
+    absurd.registerTask({ name, queue }, async (params, ctx) => {
       const claim = claims.getStore();
       if (!claim) throw new Error(`task ${name} ran outside TenantExecutor.execute`);
       const timer = setInterval(() => {
@@ -105,7 +116,7 @@ export function createTenantExecutor(
           runId: claim.task.run_id,
           attempt: claim.task.attempt,
           maxAttempts: claim.task.max_attempts,
-          queue: TASKS[name].queue,
+          queue,
           signal: claim.signal,
           step: (stepName, fn) => ctx.step(stepName, fn),
         });
@@ -118,9 +129,9 @@ export function createTenantExecutor(
   return {
     async claim(limit, max = Number.POSITIVE_INFINITY) {
       if (limit <= 0 || max <= 0) return [];
-      // Count and claim in one transaction holding a per-database lock: every worker's claim for this tenant waits
-      // its turn and sees the runs the previous one committed. A lapsed lease no longer counts; the claim below
-      // fails that run and may hand its task to this worker.
+      // Count and claim in one transaction holding the queue's per-database lock: every worker's claim on this queue
+      // for this tenant waits its turn and sees the runs the previous one committed. A lapsed lease no longer counts;
+      // the claim below fails that run and may hand its task to this worker.
       const client = await withConnectRetry(() => pool.connect());
       // A checked-out client has no pool error listener: a connection cut while it waits on the lock must not crash
       // the process. The failure reaches the pending query, which throws below.
@@ -129,9 +140,9 @@ export function createTenantExecutor(
       let broken: Error | undefined;
       try {
         await client.query("begin");
-        await client.query("select pg_advisory_xact_lock($1)", [CLAIM_LOCK]);
+        await client.query("select pg_advisory_xact_lock($1)", [CLAIM_LOCKS[queue]]);
         const { rows } = await client.query<{ running: number }>(
-          `select count(*)::int as running from absurd.r_${QUEUE}
+          `select count(*)::int as running from absurd.r_${queue}
             where state = 'running' and claim_expires_at > clock_timestamp()`,
         );
         const free = Math.min(limit - (rows[0]?.running ?? 0), max);

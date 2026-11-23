@@ -194,6 +194,53 @@ describe("TenantExecutor", () => {
     expect(await executor.claim(10, 0)).toEqual([]);
   });
 
+  it("claims only its own queue's tasks, and counts only that queue's runs against the limit", async () => {
+    const db = await tenant();
+    const ran: string[] = [];
+    const handlers: Partial<TaskHandlers> = {
+      "run-turn": async (params) => {
+        ran.push(`turn ${params.conversationId}`);
+      },
+      "index-conversation": async (params) => {
+        ran.push(`index ${params.conversationId}`);
+      },
+    };
+    const turns = createTenantExecutor(db, handlers, { workerId: "w" });
+    const index = createTenantExecutor(db, handlers, { workerId: "w", queue: "index" });
+    for (const conversationId of ["i1", "i2"]) {
+      await db.transaction((tx) =>
+        spawnInTx(tx, "index-conversation", { conversationId }, { idempotencyKey: conversationId }),
+      );
+    }
+    expect(await turns.claim(5)).toEqual([]);
+
+    // The running index task fills the index limit of 1, yet leaves the tenant's one turn slot free.
+    const [indexing] = await index.claim(1);
+    expect(indexing?.task_name).toBe("index-conversation");
+    expect(await index.claim(1)).toEqual([]);
+    for (const key of ["t1", "t2"]) {
+      await db.transaction((tx) =>
+        spawnInTx(tx, "run-turn", { conversationId: key, seq: 1 }, { idempotencyKey: key }),
+      );
+    }
+    const [turning] = await turns.claim(1);
+    expect(turning?.task_name).toBe("run-turn");
+    expect(await turns.claim(1)).toEqual([]);
+    // And the running turn does not count against the index limit of 2.
+    const [second] = await index.claim(2);
+    expect(second?.task_name).toBe("index-conversation");
+
+    for (const task of [indexing, turning, second]) {
+      const executor = task?.task_name === "run-turn" ? turns : index;
+      await executor.execute(task as NonNullable<typeof task>);
+    }
+    expect(ran.sort()).toEqual(["index i1", "index i2", "turn t1"]);
+    const { rows } = await db.query<{ state: string; tasks: number }>(
+      "select state, count(*)::int as tasks from absurd.t_index group by state",
+    );
+    expect(rows).toEqual([{ state: "completed", tasks: 2 }]);
+  });
+
   it("fences the first run out once its lease lapsed and a second worker took over", async () => {
     const db = await tenant();
     await db.query("create table effects (run text not null)");

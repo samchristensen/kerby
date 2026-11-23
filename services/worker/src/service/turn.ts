@@ -19,6 +19,7 @@ import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
 import { alert, errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
 import { checkUserMessage, guardToolCall } from "./guardrails.ts";
+import { enqueueIndexing } from "./indexing.ts";
 import { judgeTool } from "./judgments.ts";
 import { tenantTools } from "./tools.ts";
 import { TraceRecorder, traceOf } from "./trace.ts";
@@ -259,6 +260,8 @@ export async function runTurn(
       messages: persisted,
       attempt: run.attempt,
     });
+    // The chat search index lags the turn on its own queue (ADR 0019); the turn is done whatever happens there.
+    await enqueueIndexing(deps, ctx, conversationId, nextSeq - 1);
   } catch (caught) {
     const error =
       caught instanceof Error && apiKey && caught.message.includes(apiKey)

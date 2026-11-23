@@ -11,6 +11,9 @@ import type {
   PromptVariable,
   PromptVersion,
   PromptVersionSummary,
+  SearchHit,
+  SearchResponse,
+  SearchSettings,
 } from "@kerby/contracts";
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
@@ -155,6 +158,21 @@ export type ChatView = ChatStatus & {
  */
 export type ChatAccess = { session: Session; token: string };
 
+/** One conversation's best match for a search, as the api found it. */
+export type ChatSearchHitView = Pick<
+  SearchHit,
+  "conversationId" | "seq" | "role" | "title" | "snippet" | "createdAt"
+>;
+
+export type ChatSearchView = Pick<SearchResponse, "mode" | "notice"> & {
+  hits: ChatSearchHitView[];
+};
+
+/** The search settings, and a known-good embedding model per provider with whether the tenant holds its key. */
+export type SearchSettingsView = SearchSettings & {
+  suggestions: { provider: string; model: string; configured: boolean }[];
+};
+
 /**
  * The console's operations, bound to their dependencies in `src/index.ts`. Next.js bundles `src/app`, so pages and
  * actions reach this through `consoleService()` (src/app/_lib/console.ts) and import its types only (ADR 0014). Every
@@ -212,6 +230,19 @@ export type ConsoleService = {
     after: string | null,
     signal: AbortSignal,
   ): Promise<Response>;
+
+  // Chat search (ADR 0019), through the api with the person's session token.
+  /** The conversations best matching form field `query`, one hit each; the query is sent in a POST body only. */
+  searchChats(
+    access: ChatAccess,
+    form: FormInput,
+  ): Promise<{ ok: true; result: ChatSearchView } | FormFailure>;
+  searchSettings(access: ChatAccess): Promise<SearchSettingsView>;
+  /** Form field `embeddingModel`, a Kerby model id; blank turns semantic search off. */
+  setEmbeddingModel(
+    access: ChatAccess,
+    form: FormInput,
+  ): Promise<{ ok: true; embeddingModel: string | null } | FormFailure>;
 
   // The Studio (ADR 0017): prompts and decision models, through the api with the person's session token.
   /** Every prompt of the tenant, by name; of one kind when `kind` is given. */

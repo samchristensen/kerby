@@ -190,6 +190,9 @@ importers:
       '@kerby/prompts':
         specifier: workspace:*
         version: link:../prompts
+      '@kerby/search':
+        specifier: workspace:*
+        version: link:../search
 
   packages/db:
     dependencies:
@@ -223,6 +226,17 @@ importers:
         version: 0.5.1(pg@8.23.1)
 
   packages/egress: {}
+
+  packages/embeddings: {}
+
+  packages/embeddings-openai:
+    dependencies:
+      '@kerby/embeddings':
+        specifier: workspace:*
+        version: link:../embeddings
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   packages/judgment: {}
 
@@ -268,6 +282,19 @@ importers:
         specifier: workspace:*
         version: link:../agent
 
+  packages/search:
+    dependencies:
+      '@kerby/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../db
+    devDependencies:
+      '@kerby/conversations':
+        specifier: workspace:*
+        version: link:../conversations
+
   packages/secrets: {}
 
   packages/serve:
@@ -305,6 +332,9 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../../packages/durable
+      '@kerby/embeddings-openai':
+        specifier: workspace:*
+        version: link:../../packages/embeddings-openai
       '@kerby/judgment-systemone':
         specifier: workspace:*
         version: link:../../packages/judgment-systemone
@@ -317,6 +347,9 @@ importers:
       '@kerby/runtime-pi-durable':
         specifier: workspace:*
         version: link:../../packages/runtime-pi-durable
+      '@kerby/search':
+        specifier: workspace:*
+        version: link:../../packages/search
       '@kerby/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets
@@ -341,6 +374,9 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@kerby/embeddings-openai':
+        specifier: workspace:*
+        version: link:../../packages/embeddings-openai
       '@kerby/judgment-systemone':
         specifier: workspace:*
         version: link:../../packages/judgment-systemone
@@ -450,6 +486,12 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../../packages/durable
+      '@kerby/embeddings':
+        specifier: workspace:*
+        version: link:../../packages/embeddings
+      '@kerby/embeddings-openai':
+        specifier: workspace:*
+        version: link:../../packages/embeddings-openai
       '@kerby/judgment':
         specifier: workspace:*
         version: link:../../packages/judgment
@@ -462,6 +504,9 @@ importers:
       '@kerby/runtime-pi-durable':
         specifier: workspace:*
         version: link:../../packages/runtime-pi-durable
+      '@kerby/search':
+        specifier: workspace:*
+        version: link:../../packages/search
       '@kerby/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets

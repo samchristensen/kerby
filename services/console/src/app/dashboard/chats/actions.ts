@@ -1,6 +1,12 @@
 "use server";
+import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import type { ChatListView, ChatStatus, FormFailure } from "../../../types/index.ts";
+import type {
+  ChatListView,
+  ChatSearchView,
+  ChatStatus,
+  FormFailure,
+} from "../../../types/index.ts";
 import { consoleService } from "../../_lib/console.ts";
 import { requireChatAccess } from "../../_lib/session.ts";
 
@@ -42,4 +48,36 @@ export async function listChatsAction(cursor?: string): Promise<ChatListView> {
 /** Whether a turn is still running: the page's backstop for a live event it missed. */
 export async function chatStatusAction(chatId: string): Promise<ChatStatus | undefined> {
   return consoleService().chatStatus(await requireChatAccess(), chatId);
+}
+
+export type SearchChatsState = { ok: true; result: ChatSearchView } | FormFailure;
+
+/** Search the tenant's chats. An action, not a `?q=` page: the query stays out of every URL and request log. */
+export async function searchChatsAction(query: string): Promise<SearchChatsState> {
+  return consoleService().searchChats(await requireChatAccess(), { query });
+}
+
+export type EmbeddingModelState =
+  | { ok: true; embeddingModel: string | null }
+  | FormFailure
+  | undefined;
+
+/** Set the embedding model (form field `embeddingModel`), or clear it with a blank one. */
+export async function setEmbeddingModelAction(
+  _previous: EmbeddingModelState,
+  formData: FormData,
+): Promise<EmbeddingModelState> {
+  const access = await requireChatAccess();
+  const result = await consoleService().setEmbeddingModel(access, Object.fromEntries(formData));
+  revalidatePath("/dashboard/chats/search-settings");
+  return result;
+}
+
+/** Turn semantic search off; the keyword index stays. */
+export async function clearEmbeddingModelAction(): Promise<void> {
+  const access = await requireChatAccess();
+  const result = await consoleService().setEmbeddingModel(access, { embeddingModel: "" });
+  // Clearing is refused only when the api limits the rate: rare enough to fail the action rather than fill a form.
+  if (!result.ok) throw new Error(result.error ?? "the api refused to clear the embedding model");
+  revalidatePath("/dashboard/chats/search-settings");
 }

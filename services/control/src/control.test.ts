@@ -195,9 +195,13 @@ describe("provisioning", () => {
     const own = createTenantDb(await tenantUrl(tenant.id));
     cleanups.push(() => own.close());
     const owners = await own.query<{ tableowner: string }>(
-      "select distinct tableowner from pg_tables where tablename in ('conversations', 'messages', 'blobs')",
+      "select distinct tableowner from pg_tables where tablename in ('conversations', 'messages', 'blobs', 'search_chunks')",
     );
     expect(owners.rows).toEqual([{ tableowner: tenant.dbRole }]);
+    // The template's `vector` came along; the role can use it though the extension stays the admin's.
+    expect(
+      (await own.query("select '[1,0]'::halfvec <=> '[0,1]'::halfvec as distance")).rows,
+    ).toEqual([{ distance: 1 }]);
     await own.query("insert into conversations (model) values ('m')"); // the role can use its schema
 
     // A second tenant's role cannot connect to the first tenant's database.
@@ -947,11 +951,24 @@ describe("migration fan-out", () => {
       (await getTenant(control.db, behind.tenant.id)) ?? expect.fail("no tenant row");
     const goneRow = (await getTenant(control.db, gone.tenant.id)) ?? expect.fail("no tenant row");
 
-    // Make `behind` look like an older release: its newest migration was never applied.
+    // Make `behind` look like an older release: its conversation and search migrations were never applied, and its
+    // database never had `vector`, which its own role may not create: the fan-out installs it first.
     const own = createTenantDb(await tenantUrl(behindRow.id));
-    await own.query("drop table trace_segments, tool_executions, messages, conversations");
-    await own.query("delete from schema_migrations where name like 'conversations/%'");
+    await own.query(
+      "drop table search_chunks, search_progress, search_settings, trace_segments, tool_executions, messages, conversations",
+    );
+    await own.query(
+      "delete from schema_migrations where name like 'conversations/%' or name like 'search/%'",
+    );
     await own.close();
+    const asAdmin = createControlDb(cluster.urlFor(behindRow.dbName), { max: 1 });
+    await asAdmin.query("drop extension vector");
+    await asAdmin.close();
+    const ownAgain = createTenantDb(await tenantUrl(behindRow.id), { max: 1 });
+    await expect(ownAgain.query("create extension if not exists vector")).rejects.toThrow(
+      /permission denied/,
+    );
+    await ownAgain.close();
     await control.db.query("update tenants set schema_version = null where id = $1", [
       behind.tenant.id,
     ]);
@@ -977,6 +994,7 @@ describe("migration fan-out", () => {
     const after = createTenantDb(await tenantUrl(behindRow.id));
     cleanups.push(() => after.close());
     expect((await after.query("select 1 from conversations")).rowCount).toBe(0);
+    expect((await after.query("select 1 from search_settings")).rowCount).toBe(1);
     expect((await getTenant(control.db, behind.tenant.id))?.schemaVersion).toBe(
       readMigrations(tenantMigrationDirs).at(-1)?.name,
     );
