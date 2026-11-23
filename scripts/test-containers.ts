@@ -90,7 +90,7 @@ export function removeStale(alive: (pid: number) => boolean = isAlive): void {
       docker("rm", "-f", id);
     } catch (error) {
       // Two runs starting together both find the same orphan: the other one's removal wins, and that is fine.
-      const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+      const stderr = error instanceof Error && "stderr" in error ? String(error.stderr) : "";
       if (!/already in progress|No such container/.test(stderr)) throw error;
     }
   }
