@@ -36,10 +36,12 @@ async function harness(
 ) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
-  await setRolePassword(control.db, "kerby_console", "console-role-password-for-tests");
+  // A role belongs to the whole cluster, which test files share as they run in parallel: every test that gives
+  // `kerby_console` a password gives this one (packages/control-plane's repo.test.ts too), or one breaks the other's sign-in.
+  await setRolePassword(control.db, "kerby_console", "kerby_console-password-for-tests");
   const url = new URL(control.url);
   url.username = "kerby_console";
-  url.password = "console-role-password-for-tests";
+  url.password = "kerby_console-password-for-tests";
   const asConsole = createControlDb(url.toString(), { max: 2 });
   cleanups.push(() => asConsole.close());
 
