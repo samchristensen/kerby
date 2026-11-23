@@ -1,6 +1,7 @@
 import {
   authenticateApiKey,
   createApiKey,
+  createIntegration,
   insertConsoleUser,
   insertTenant,
   readModelKey,
@@ -46,7 +47,12 @@ async function harness(
     if (taken.rowCount) return { ok: false, code: "name_taken" };
     const tenant = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
-    const { secret } = await createApiKey(control.db, tenant.id, "initial");
+    const integration = await createIntegration(control.db, {
+      tenantId: tenant.id,
+      name: "default",
+      role: "admin",
+    });
+    const { secret } = await createApiKey(control.db, tenant.id, integration.id, "initial");
     try {
       const user = await insertConsoleUser(control.db, {
         tenantId: tenant.id,
@@ -203,28 +209,104 @@ describe("accounts", () => {
 });
 
 describe("workspace", () => {
-  it("creates, lists and revokes API keys of the session's tenant only", async () => {
+  it("manages integrations and their keys for the session's tenant only, audited as the person", async () => {
     const h = await harness();
     const a = await h.signUp("acme");
     const b = await h.signUp("globex");
-    const created = await h.service.createApiKey(a.session, { label: "  ci  " });
+    const [initial] = await h.service.integrations(a.session);
+    expect(initial).toMatchObject({ name: "default", role: "admin", liveKeys: 1 });
+
+    expect(await h.service.createIntegration(a.session, { name: " ", role: "owner" })).toEqual({
+      ok: false,
+      fields: { name: "A name is required", role: "Choose admin or restricted" },
+    });
+    const made = await h.service.createIntegration(a.session, {
+      name: " bots ",
+      role: "restricted",
+    });
+    if (!made.ok) return expect.fail(JSON.stringify(made));
+    expect(made.integration).toMatchObject({ name: "bots", role: "restricted", liveKeys: 0 });
+    expect(await h.service.createIntegration(a.session, { name: "bots", role: "admin" })).toEqual({
+      ok: false,
+      fields: { name: "Another integration has this name" },
+    });
+    expect((await h.service.integrations(a.session)).map((i) => i.name)).toEqual([
+      "bots",
+      "default",
+    ]);
+    const id = made.integration.id;
+
+    const created = await h.service.createApiKey(a.session, id, { label: "  ci  " });
     if (!created.ok) return expect.fail(JSON.stringify(created));
-    expect(created.key.label).toBe("ci");
-    expect((await authenticateApiKey(h.control.db, created.secret))?.tenant.name).toBe("acme");
-    expect((await h.service.apiKeys(a.session)).map((k) => k.label)).toEqual(["ci", "initial"]);
-    expect(await h.service.createApiKey(a.session, { label: "x".repeat(101) })).toEqual({
+    expect(created.key).toMatchObject({ label: "ci", integrationId: id });
+    expect(await authenticateApiKey(h.control.db, created.secret)).toMatchObject({
+      tenant: { name: "acme" },
+      integration: { id, role: "restricted" },
+    });
+    expect(await h.service.createApiKey(a.session, id, { label: "x".repeat(101) })).toEqual({
       ok: false,
       fields: { label: "At most 100 characters" },
     });
+    expect((await h.service.integration(a.session, id))?.keys.map((k) => k.label)).toEqual(["ci"]);
 
-    // another tenant's session cannot see or revoke it
-    expect((await h.service.apiKeys(b.session)).map((k) => k.id)).not.toContain(created.key.id);
+    // another tenant's session can neither see, change, archive, nor put a key in this integration, nor revoke its key
+    expect(await h.service.integration(b.session, id)).toBeUndefined();
+    expect(await h.service.integration(b.session, "not-a-uuid")).toBeUndefined();
+    expect((await h.service.integrations(b.session)).map((i) => i.id)).not.toContain(id);
+    expect(
+      await h.service.updateIntegration(b.session, id, { name: "mine", role: "admin" }),
+    ).toEqual({
+      ok: false,
+      error: "This integration no longer exists.",
+    });
+    expect(await h.service.createApiKey(b.session, id, {})).toEqual({
+      ok: false,
+      error: "This integration no longer exists.",
+    });
+    expect(await h.service.archiveIntegration(b.session, id)).toBe(false);
     expect(await h.service.revokeApiKey(b.session, created.key.id)).toBe(false);
     expect(await authenticateApiKey(h.control.db, created.secret)).toBeDefined();
 
-    expect(await h.service.revokeApiKey(a.session, created.key.id)).toBe(true);
+    const updated = await h.service.updateIntegration(a.session, id, {
+      name: "robots",
+      role: "admin",
+    });
+    expect(updated).toMatchObject({
+      ok: true,
+      integration: { name: "robots", role: "admin", liveKeys: 1 },
+    });
+    expect((await authenticateApiKey(h.control.db, created.secret))?.integration.role).toBe(
+      "admin",
+    );
+
+    const second = await h.service.createApiKey(a.session, id, {});
+    if (!second.ok) return expect.fail(JSON.stringify(second));
+    expect(await h.service.revokeApiKey(a.session, second.key.id)).toBe(true);
+    expect(await authenticateApiKey(h.control.db, second.secret)).toBeUndefined();
+
+    expect(await h.service.archiveIntegration(a.session, id)).toBe(true);
     expect(await authenticateApiKey(h.control.db, created.secret)).toBeUndefined();
+    expect(await h.service.integration(a.session, id)).toBeUndefined();
     expect((await h.service.overview(a.session)).activeApiKeys).toBe(1);
+
+    const { rows } = await h.control.db.query<{ action: string; actor: string; detail: object }>(
+      "select action, actor, detail from audit_log where tenant_id = $1 and (action like 'integration.%' or action like 'key.%') order by id",
+      [a.session.tenantId],
+    );
+    expect(rows.map((r) => r.action)).toEqual([
+      "integration.create",
+      "key.create",
+      "integration.update",
+      "key.create",
+      "key.revoke",
+      "integration.archive",
+    ]);
+    expect(rows.every((r) => r.actor === `user:${a.session.userId}`)).toBe(true);
+    expect(rows.filter((r) => r.action.startsWith("key."))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ detail: { keyId: created.key.id, integrationId: id } }),
+      ]),
+    );
   });
 
   it("seals a model key for a supported provider and removes it", async () => {

@@ -1,5 +1,6 @@
 // The operator API (services/control), behind the operator token. Never exposed to tenants.
 import { z } from "zod";
+import { type Integration, IntegrationNameSchema, IntegrationRoleSchema } from "./integrations.ts";
 
 /**
  * Per-tenant limits. An absent key takes the deployment default (the worker's or the api's config); the numbers are
@@ -37,6 +38,8 @@ export type Tenant = z.infer<typeof TenantSchema>;
 
 const ApiKeySchema = z.object({
   id: z.string(),
+  /** The integration the key belongs to; the key may do what its role allows (ADR 0019). */
+  integrationId: z.uuid(),
   label: z.string(),
   createdAt: z.iso.datetime(),
   lastUsedAt: z.iso.datetime().nullable(),
@@ -65,7 +68,18 @@ const CreateTenantResponseSchema = z.object({
 });
 export type CreateTenantResponse = z.infer<typeof CreateTenantResponseSchema>;
 
-export const CreateKeyRequestSchema = z.object({ label: z.string().max(100).optional() });
+export const CreateKeyRequestSchema = z.object({
+  label: z.string().max(100).optional(),
+  /** One of the tenant's live integrations (default: its `default` integration). */
+  integrationId: z.uuid().optional(),
+});
+
+/** `POST /v1/operator/tenants/:id/integrations`. */
+export const CreateIntegrationRequestSchema = z.object({
+  name: IntegrationNameSchema,
+  role: IntegrationRoleSchema,
+});
+export type CreateIntegrationResponse = { integration: Integration };
 
 const CreateKeyResponseSchema = z.object({ apiKey: ApiKeySchema, secret: z.string() });
 export type CreateKeyResponse = z.infer<typeof CreateKeyResponseSchema>;

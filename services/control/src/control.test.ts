@@ -5,9 +5,12 @@ import { createEmptyTestBucket, createTestBlobs, createTestBucket } from "@kerby
 import type {
   BackupResponse,
   ConsoleSignupResponse,
+  CreateIntegrationResponse,
   CreateKeyResponse,
   CreateTenantResponse,
   ExportResponse,
+  ListIntegrationsResponse,
+  ListKeysResponse,
   ReissueExportResponse,
   RestoreResponse,
   Tenant,
@@ -190,6 +193,10 @@ describe("provisioning", () => {
     expect(created.tenant.schemaVersion).toBe(readMigrations(tenantMigrationDirs).at(-1)?.name);
     expect(await cluster.databaseExists(tenant.dbName)).toBe(true);
     expect(await cluster.roleExists(tenant.dbRole)).toBe(true);
+    expect((await authenticateApiKey(control.db, created.secret))?.integration).toMatchObject({
+      name: "default",
+      role: "admin",
+    });
     expect((await authenticateApiKey(control.db, created.secret))?.tenant.id).toBe(tenant.id);
 
     const own = createTenantDb(await tenantUrl(tenant.id));
@@ -322,6 +329,69 @@ describe("lifecycle", () => {
     expect(await authenticateApiKey(control.db, extra.secret)).toBeUndefined();
   });
 
+  it("manages integrations and puts keys in the one named, rotation keeping it", async () => {
+    const { call, provision, control } = await start();
+    const { tenant, apiKey } = await provision("acme");
+    const other = await provision("globex");
+    const listed = (await (
+      await call("GET", `/v1/operator/tenants/${tenant.id}/integrations`)
+    ).json()) as ListIntegrationsResponse;
+    expect(listed.integrations).toMatchObject([{ name: "default", role: "admin" }]);
+    expect(apiKey.integrationId).toBe(listed.integrations[0]?.id);
+
+    const response = await call("POST", `/v1/operator/tenants/${tenant.id}/integrations`, {
+      name: "bots",
+      role: "restricted",
+    });
+    expect(response.status).toBe(201);
+    const { integration } = (await response.json()) as CreateIntegrationResponse;
+    expect(
+      (
+        await call("POST", `/v1/operator/tenants/${tenant.id}/integrations`, {
+          name: "bots",
+          role: "admin",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await call("POST", `/v1/operator/tenants/${tenant.id}/integrations`, {
+          name: "x",
+          role: "owner",
+        })
+      ).status,
+    ).toBe(400);
+
+    const created = (await (
+      await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, {
+        label: "bot",
+        integrationId: integration.id,
+      })
+    ).json()) as CreateKeyResponse;
+    expect(created.apiKey.integrationId).toBe(integration.id);
+    expect((await authenticateApiKey(control.db, created.secret))?.integration.role).toBe(
+      "restricted",
+    );
+    // another tenant's integration, or an unknown one, is not found
+    expect(
+      (
+        await call("POST", `/v1/operator/tenants/${other.tenant.id}/keys`, {
+          integrationId: integration.id,
+        })
+      ).status,
+    ).toBe(404);
+    const keys = (await (
+      await call("GET", `/v1/operator/tenants/${tenant.id}/keys`)
+    ).json()) as ListKeysResponse;
+    expect(keys.keys.find((k) => k.id === created.apiKey.id)?.integrationId).toBe(integration.id);
+
+    const rotated = (await (
+      await call("POST", `/v1/operator/tenants/${tenant.id}/keys/${created.apiKey.id}/rotate`)
+    ).json()) as CreateKeyResponse;
+    expect(rotated.apiKey.integrationId).toBe(integration.id);
+    expect((await authenticateApiKey(control.db, rotated.secret))?.integration.name).toBe("bots");
+  });
+
   it("deletes everything: database, role, objects, keys; and frees the name", async () => {
     const { call, provision, cluster, control, blobs, buckets, tenantUrl } = await start();
     const { tenant, secret } = await provision("acme");
@@ -348,6 +418,10 @@ describe("lifecycle", () => {
     expect(await authenticateApiKey(control.db, secret)).toBeUndefined();
     expect(
       (await control.db.query("select 1 from api_keys where tenant_id = $1", [tenant.id])).rowCount,
+    ).toBe(0);
+    expect(
+      (await control.db.query("select 1 from integrations where tenant_id = $1", [tenant.id]))
+        .rowCount,
     ).toBe(0);
     expect(
       (
@@ -394,7 +468,10 @@ describe("console sign-up", () => {
     const tenant = (await getTenant(h.control.db, created.tenantId)) ?? expect.fail("no tenant");
     expect(tenant).toMatchObject({ name: "acme", status: "active" });
     expect(await h.cluster.databaseExists(tenant.dbName)).toBe(true);
-    expect((await authenticateApiKey(h.control.db, created.secret))?.tenant.id).toBe(tenant.id);
+    expect(await authenticateApiKey(h.control.db, created.secret)).toMatchObject({
+      tenant: { id: tenant.id },
+      integration: { name: "default", role: "admin" },
+    });
     expect(await findConsoleUser(h.control.db, "ada@example.com")).toMatchObject({
       id: created.userId,
       tenantId: tenant.id,

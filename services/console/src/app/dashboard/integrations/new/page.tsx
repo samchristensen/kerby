@@ -2,19 +2,19 @@ import type { Metadata } from "next";
 import { PageHeader } from "../../../_components/ui.tsx";
 import { requireSession } from "../../../_lib/session.ts";
 import { Workspace } from "../../_components/panes.tsx";
-import { NewApiKeyForm } from "./form.tsx";
+import { NewIntegrationForm } from "./form.tsx";
 
-export const metadata: Metadata = { title: "New API key" };
+export const metadata: Metadata = { title: "New integration" };
 
-export default async function NewApiKeyPage() {
+export default async function NewIntegrationPage() {
   await requireSession();
   return (
     <Workspace>
       <PageHeader
-        title="New API key"
-        description="Create a key to authenticate calls to the tenant API."
+        title="New integration"
+        description="A named client of your workspace. Create its keys on its page."
       />
-      <NewApiKeyForm />
+      <NewIntegrationForm />
     </Workspace>
   );
 }

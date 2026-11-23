@@ -166,8 +166,10 @@ export async function setSchemaVersion(
   ]);
 }
 
-/** Remove a tenant row that never became usable (failed provisioning), with the password stored for it. */
+/** Remove a tenant row that never became usable (failed provisioning), with the password, integrations and keys made for it. */
 export async function deleteTenantRow(db: ControlQueryable, id: string): Promise<void> {
+  await db.query("delete from api_keys where tenant_id::text = $1", [id]);
+  await db.query("delete from integrations where tenant_id::text = $1", [id]);
   await db.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
   await db.query("delete from tenants where id::text = $1", [id]);
 }

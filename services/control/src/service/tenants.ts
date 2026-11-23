@@ -1,8 +1,9 @@
 import { tenantPrefix } from "@kerby/blobs";
-import type { Limits } from "@kerby/contracts";
+import { DEFAULT_INTEGRATION_NAME, type Limits } from "@kerby/contracts";
 import {
   audit,
   createApiKey,
+  createIntegration,
   deleteTenantRow,
   getTenant,
   insertTenant,
@@ -37,7 +38,7 @@ export type Provisioned = { tenant: TenantRecord; key: Awaited<ReturnType<typeof
 
 /**
  * Provision a tenant: a database copied from the template, a role that can reach only it, the tenant migrations,
- * the first key. On any failure nothing is left behind: the database, the role and the row are removed. `actor` is who
+ * the `default` admin integration with the first key in it. On any failure nothing is left behind: the database, the role and the row are removed. `actor` is who
  * asked, for the audit log: an operator, or the console at sign-up.
  */
 export async function provisionTenant(
@@ -74,7 +75,12 @@ export async function provisionTenant(
     // The copy may predate the newest migrations: catch up, as the tenant's own role.
     await pools.use(tenant.id, (db) => migrate(db, tenantMigrationDirs));
     await setSchemaVersion(control, tenant.id, currentSchemaVersion());
-    const key = await createApiKey(control, tenant.id, "initial");
+    const integration = await createIntegration(control, {
+      tenantId: tenant.id,
+      name: DEFAULT_INTEGRATION_NAME,
+      role: "admin",
+    });
+    const key = await createApiKey(control, tenant.id, integration.id, "initial");
     const active = await setTenantStatus(control, tenant.id, "active");
     await audit(control, {
       tenantId: tenant.id,
@@ -129,7 +135,7 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
 }
 
 /**
- * Delete: refuse new work, drop the database and role, delete the object prefix, purge keys, secrets and the console's
+ * Delete: refuse new work, drop the database and role, delete the object prefix, purge integrations, keys, secrets and the console's
  * people and sessions. Every step is safe to repeat, so a failed delete is retried by calling it again. The row stays,
  * status `deleted`.
  */
@@ -144,6 +150,7 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
   const objects = await buckets.primary.deletePrefix(tenantPrefix(id));
   await control.transaction(async (tx) => {
     await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
+    await tx.query("delete from integrations where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
     await tx.query("delete from console_sessions where tenant_id::text = $1", [id]);

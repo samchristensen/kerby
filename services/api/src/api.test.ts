@@ -10,13 +10,16 @@ import type {
   PostMessageResponse,
 } from "@kerby/contracts";
 import {
+  archiveIntegration,
   createApiKey,
   createConsoleSession,
+  createIntegration,
   insertConsoleUser,
   insertTenant,
   readModelKey,
   revokeApiKey,
   setTenantStatus,
+  updateIntegration,
 } from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import { appendTrace, notifyLive } from "@kerby/conversations";
@@ -88,7 +91,12 @@ async function harness(
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    const { key, secret } = await createApiKey(control.db, row.id);
+    const integration = await createIntegration(control.db, {
+      tenantId: row.id,
+      name: "default",
+      role: "admin",
+    });
+    const { key, secret } = await createApiKey(control.db, row.id, integration.id);
     const database: TestTenant = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);
@@ -175,6 +183,8 @@ describe("authentication", () => {
       tenantId: t.id,
       actor: `key:${t.key.id}`,
       limits: {},
+      role: "admin",
+      integrationId: t.key.integrationId,
     });
 
     await setTenantStatus(h.control.db, t.id, "suspended");
@@ -182,6 +192,56 @@ describe("authentication", () => {
     await expect(auth.authenticate(t.secret)).resolves.toBeDefined(); // still inside the TTL
     clock += 2;
     await expect(auth.authenticate(t.secret)).rejects.toThrow(/suspended/);
+  });
+
+  it("lets a restricted key use conversations and judgments only", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const bots = await createIntegration(h.control.db, {
+      tenantId: t.id,
+      name: "bots",
+      role: "restricted",
+    });
+    const { secret } = await createApiKey(h.control.db, t.id, bots.id);
+    for (const [method, path, body] of [
+      ["GET", "/v1/model-keys", undefined],
+      ["PUT", "/v1/model-keys/anthropic", { apiKey: "sk-test-1234567890" }],
+      ["DELETE", "/v1/model-keys/anthropic", undefined],
+      ["GET", "/v1/prompts", undefined],
+      ["POST", "/v1/prompts", { name: "p", kind: "chat" }],
+      ["GET", "/v1/prompts/p", undefined],
+    ] as const) {
+      const response = await h.call(secret, method, path, body);
+      expect(response.status, `${method} ${path}`).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: { code: "forbidden", message: expect.stringContaining('"restricted"') },
+      });
+    }
+    const conversation = await newConversation(h, secret);
+    expect((await h.call(secret, "GET", `/v1/conversations/${conversation.id}`)).status).toBe(200);
+    expect((await h.call(secret, "GET", "/v1/conversations")).status).toBe(200);
+    expect((await h.call(secret, "GET", `/v1/judgments/${crypto.randomUUID()}`)).status).toBe(404);
+    // the tenant's admin key still reaches everything
+    expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(200);
+    expect((await h.call(t.secret, "GET", "/v1/prompts")).status).toBe(200);
+  });
+
+  it("applies a role change once the auth cache TTL has passed", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    let clock = 1_000;
+    const auth = createAuthenticator(h.control.db, 30_000, () => clock);
+    expect((await auth.authenticate(t.secret)).role).toBe("admin");
+    await updateIntegration(h.control.db, t.id, t.key.integrationId, { role: "restricted" });
+    clock += 29_999;
+    expect((await auth.authenticate(t.secret)).role).toBe("admin");
+    clock += 2;
+    expect((await auth.authenticate(t.secret)).role).toBe("restricted");
+    await archiveIntegration(h.control.db, t.id, t.key.integrationId);
+    clock += 30_001;
+    await expect(auth.authenticate(t.secret)).rejects.toThrow(/invalid/);
+    // through the app (cache TTL 0 here), the archived integration's key is refused at once
+    expect((await h.call(t.secret, "GET", "/v1/conversations")).status).toBe(401);
   });
 
   it("accepts a console session as the signed-in person's tenant, and ends with the session or the tenant", async () => {
@@ -199,6 +259,8 @@ describe("authentication", () => {
     await expect(auth.authenticate(token)).resolves.toMatchObject({
       tenantId: t.id,
       actor: expect.stringMatching(/^user:[0-9a-f-]{36}$/),
+      role: "admin",
+      integrationId: null,
     });
     expect(
       (

@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import { ButtonLink, EmptyState } from "../../_components/ui.tsx";
 import { requireSession } from "../../_lib/session.ts";
 
-export const metadata: Metadata = { title: "API keys" };
+export const metadata: Metadata = { title: "Integrations" };
 
-export default async function ApiKeysPage() {
+export default async function IntegrationsPage() {
   await requireSession();
   return (
     <EmptyState
-      title="API keys"
+      title="Integrations"
       icon={
         <svg
           aria-hidden="true"
@@ -27,17 +27,19 @@ export default async function ApiKeysPage() {
       }
     >
       <p>
-        API keys authenticate your workspace to the tenant API. Send one with every request as{" "}
+        An integration is one client of your workspace: a backend, a script, a partner. It holds the
+        API keys that client sends as{" "}
         <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-xs text-zinc-800">
           Authorization: Bearer kb_…
         </code>
+        , and its role decides what those keys may do.
       </p>
       <p>
-        A key is shown once, when you create it. You can revoke a key at any time; requests using it
-        then fail.
+        A key is shown once, when you create it. Revoke a key, or archive a whole integration, and
+        requests using it then fail.
       </p>
       <div className="pt-2">
-        <ButtonLink href="/dashboard/api-keys/new">Create a key</ButtonLink>
+        <ButtonLink href="/dashboard/integrations/new">Create an integration</ButtonLink>
       </div>
     </EmptyState>
   );
