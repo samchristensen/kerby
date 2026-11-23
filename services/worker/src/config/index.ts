@@ -42,6 +42,19 @@ export const workerConfigSchema = z
      */
     toolCallTimeoutMs: z.coerce.number().int().positive().default(60_000),
     /**
+     * Host names the egress guard lets through although they resolve to private addresses, comma separated: a local MCP
+     * server for the proof on the Compose stack (`make tools-e2e`). Development only; production refuses it.
+     */
+    egressAllowedHosts: z
+      .string()
+      .default("")
+      .transform((hosts) =>
+        hosts
+          .split(",")
+          .map((host) => host.trim())
+          .filter((host) => host !== ""),
+      ),
+    /**
      * Private key(s) that open tenants' sealed model keys, base64, comma separated: the key new secrets are sealed
      * to first, older ones after it while a rotation finishes. Not needed with the fake model.
      */
@@ -83,7 +96,15 @@ export const workerConfigSchema = z
   .refine((config) => !(config.kerbyFakeModel && config.kerbyEnvironment === "production"), {
     message: "KERBY_FAKE_MODEL is only allowed with KERBY_ENVIRONMENT=development",
     path: ["kerbyFakeModel"],
-  });
+  })
+  .refine(
+    (config) => config.egressAllowedHosts.length === 0 || config.kerbyEnvironment === "development",
+    {
+      message:
+        "EGRESS_ALLOWED_HOSTS is only allowed with KERBY_ENVIRONMENT=development: in production every tenant URL must be public",
+      path: ["egressAllowedHosts"],
+    },
+  );
 
 export type WorkerConfig = z.output<typeof workerConfigSchema>;
 

@@ -125,6 +125,12 @@ services:
       # Judgments (ADR 0015) call TypeSafe and OpenCode with the tenant's own key; point these at stand-ins to exercise them offline.
       TYPESAFE_BASE_URL: ${KERBY_TYPESAFE_BASE_URL:-https://api.typesafe.ai}
       OPENCODE_SYSTEMONE_BASE_URL: ${KERBY_OPENCODE_SYSTEMONE_BASE_URL:-https://opencode.ai/inference/systemone}
+      # Development only (ADR 0019): the egress guard lets this host through although it is private, so a test MCP server
+      # on this machine can answer (`make tools-e2e`). Every other tenant URL must still be public.
+      EGRESS_ALLOWED_HOSTS: host.docker.internal
+    extra_hosts:
+      # Docker Desktop resolves it by itself; Linux needs the gateway named.
+      - "host.docker.internal:host-gateway"
     depends_on:
       control: { condition: service_healthy }
 

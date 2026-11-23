@@ -66,8 +66,12 @@ async function startWorker(config: WorkerConfig): Promise<{
     toolCredentials: opener
       ? (tenantId, serverId) => readToolCredential(control, opener, tenantId, serverId)
       : undefined,
-    // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only.
-    toolFetch: createEgressFetch({ timeoutMs: config.toolCallTimeoutMs }),
+    // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only, but for the
+    // hosts a development stack names.
+    toolFetch: createEgressFetch({
+      timeoutMs: config.toolCallTimeoutMs,
+      allowedHosts: config.egressAllowedHosts,
+    }),
     runtime: createPiDurableRuntime({
       models: config.kerbyFakeModel ? createFakeModels() : createTenantModels,
       onReport: (type) => log("debug", "harness report", { type }),

@@ -1982,6 +1982,19 @@ describe("worker config", () => {
     );
   });
 
+  it("lets the egress guard pass named hosts only in development", () => {
+    const hosts = { ...base, secretsPrivateKeys: "a2V5", egressAllowedHosts: " mcp-demo, ,other " };
+    const refused = workerConfigSchema.safeParse(hosts);
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]?.path).toEqual(["egressAllowedHosts"]);
+    expect(
+      workerConfigSchema.parse({ ...hosts, kerbyEnvironment: "development" }).egressAllowedHosts,
+    ).toEqual(["mcp-demo", "other"]);
+    expect(
+      workerConfigSchema.parse({ ...base, secretsPrivateKeys: "a2V5" }).egressAllowedHosts,
+    ).toEqual([]);
+  });
+
   it("requires a secrets private key unless it runs the fake model", () => {
     const refused = workerConfigSchema.safeParse(base);
     expect(refused.success).toBe(false);
