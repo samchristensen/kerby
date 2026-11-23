@@ -3,7 +3,7 @@
 // disabled, an enabled tool keeps the definition an admin approved.
 import type { TenantContext } from "@kerby/db";
 import type { RunContext, TaskParams } from "@kerby/durable";
-import { openMcpSession } from "@kerby/mcp";
+import { type McpToolListing, openMcpSession } from "@kerby/mcp";
 import { log } from "@kerby/observability";
 import {
   findToolServerById,
@@ -12,7 +12,13 @@ import {
   ToolServerNotFoundError,
 } from "@kerby/tools";
 import type { WorkerDeps } from "../types/index.ts";
-import { MCP_CLIENT_INFO, toolServerHeaders, whyToolFailed } from "./mcp.ts";
+import {
+  afterRefusal,
+  MCP_CLIENT_INFO,
+  type ServerAuth,
+  toolServerHeaders,
+  whyToolFailed,
+} from "./mcp.ts";
 
 /** A listing takes at most this long, every page included. */
 const SYNC_TIMEOUT_MS = 30_000;
@@ -26,21 +32,34 @@ export async function syncToolServer(
   const server = await findToolServerById(ctx.db, params.serverId);
   // Deleted since it was queued, or the built-in one (its tools are code): nothing to list.
   if (server?.kind !== "mcp" || server.url === null) return;
-  const headers = await toolServerHeaders(deps, ctx.tenantId, server);
-  let outcome: SyncOutcome;
-  if ("missing" in headers) {
-    outcome = { error: headers.missing };
-  } else {
+  const url = server.url;
+  const list = async (headers: Record<string, string>): Promise<McpToolListing[]> => {
     const session = openMcpSession({
-      url: server.url,
+      url,
       fetch: deps.toolFetch,
-      headers: headers.headers,
+      headers,
       clientInfo: MCP_CLIENT_INFO,
     });
     try {
-      const listed = await session.listTools(
+      return await session.listTools(
         AbortSignal.any([run.signal, AbortSignal.timeout(SYNC_TIMEOUT_MS)]),
       );
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  };
+  let auth: ServerAuth = await toolServerHeaders(deps, ctx.tenantId, server, run.signal);
+  const secrets: string[] = [];
+  let outcome: SyncOutcome | undefined;
+  // An OAuth server that refuses its token gets one refresh and one more try.
+  for (let attempt = 0; outcome === undefined; attempt++) {
+    if ("missing" in auth) {
+      outcome = { error: auth.missing };
+      break;
+    }
+    secrets.push(...auth.secrets);
+    try {
+      const listed = await list(auth.headers);
       outcome = {
         tools: listed.map((tool) => ({
           name: tool.name,
@@ -55,9 +74,15 @@ export async function syncToolServer(
     } catch (error) {
       // A lost lease is not the server's failure: let Absurd hand the task to the run that owns it now.
       if (run.signal.aborted) throw error;
-      outcome = { error: whyToolFailed(error, headers.secret, "listing its tools") };
-    } finally {
-      await session.close().catch(() => undefined);
+      const again =
+        attempt === 0
+          ? afterRefusal(deps, ctx.tenantId, server, auth, error, run.signal)
+          : undefined;
+      if (again === undefined)
+        outcome = {
+          error: whyToolFailed(error, secrets, "listing its tools", server.auth.kind),
+        };
+      else auth = await again;
     }
   }
   try {

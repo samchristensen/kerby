@@ -2,12 +2,15 @@
 // tools a person may name on a chat. Everything goes through the api with the person's session token, as an admin.
 import {
   CreateToolServerRequestSchema,
+  FinishToolServerOAuthRequestSchema,
   ListAvailableToolsResponseSchema,
   ListIntegrationsResponseSchema,
   ListToolServersResponseSchema,
   PutToolCredentialRequestSchema,
+  StartToolServerOAuthResponseSchema,
   ToolGrantsSchema,
   ToolNameSchema,
+  type ToolServerAuth,
   ToolServerSchema,
   ToolServerSlugSchema,
   UpdateToolRequestSchema,
@@ -39,16 +42,29 @@ async function refusal(response: Response): Promise<FormFailure> {
     case "tool_not_usable":
     case "unknown_tool":
     case "invalid_request":
+    // Connecting with OAuth: each says what happened and what to do (connect again, set CONSOLE_PUBLIC_URL, ...).
+    case "oauth_not_configured":
+    case "oauth_failed":
+    case "oauth_state_unknown":
+    case "oauth_state_expired":
+    case "oauth_issuer_mismatch":
+    case "oauth_denied":
       return refuse(message ?? "The request was refused.");
   }
   throw apiFault("tools", response.status, code);
 }
 
-/** A form's auth fields: `auth` is `none` or `header`; `header` names the header, `credential` is its value. */
+/**
+ * A form's auth fields: `auth` is `none`, `header` or `oauth`; `header` names the header, `credential` is its value;
+ * `scope` is what an OAuth server is asked for (blank: what the server names).
+ */
 const AuthForm = z.object({
-  auth: z.enum(["none", "header"], "choose no authentication or a header").default("none"),
+  auth: z
+    .enum(["none", "header", "oauth"], "choose no authentication, a header or OAuth")
+    .default("none"),
   header: z.string().trim().default(""),
   credential: z.string().default(""),
+  scope: z.string().trim().default(""),
 });
 
 const CreateForm = AuthForm.extend({
@@ -58,22 +74,28 @@ const CreateForm = AuthForm.extend({
 
 const UpdateForm = AuthForm.extend({ url: z.string().trim().default("") });
 
-/** Form field names for a request schema's issue paths (`auth.header` is typed in `header`). */
+/** Form field names for a request schema's issue paths (`auth.header` is typed in `header`, `auth.scope` in `scope`). */
 function requestFailure(error: z.ZodError): FormFailure {
   const fields: Record<string, string> = {};
   for (const issue of error.issues) {
     const [first, second] = issue.path;
     const field =
-      first === "auth" ? (second === "header" ? "header" : "auth") : String(first ?? "form");
+      first === "auth"
+        ? second === "header" || second === "scope"
+          ? second
+          : "auth"
+        : String(first ?? "form");
     fields[field] ??= issue.message.charAt(0).toUpperCase() + issue.message.slice(1);
   }
   return { ok: false, fields };
 }
 
-const authOf = (form: z.output<typeof AuthForm>) =>
-  form.auth === "header"
-    ? { kind: "header" as const, header: form.header }
-    : { kind: "none" as const };
+function authOf(form: z.output<typeof AuthForm>): ToolServerAuth {
+  if (form.auth === "header") return { kind: "header", header: form.header };
+  if (form.auth === "oauth")
+    return form.scope === "" ? { kind: "oauth" } : { kind: "oauth", scope: form.scope };
+  return { kind: "none" };
+}
 
 const serverPath = (slug: string): string | undefined =>
   ToolServerSlugSchema.safeParse(slug).success ? `/v1/tool-servers/${slug}` : undefined;
@@ -93,6 +115,8 @@ type Tools = Pick<
   | "availableTools"
   | "integrationTools"
   | "setIntegrationTools"
+  | "connectToolServer"
+  | "finishToolServerOAuth"
 >;
 
 export function createTools(deps: ConsoleDeps): Tools {
@@ -243,6 +267,36 @@ export function createTools(deps: ConsoleDeps): Tools {
         return refuse(request.error.issues[0]?.message ?? "Choose fewer tools.");
       const sent = await send(access, "PUT", `/v1/integrations/${id}/tools`, request.data);
       return sent.ok ? { ok: true } : sent;
+    },
+
+    async connectToolServer(access, slug) {
+      const path = serverPath(slug);
+      if (!path) return GONE;
+      const sent = await send(access, "POST", `${path}/oauth/start`);
+      if (!sent.ok) return sent;
+      const { authorizationUrl } = StartToolServerOAuthResponseSchema.parse(
+        await sent.response.json(),
+      );
+      return { ok: true, authorizationUrl };
+    },
+
+    async finishToolServerOAuth(access, answer) {
+      const request = FinishToolServerOAuthRequestSchema.safeParse({
+        state: answer.state,
+        ...(answer.iss === undefined ? {} : { iss: answer.iss }),
+        ...(answer.code === undefined ? {} : { code: answer.code }),
+        ...(answer.error === undefined ? {} : { error: answer.error }),
+        ...(answer.error_description === undefined
+          ? {}
+          : { errorDescription: answer.error_description }),
+      });
+      if (!request.success)
+        return refuse(
+          "This page finishes a connection an authorization server answered, and this is not such an answer. Connect again from the server's page.",
+        );
+      const sent = await send(access, "POST", "/v1/tool-servers/oauth/callback", request.data);
+      if (!sent.ok) return sent;
+      return { ok: true, slug: ToolServerSchema.parse(await sent.response.json()).slug };
     },
   };
 }

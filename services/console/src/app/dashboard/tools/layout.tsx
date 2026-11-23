@@ -36,7 +36,15 @@ export default async function ToolsLayout({ children }: { children: ReactNode })
               <span className="mt-1 block truncate text-xs text-zinc-500">
                 {server.kind === "builtin"
                   ? "Kerby's own tools"
-                  : `${server.url ?? ""} · ${server.auth.kind === "header" ? `${server.auth.header} header` : "no auth"}`}
+                  : `${server.url ?? ""} · ${
+                      server.auth.kind === "header"
+                        ? `${server.auth.header} header`
+                        : server.auth.kind === "oauth"
+                          ? server.hasCredential
+                            ? "OAuth, connected"
+                            : "OAuth, not connected"
+                          : "no auth"
+                    }`}
               </span>
               <span className="mt-0.5 block text-xs text-zinc-500">{toolCounts(server)}</span>
               {server.status === "error" && server.lastError ? (

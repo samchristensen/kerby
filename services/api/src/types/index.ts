@@ -1,6 +1,7 @@
 import type { Blobs } from "@kerby/blobs";
 import type { IntegrationRole, Limits } from "@kerby/contracts";
 import type { ControlDb, TenantPools } from "@kerby/db";
+import type { EgressFetch } from "@kerby/egress";
 import type { Sealer } from "@kerby/secrets";
 
 export type ApiDeps = {
@@ -9,6 +10,11 @@ export type ApiDeps = {
   blobs: Blobs;
   /** Seals tenants' model keys to the platform public key; it cannot open them. */
   sealer: Sealer;
+  /**
+   * The only `fetch` that reaches a tenant's tool server or its authorization server (OAuth discovery, registration and
+   * the code exchange): the egress guard's.
+   */
+  toolFetch: EgressFetch;
   settings: {
     /** The model a conversation gets when the request names none; without one, a request must name its model. */
     defaultModel: string | undefined;
@@ -36,6 +42,10 @@ export type ApiDeps = {
     trustProxy: boolean;
     /** Conversations may name `kerby/echo`, a development tool (ADR 0019). Off in production. */
     enableEchoTool: boolean;
+    /** The console's public address: Kerby's OAuth redirect URI and client id live there. Unset: no OAuth. */
+    consolePublicUrl: string | undefined;
+    /** Hosts from which OAuth accepts plain http (development only; the egress guard lets the same ones through). */
+    insecureOAuthHosts: readonly string[];
   };
 };
 

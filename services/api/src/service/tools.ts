@@ -244,7 +244,7 @@ export async function listTenantToolServers(
   };
 }
 
-async function serverResource(
+export async function serverResource(
   deps: ApiDeps,
   ctx: TenantContext,
   server: ToolServerRecord,
@@ -280,7 +280,7 @@ async function serverBySlug(db: TenantQueryable, slug: string): Promise<ToolServ
 }
 
 /** Refuses the built-in server, which is served from code. */
-async function remoteServer(db: TenantQueryable, slug: string): Promise<ToolServerRecord> {
+export async function remoteServer(db: TenantQueryable, slug: string): Promise<ToolServerRecord> {
   const server = await serverBySlug(db, slug);
   if (server.kind === "builtin")
     throw new BuiltinToolServerError(
@@ -298,11 +298,11 @@ export async function getTenantToolServer(
 }
 
 /** Enqueue the listing on `tx`: it exists exactly when the change that asked for it commits. */
-const enqueueSync = (tx: TenantTx, serverId: string) =>
+export const enqueueSync = (tx: TenantTx, serverId: string) =>
   spawnInTx(tx, "sync-tool-server", { serverId }, { idempotencyKey: `sync:${randomUUID()}` });
 
 /** Tell the workers there is work for this tenant; the sweep finds it if this is lost. */
-const notifyWorkers = (deps: ApiDeps, tenantId: string) =>
+export const notifyWorkers = (deps: ApiDeps, tenantId: string) =>
   deps.control
     .query("select pg_notify('tenant_work', $1)", [tenantId])
     .then(() => undefined)
@@ -313,7 +313,21 @@ const notifyWorkers = (deps: ApiDeps, tenantId: string) =>
 const authDetail = (auth: ToolServerAuth) => ({
   auth: auth.kind,
   header: auth.kind === "header" ? auth.header : null,
+  ...(auth.kind === "oauth" ? { scope: auth.scope ?? null } : {}),
 });
+
+/**
+ * An OAuth server's URL must be https, like every URL its tokens go to; plain http only from a development stack's
+ * named hosts (`EGRESS_ALLOWED_HOSTS`).
+ */
+export function checkOAuthUrl(deps: ApiDeps, url: string): void {
+  const parsed = new URL(url);
+  if (
+    parsed.protocol !== "https:" &&
+    !(parsed.protocol === "http:" && deps.settings.insecureOAuthHosts.includes(parsed.hostname))
+  )
+    throw new ToolServerRequestError("a server connected with OAuth must use https: change url");
+}
 
 export async function createTenantToolServer(
   deps: ApiDeps,
@@ -321,6 +335,7 @@ export async function createTenantToolServer(
   ctx: TenantContext,
   request: CreateToolServerRequest,
 ): Promise<ToolServer> {
+  if (request.auth.kind === "oauth") checkOAuthUrl(deps, request.url);
   const server = await ctx.db.transaction(async (tx) => {
     const created = await createToolServer(tx, {
       slug: request.slug,
@@ -363,21 +378,32 @@ export async function updateTenantToolServer(
   const current = await remoteServer(ctx.db, slug);
   const auth = request.auth ?? current.auth;
   const url = request.url ?? current.url ?? "";
-  if (auth.kind === "none" && request.credential !== undefined)
+  if (auth.kind !== "header" && request.credential !== undefined)
     throw new ToolServerRequestError(
       "a credential goes with auth.kind header: set auth to header, or leave the credential out",
     );
   if (auth.kind === "header") {
     if (!url.startsWith("https://"))
       throw new ToolServerRequestError("a server with a credential must use https: change url");
+    // What is stored for a server that was not on header auth is not a header's value (an OAuth connection's tokens).
     if (
       request.credential === undefined &&
-      !(await hasToolCredential(deps.control, ctx.tenantId, current.id))
+      !(
+        current.auth.kind === "header" &&
+        (await hasToolCredential(deps.control, ctx.tenantId, current.id))
+      )
     )
       throw new ToolServerRequestError(
         "header auth needs a credential and this server has none: send credential with it",
       );
   }
+  if (auth.kind === "oauth") checkOAuthUrl(deps, url);
+  // The stored credential no longer applies when the kind of auth changes, or when an OAuth server moves: its tokens
+  // are bound to the old address (RFC 8707) and must never be sent to the new one. Dropped before the change commits,
+  // so no worker sees the new row with the old credential.
+  const dropCredential =
+    request.credential === undefined &&
+    (auth.kind !== current.auth.kind || (auth.kind === "oauth" && url !== current.url));
   const server = await ctx.db.transaction(async (tx) => {
     const updated = await updateToolServer(tx, current.id, {
       url: request.url,
@@ -391,11 +417,10 @@ export async function updateTenantToolServer(
         current.id,
         request.credential,
       );
+    if (dropCredential) await deleteToolCredential(deps.control, ctx.tenantId, current.id);
     await enqueueSync(tx, current.id);
     return updated;
   });
-  if (server.auth.kind === "none")
-    await deleteToolCredential(deps.control, ctx.tenantId, server.id);
   await notifyWorkers(deps, ctx.tenantId);
   await audit(deps.control, {
     tenantId: ctx.tenantId,
@@ -423,7 +448,9 @@ export async function putTenantToolCredential(
   const current = await remoteServer(ctx.db, slug);
   if (current.auth.kind !== "header")
     throw new ToolServerRequestError(
-      `this server uses no credential (auth none): PATCH /v1/tool-servers/${slug} with auth.kind header and the credential`,
+      current.auth.kind === "oauth"
+        ? `this server connects with OAuth, which stores its own tokens: connect it again with POST /v1/tool-servers/${slug}/oauth/start (Connect in the console)`
+        : `this server uses no credential (auth none): PATCH /v1/tool-servers/${slug} with auth.kind header and the credential`,
     );
   const server = await ctx.db.transaction(async (tx) => {
     const updated = await updateToolServer(tx, current.id, {});

@@ -16,6 +16,15 @@ const consoleConfigSchema = z.object({
   apiUrl: z.url({ protocol: /^https?$/ }),
   /** The tenant API's public address, shown in the quickstart. */
   apiPublicUrl: z.url({ protocol: /^https?$/ }),
+  /**
+   * The console's own public address, the api's `CONSOLE_PUBLIC_URL` (the same value): it serves Kerby's OAuth Client
+   * ID Metadata Document at `<this>/oauth/client-metadata.json`, whose URL is Kerby's client id (ADR 0019). Unset: no
+   * document, and the api connects no OAuth server.
+   */
+  publicUrl: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.url({ protocol: /^https?$/ }).optional(),
+  ),
   /** Mark the session cookie `Secure`. Off only where the console is served over plain HTTP (the local stack). */
   secureCookies: z.stringbool().default(true),
   /**

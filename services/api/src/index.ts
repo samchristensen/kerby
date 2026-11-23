@@ -2,6 +2,7 @@
 import { createBlobs } from "@kerby/blobs";
 import { resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import { createEgressFetch } from "@kerby/egress";
 import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
@@ -36,6 +37,13 @@ async function startApi(config: ApiConfig) {
     pools,
     blobs,
     sealer: createSealer(config.secretsPublicKey),
+    // OAuth discovery, registration and the code exchange reach tenant-named hosts: through the egress guard
+    // (ADR 0010), public addresses only but for the hosts a development stack names. Metadata and tokens are small.
+    toolFetch: createEgressFetch({
+      timeoutMs: 15_000,
+      maxResponseBytes: 1024 * 1024,
+      allowedHosts: config.egressAllowedHosts,
+    }),
     settings: {
       defaultModel: config.defaultModel,
       // The adapters own the provider lists (ADR 0008, 0015); their `providers` subpaths load no adapter code.
@@ -52,6 +60,8 @@ async function startApi(config: ApiConfig) {
       failedAuthPerMinute: config.failedAuthPerMinute,
       trustProxy: config.trustProxy,
       enableEchoTool: config.enableEchoTool,
+      consolePublicUrl: config.consolePublicUrl,
+      insecureOAuthHosts: config.egressAllowedHosts,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

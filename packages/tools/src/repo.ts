@@ -92,8 +92,9 @@ type ServerRow = {
   slug: string;
   kind: ToolServerKind;
   url: string | null;
-  auth: "none" | "header";
+  auth: ToolServerAuth["kind"];
   auth_header: string | null;
+  auth_scope: string | null;
   status: ToolServerStatus;
   last_error: string | null;
   synced_at: Date | null;
@@ -102,7 +103,22 @@ type ServerRow = {
 };
 
 const SERVER_COLUMNS =
-  "s.id, s.slug, s.kind, s.url, s.auth, s.auth_header, s.status, s.last_error, s.synced_at, s.created_at, s.updated_at";
+  "s.id, s.slug, s.kind, s.url, s.auth, s.auth_header, s.auth_scope, s.status, s.last_error, s.synced_at, s.created_at, s.updated_at";
+
+function authFromRow(row: ServerRow): ToolServerAuth {
+  if (row.auth === "header" && row.auth_header !== null)
+    return { kind: "header", header: row.auth_header };
+  if (row.auth === "oauth")
+    return row.auth_scope === null ? { kind: "oauth" } : { kind: "oauth", scope: row.auth_scope };
+  return { kind: "none" };
+}
+
+/** The `auth`, `auth_header` and `auth_scope` columns of an auth. */
+const authColumns = (auth: ToolServerAuth): [string, string | null, string | null] => [
+  auth.kind,
+  auth.kind === "header" ? auth.header : null,
+  auth.kind === "oauth" ? (auth.scope ?? null) : null,
+];
 
 function serverFromRow(row: ServerRow): ToolServerRecord {
   return {
@@ -110,10 +126,7 @@ function serverFromRow(row: ServerRow): ToolServerRecord {
     slug: row.slug,
     kind: row.kind,
     url: row.url,
-    auth:
-      row.auth === "header" && row.auth_header !== null
-        ? { kind: "header", header: row.auth_header }
-        : { kind: "none" },
+    auth: authFromRow(row),
     status: row.status,
     lastError: row.last_error,
     syncedAt: row.synced_at,
@@ -179,14 +192,10 @@ export async function createToolServer(
       );
     const { rows } = await tx
       .query<ServerRow>(
-        `insert into tool_servers as s (slug, kind, url, auth, auth_header) values ($1, 'mcp', $2, $3, $4)
+        `insert into tool_servers as s (slug, kind, url, auth, auth_header, auth_scope)
+         values ($1, 'mcp', $2, $3, $4, $5)
          returning ${SERVER_COLUMNS}`,
-        [
-          input.slug,
-          input.url,
-          input.auth.kind,
-          input.auth.kind === "header" ? input.auth.header : null,
-        ],
+        [input.slug, input.url, ...authColumns(input.auth)],
       )
       .catch((error: unknown) => {
         throw errorCode(error) === "23505"
@@ -269,7 +278,8 @@ async function refuseUnchangeable(db: TenantQueryable, id: string): Promise<neve
 
 /**
  * A new URL or auth. The server is `syncing` again, since what it lists may differ now; its tools keep their settings
- * until a worker lists them. Changing `auth` to `none` leaves the credential in the control plane: delete it there.
+ * until a worker lists them. Either change ends any OAuth connection the console began and has not finished. A
+ * credential lives in the control plane: the caller drops it there when it no longer applies.
  */
 export async function updateToolServer(
   db: TenantQueryable,
@@ -277,20 +287,20 @@ export async function updateToolServer(
   changes: { url?: string | undefined; auth?: ToolServerAuth | undefined },
 ): Promise<ToolServerRecord> {
   if (!UUID.test(id)) return refuseUnchangeable(db, id);
+  const [auth, header, scope] = changes.auth ? authColumns(changes.auth) : [null, null, null];
   const { rows } = await db.query<ServerRow>(
-    `update tool_servers s
+    `with ended as (
+       delete from tool_oauth_flows where server_id = $1 and ($2::text is not null or $3::text is not null)
+     )
+     update tool_servers s
         set url = coalesce($2, s.url),
             auth = coalesce($3, s.auth),
             auth_header = case when $3::text is null then s.auth_header else $4 end,
+            auth_scope = case when $3::text is null then s.auth_scope else $5 end,
             status = 'syncing', last_error = null, updated_at = now()
       where s.id = $1 and s.kind = 'mcp'
       returning ${SERVER_COLUMNS}`,
-    [
-      id,
-      changes.url ?? null,
-      changes.auth?.kind ?? null,
-      changes.auth?.kind === "header" ? changes.auth.header : null,
-    ],
+    [id, changes.url ?? null, auth, header, scope],
   );
   return rows[0] ? serverFromRow(rows[0]) : refuseUnchangeable(db, id);
 }

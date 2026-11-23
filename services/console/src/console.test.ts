@@ -1086,4 +1086,85 @@ describe("tools", () => {
     ]);
     expect((await h.service.toolServers(h.access)).map((s) => s.slug)).toEqual(["github"]);
   });
+
+  it("registers an OAuth server with its scope, connects it, and finishes with the authorization server's answer", async () => {
+    const oauthServer = { ...server, slug: "crm", auth: { kind: "oauth" }, hasCredential: false };
+    let reply = (_request: Parameters<ApiClient>[0]) => json(201, oauthServer);
+    const h = await toolsHarness((request) => reply(request));
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: "crm",
+        url: "https://crm.example.com/mcp",
+        auth: "oauth",
+        scope: "crm:read  crm:write",
+      }),
+    ).toEqual({ ok: false, fields: { scope: expect.stringContaining("one space") } });
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: "crm",
+        url: "https://crm.example.com/mcp",
+        auth: "oauth",
+        scope: " crm:read ",
+        credential: "left over",
+      }),
+    ).toEqual({ ok: true, slug: "crm" });
+    expect(h.calls.at(-1)?.body).toEqual({
+      slug: "crm",
+      url: "https://crm.example.com/mcp",
+      auth: { kind: "oauth", scope: "crm:read" },
+    });
+
+    reply = () => json(200, { authorizationUrl: "https://auth.example.com/authorize?state=s" });
+    expect(await h.service.connectToolServer(h.access, "crm")).toEqual({
+      ok: true,
+      authorizationUrl: "https://auth.example.com/authorize?state=s",
+    });
+    expect(h.calls.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/tool-servers/crm/oauth/start",
+      token: h.access.token,
+    });
+    reply = () => error(400, "oauth_not_configured", "OAuth needs CONSOLE_PUBLIC_URL: ...");
+    expect(await h.service.connectToolServer(h.access, "crm")).toEqual({
+      ok: false,
+      error: "OAuth needs CONSOLE_PUBLIC_URL: ...",
+    });
+    expect(await h.service.connectToolServer(h.access, "Not A Slug")).toMatchObject({ ok: false });
+
+    reply = () => json(200, { ...oauthServer, hasCredential: true, tools: [], grantedTo: [] });
+    expect(
+      await h.service.finishToolServerOAuth(h.access, {
+        state: "s",
+        code: "c",
+        iss: "https://auth.example.com",
+        ignored: "x",
+      }),
+    ).toEqual({ ok: true, slug: "crm" });
+    expect(h.calls.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/tool-servers/oauth/callback",
+      body: { state: "s", code: "c", iss: "https://auth.example.com" },
+    });
+    // An error answer goes to the api too: only it can check the iss before the error may be shown.
+    reply = () =>
+      error(400, "oauth_denied", "the authorization server did not connect crm: access_denied");
+    expect(
+      await h.service.finishToolServerOAuth(h.access, {
+        state: "s",
+        error: "access_denied",
+        error_description: "no",
+      }),
+    ).toEqual({ ok: false, error: "the authorization server did not connect crm: access_denied" });
+    expect(h.calls.at(-1)?.body).toEqual({
+      state: "s",
+      error: "access_denied",
+      errorDescription: "no",
+    });
+    const sent = h.calls.length;
+    expect(await h.service.finishToolServerOAuth(h.access, { code: "c" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Connect again"),
+    });
+    expect(h.calls).toHaveLength(sent);
+  });
 });

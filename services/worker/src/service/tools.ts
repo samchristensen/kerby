@@ -13,7 +13,13 @@ import { type McpCallOutcome, type McpSession, openMcpSession } from "@kerby/mcp
 import { listConversationTools, type OfferedTool, offeredTools } from "@kerby/tools";
 import type { WorkerDeps } from "../types/index.ts";
 import { type Judge, judgeTool } from "./judgments.ts";
-import { MCP_CLIENT_INFO, toolServerHeaders, whyToolFailed } from "./mcp.ts";
+import {
+  afterRefusal,
+  MCP_CLIENT_INFO,
+  type ServerAuth,
+  toolServerHeaders,
+  whyToolFailed,
+} from "./mcp.ts";
 
 /** Text of one tool result the model reads, at most; past it the result is cut with a note. */
 const MAX_TOOL_RESULT_BYTES = 256 * 1024;
@@ -80,7 +86,9 @@ export async function turnTools(
   return runnable(deps, ctx.tenantId, offered, judge);
 }
 
-type Opened = { session: McpSession; secret: string | undefined } | { missing: string };
+type Opened =
+  | { session: McpSession; auth: Exclude<ServerAuth, { missing: string }> }
+  | { missing: string };
 
 function runnable(
   deps: WorkerDeps,
@@ -97,30 +105,38 @@ function runnable(
     return out;
   };
 
-  /** The server's session for this run, opened on its first call with the server's credential. */
-  function sessionFor(server: OfferedTool["server"]): Promise<Opened> {
-    let opened = sessions.get(server.id);
-    if (!opened) {
-      opened = (async (): Promise<Opened> => {
-        const headers = await toolServerHeaders(deps, tenantId, server);
-        if ("missing" in headers) return headers;
-        if (headers.secret) secrets.add(headers.secret);
-        if (server.url === null) throw new Error(`tool server ${server.slug} has no URL`);
-        return {
-          session: openMcpSession({
-            url: server.url,
-            fetch: deps.toolFetch,
-            headers: headers.headers,
-            clientInfo: MCP_CLIENT_INFO,
-          }),
-          secret: headers.secret,
-        };
-      })();
-      // A failure to open (the credential could not be read) is not kept: the next call tries again.
-      opened.catch(() => sessions.delete(server.id));
-      sessions.set(server.id, opened);
-    }
+  /** A session with `auth`'s headers, its secrets kept for scrubbing; or why there is none. */
+  function open(server: OfferedTool["server"], auth: ServerAuth): Opened {
+    if ("missing" in auth) return auth;
+    for (const secret of auth.secrets) secrets.add(secret);
+    if (server.url === null) throw new Error(`tool server ${server.slug} has no URL`);
+    return {
+      session: openMcpSession({
+        url: server.url,
+        fetch: deps.toolFetch,
+        headers: auth.headers,
+        clientInfo: MCP_CLIENT_INFO,
+      }),
+      auth,
+    };
+  }
+
+  /** Keep `opened` as the server's session for the rest of the run; a failure to open is not kept. */
+  function keep(serverId: string, opened: Promise<Opened>): Promise<Opened> {
+    opened.catch(() => sessions.delete(serverId));
+    sessions.set(serverId, opened);
     return opened;
+  }
+
+  /** The server's session for this run, opened on its first call with the server's credential. */
+  function sessionFor(server: OfferedTool["server"], signal: AbortSignal): Promise<Opened> {
+    return (
+      sessions.get(server.id) ??
+      keep(
+        server.id,
+        toolServerHeaders(deps, tenantId, server, signal).then((auth) => open(server, auth)),
+      )
+    );
   }
 
   async function callRemote(
@@ -134,28 +150,43 @@ function runnable(
         `${tool.exposedName} takes a JSON object as its input (see its input schema), not ${Array.isArray(input) ? "an array" : input === null ? "null" : `a ${typeof input}`}`,
         true,
       );
-    const opened = await sessionFor(tool.server);
     const doing = `calling ${tool.exposedName}`;
-    if ("missing" in opened) return textResult(`${doing} failed: ${opened.missing}`, true);
-    let outcome: McpCallOutcome;
-    try {
-      outcome = await opened.session.callTool(tool.tool, input as Record<string, unknown>, {
-        callId: call.id,
-        signal: AbortSignal.any([signal, AbortSignal.timeout(deps.settings.toolCallTimeoutMs)]),
-        inputSchema: tool.definition.inputSchema,
-      });
-    } catch (error) {
-      // A lost lease is not the tool's failure: the run that owns the turn now takes it from the stored state.
-      if (signal.aborted) throw error;
-      const why = whyToolFailed(error, opened.secret, doing);
-      return textResult(
-        tool.effect === "write" && mayHaveTakenEffect(error)
-          ? `${why}. The call may have taken effect: check before calling it again.`
-          : why,
-        true,
-      );
+    let opened = await sessionFor(tool.server, signal);
+    // An OAuth server that refuses its token (401, so the call did not run) gets one refresh and one more try.
+    for (let attempt = 0; ; attempt++) {
+      if ("missing" in opened) return textResult(`${doing} failed: ${opened.missing}`, true);
+      try {
+        const outcome = await opened.session.callTool(tool.tool, input as Record<string, unknown>, {
+          callId: call.id,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(deps.settings.toolCallTimeoutMs)]),
+          inputSchema: tool.definition.inputSchema,
+        });
+        return resultOf(outcome, scrub);
+      } catch (error) {
+        // A lost lease is not the tool's failure: the run that owns the turn now takes it from the stored state.
+        if (signal.aborted) throw error;
+        const again =
+          attempt === 0
+            ? afterRefusal(deps, tenantId, tool.server, opened.auth, error, signal)
+            : undefined;
+        if (again === undefined) {
+          const why = whyToolFailed(error, [...secrets], doing, tool.server.auth.kind);
+          return textResult(
+            tool.effect === "write" && mayHaveTakenEffect(error)
+              ? `${why}. The call may have taken effect: check before calling it again.`
+              : why,
+            true,
+          );
+        }
+        // The refreshed token's session replaces the refused one for the rest of the run.
+        const refused = opened.session;
+        opened = await keep(
+          tool.server.id,
+          again.then((auth) => open(tool.server, auth)),
+        );
+        await refused.close().catch(() => {});
+      }
     }
-    return resultOf(outcome, scrub);
   }
 
   return {

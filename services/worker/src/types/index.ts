@@ -4,6 +4,21 @@ import type { ControlDb, TenantPools } from "@kerby/db";
 import type { EgressFetch } from "@kerby/egress";
 import type { JudgmentProvider } from "@kerby/judgment";
 
+/** Tool servers' sealed credentials (ADR 0019), opened inside the step that uses them. */
+export type ToolCredentials = {
+  read(tenantId: string, serverId: string): Promise<string | undefined>;
+  /**
+   * Replace a credential under a lock on its row (an OAuth connection's refreshed tokens): `change` gets the value as
+   * stored now and returns its replacement, `undefined` to keep it, or `null` to delete it. Nothing happens when none
+   * is stored.
+   */
+  update(
+    tenantId: string,
+    serverId: string,
+    change: (current: string) => Promise<string | null | undefined>,
+  ): Promise<string | undefined>;
+};
+
 export type WorkerDeps = {
   control: ControlDb;
   pools: TenantPools;
@@ -17,10 +32,8 @@ export type WorkerDeps = {
    * model, which needs no key; every real run requires one.
    */
   modelKeys: ((tenantId: string, provider: string) => Promise<string | undefined>) | undefined;
-  /** A tool server's sealed credential (ADR 0019), opened; undefined without the secrets private key. */
-  toolCredentials:
-    | ((tenantId: string, serverId: string) => Promise<string | undefined>)
-    | undefined;
+  /** Tool servers' credentials; undefined without the secrets private key. */
+  toolCredentials: ToolCredentials | undefined;
   /** The only `fetch` that reaches a tenant's MCP server: the egress guard's. */
   toolFetch: EgressFetch;
   settings: {

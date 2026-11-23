@@ -8,6 +8,7 @@ import {
   putModelKey,
   putToolCredential,
   readToolCredential,
+  updateToolCredential,
 } from "./index.ts";
 import { createTestControlDb } from "./testing.ts";
 
@@ -88,5 +89,56 @@ describe("tool credentials", () => {
     }
     // and a tenant at the model-key limit can still store a credential
     await putToolCredential(control.db, sealer, tenant.id, crypto.randomUUID(), "Bearer v");
+  });
+
+  it("updates under a lock: a second update sees the first's value, and none brings a credential back", async () => {
+    await using control = await createTestControlDb();
+    const pair = generateSecretsKeyPair();
+    const keys = { sealer: createSealer(pair.publicKey), opener: createOpener([pair.privateKey]) };
+    const tenant = await insertTenant(control.db, newTenant("a"));
+    const server = crypto.randomUUID();
+    await putToolCredential(control.db, keys.sealer, tenant.id, server, "v1");
+
+    const firstHolds = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const seen: string[] = [];
+    const first = updateToolCredential(control.db, keys, tenant.id, server, async (current) => {
+      seen.push(`first:${current}`);
+      firstHolds.resolve();
+      await releaseFirst.promise;
+      return "v2";
+    });
+    await firstHolds.promise;
+    const second = updateToolCredential(control.db, keys, tenant.id, server, async (current) => {
+      seen.push(`second:${current}`);
+      return current === "v2" ? undefined : "v3";
+    });
+    // the second waits on the row while the first holds it
+    for (;;) {
+      const { rows } = await control.db.query<{ waiting: number }>(
+        `select count(*)::int as waiting from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and query like '%for update%'`,
+      );
+      if (rows[0]?.waiting === 1) break;
+    }
+    expect(seen).toEqual(["first:v1"]);
+    releaseFirst.resolve();
+    expect(await first).toBe("v2");
+    expect(await second).toBe("v2");
+    expect(seen).toEqual(["first:v1", "second:v2"]);
+    expect(await readToolCredential(control.db, keys.opener, tenant.id, server)).toBe("v2");
+
+    // null deletes; with nothing stored, `change` is not asked and nothing is stored
+    expect(await updateToolCredential(control.db, keys, tenant.id, server, async () => null)).toBe(
+      undefined,
+    );
+    let asked = false;
+    const after = await updateToolCredential(control.db, keys, tenant.id, server, async () => {
+      asked = true;
+      return "v4";
+    });
+    expect(after).toBeUndefined();
+    expect(asked).toBe(false);
+    expect(await hasToolCredential(control.db, tenant.id, server)).toBe(false);
   });
 });

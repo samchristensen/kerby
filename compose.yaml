@@ -100,6 +100,15 @@ services:
       # Clients reach the api directly here, so X-Forwarded-For is not trusted (TRUST_PROXY is on only on Railway).
       TRUST_PROXY: "false"
       PORT: "8080"
+      # Kerby's OAuth redirect URI and Client ID Metadata Document live on the console (ADR 0019); the console below has
+      # the same address as PUBLIC_URL. Plain http here, so authorization servers get a dynamically registered client.
+      CONSOLE_PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
+      # Development only (ADR 0019), like the worker's: OAuth discovery and the code exchange may reach a test MCP server
+      # and its authorization server on this machine, over plain http. Every other tenant URL must still be public.
+      KERBY_ENVIRONMENT: development
+      EGRESS_ALLOWED_HOSTS: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # The only published port: the tenant-facing API, on loopback. There is no shared proxy locally.
       - "127.0.0.1:${KERBY_API_PORT:-8080}:8080"
@@ -151,6 +160,9 @@ services:
       # Chat goes through the api, over the private network; the quickstart shows the published address.
       API_URL: http://api:8080
       API_PUBLIC_URL: http://127.0.0.1:${KERBY_API_PORT:-8080}
+      # Its own published address: Kerby's OAuth Client ID Metadata Document is served under it, and the api's
+      # CONSOLE_PUBLIC_URL is the same value.
+      PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
       # Served over plain HTTP here, so the session cookie cannot be Secure; hosted it is.
       SECURE_COOKIES: "false"
       TRUST_PROXY: "false"

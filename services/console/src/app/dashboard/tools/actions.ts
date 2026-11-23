@@ -19,7 +19,7 @@ export async function createToolServerAction(
   const result = await consoleService().createToolServer(access, form);
   if (!result.ok) {
     const values = Object.fromEntries(
-      ["slug", "url", "auth", "header"].map((name) => [
+      ["slug", "url", "auth", "header", "scope"].map((name) => [
         name,
         typeof form[name] === "string" ? form[name] : "",
       ]),
@@ -90,4 +90,26 @@ export async function updateToolAction(
 export async function toolServerSyncingAction(slug: string): Promise<boolean> {
   const access = await requireChatAccess();
   return (await consoleService().toolServer(access, slug))?.status === "syncing";
+}
+
+/** Start connecting an OAuth server: the browser goes to its authorization server, which sends it back to the callback. */
+export async function connectToolServerAction(slug: string): Promise<ToolFormState> {
+  const access = await requireChatAccess();
+  const result = await consoleService().connectToolServer(access, slug);
+  if (!result.ok) return result;
+  redirect(result.authorizationUrl);
+}
+
+/**
+ * Finish a connection with the authorization server's answer (the callback page's query), then back to the server's
+ * page; a refusal is returned for the callback page to show.
+ */
+export async function finishToolServerOAuthAction(
+  answer: Record<string, string>,
+): Promise<FormFailure> {
+  const access = await requireChatAccess();
+  const result = await consoleService().finishToolServerOAuth(access, answer);
+  if (!result.ok) return result;
+  revalidatePath("/dashboard/tools", "layout");
+  redirect(`/dashboard/tools/${result.slug}?connected=1`);
 }

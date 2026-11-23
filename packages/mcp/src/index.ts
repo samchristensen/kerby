@@ -21,6 +21,21 @@ import {
 import { readSse } from "./sse.ts";
 
 export { McpError } from "./errors.ts";
+export {
+  authorizationUrl,
+  createPkce,
+  discoverOAuth,
+  exchangeOAuthCode,
+  issuerProblem,
+  isWithinResource,
+  type OAuthClient,
+  type OAuthCredential,
+  type OAuthDiscovery,
+  OAuthError,
+  parseOAuthCredential,
+  refreshOAuthCredential,
+  registerOAuthClient,
+} from "./oauth.ts";
 
 /** `tools/list` pages followed before giving up on a server that never stops paginating. */
 const MAX_LIST_PAGES = 50;

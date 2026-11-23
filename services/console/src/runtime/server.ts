@@ -1,7 +1,9 @@
 // The console's HTTP server: Next.js behind a `node:http` server this process owns (ADR 0014). It answers `/healthz`
-// itself, stamps each request with the client's address, and hands everything else to Next.js.
+// and Kerby's OAuth Client ID Metadata Document itself, stamps each request with the client's address, and hands
+// everything else to Next.js.
 import { once } from "node:events";
 import { createServer, type IncomingMessage } from "node:http";
+import { OAUTH_CLIENT_METADATA_PATH } from "@kerby/contracts";
 import { errorFields, log } from "@kerby/observability";
 import { clientAddress } from "@kerby/serve";
 import next from "next";
@@ -16,6 +18,11 @@ export type ConsoleServerOptions = {
   dev: boolean;
   /** Take the client address from the left-most `X-Forwarded-For` entry (Railway's edge) instead of the socket. */
   trustProxy: boolean;
+  /**
+   * Kerby's Client ID Metadata Document (ADR 0019), served at `OAUTH_CLIENT_METADATA_PATH` to anyone: authorization
+   * servers fetch it to learn Kerby's redirect URI. Undefined without a public URL: not served.
+   */
+  clientMetadata: Record<string, unknown> | undefined;
 };
 
 const header = (request: IncomingMessage, name: string): string | undefined => {
@@ -37,6 +44,19 @@ export async function startServer(
   const server = createServer((request, response) => {
     if (request.url === "/healthz") {
       response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+      return;
+    }
+    if (
+      options.clientMetadata &&
+      (request.method === "GET" || request.method === "HEAD") &&
+      request.url?.split("?")[0] === OAUTH_CLIENT_METADATA_PATH
+    ) {
+      response
+        .writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "public, max-age=3600",
+        })
+        .end(request.method === "HEAD" ? undefined : JSON.stringify(options.clientMetadata));
       return;
     }
     request.headers[CLIENT_ADDRESS_HEADER] = clientAddress(

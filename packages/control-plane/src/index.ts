@@ -70,5 +70,6 @@ export {
   hasToolCredential,
   putToolCredential,
   readToolCredential,
+  updateToolCredential,
 } from "./tool-credentials.ts";
 export { recordUsage } from "./usage.ts";

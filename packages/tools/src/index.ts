@@ -15,6 +15,7 @@ export {
   ToolServerTakenError,
   UnknownToolError,
 } from "./errors.ts";
+export { saveOAuthFlow, takeOAuthFlow } from "./oauth-flows.ts";
 export {
   createToolServer,
   deleteToolServer,

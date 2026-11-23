@@ -334,9 +334,15 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../../packages/durable
+      '@kerby/egress':
+        specifier: workspace:*
+        version: link:../../packages/egress
       '@kerby/judgment-systemone':
         specifier: workspace:*
         version: link:../../packages/judgment-systemone
+      '@kerby/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability

@@ -110,10 +110,24 @@ export const ToolHeaderNameSchema = z
     );
   }, "that header is set by the transport: use Authorization or a header of the server's own");
 
-/** How Kerby authenticates to a server: not at all, or with a credential sent in one header. */
+/** Space-separated OAuth scopes (RFC 6749 section 3.3): visible ASCII but `"` and `\`, one space between. */
+const OAuthScopeSchema = z
+  .string()
+  .max(1_000)
+  .regex(
+    /^[\x21\x23-\x5B\x5D-\x7E]+( [\x21\x23-\x5B\x5D-\x7E]+)*$/,
+    "scopes are separated by one space, each of visible ASCII without quotes or backslashes",
+  );
+
+/**
+ * How Kerby authenticates to a server: not at all, with a credential sent in one header, or with OAuth (MCP's
+ * authorization spec), connected once for the whole tenant in the console. `scope` is what to ask for; without it, what
+ * the server's challenge or metadata names.
+ */
 const ToolServerAuthSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }),
   z.object({ kind: z.literal("header"), header: ToolHeaderNameSchema }),
+  z.object({ kind: z.literal("oauth"), scope: OAuthScopeSchema.exactOptional() }),
 ]);
 export type ToolServerAuth = z.infer<typeof ToolServerAuthSchema>;
 
@@ -179,6 +193,64 @@ export type UpdateToolServerRequest = z.infer<typeof UpdateToolServerRequestSche
 /** `PUT /v1/tool-servers/:slug/credential`: replace the header's value (sealed; only a worker can open it). */
 export const PutToolCredentialRequestSchema = z.object({ value: ToolCredentialSchema });
 
+/** `POST /v1/tool-servers/:slug/oauth/start`: where to send the person's browser to connect an `oauth` server. */
+export const StartToolServerOAuthResponseSchema = z.object({ authorizationUrl: z.url() });
+export type StartToolServerOAuthResponse = z.infer<typeof StartToolServerOAuthResponseSchema>;
+
+/**
+ * `POST /v1/tool-servers/oauth/callback`: what the authorization server sent back to the console's callback, as it came
+ * in its query: `state`, `iss` when present, and either `code` or `error` (with `error_description` as
+ * `errorDescription`).
+ */
+export const FinishToolServerOAuthRequestSchema = z
+  .object({
+    state: z.string().min(1).max(512),
+    iss: z.string().max(2_000).exactOptional(),
+    code: z.string().min(1).max(4_096).exactOptional(),
+    error: z.string().min(1).max(200).exactOptional(),
+    errorDescription: z.string().max(2_000).exactOptional(),
+  })
+  .refine(
+    (request) => (request.code === undefined) !== (request.error === undefined),
+    "the authorization server answers with a code or an error",
+  );
+export type FinishToolServerOAuthRequest = z.infer<typeof FinishToolServerOAuthRequestSchema>;
+
+/** Where the console publishes Kerby's Client ID Metadata Document: its URL is Kerby's OAuth `client_id`. */
+export const OAUTH_CLIENT_METADATA_PATH = "/oauth/client-metadata.json";
+/** The console page an authorization server sends the person back to. */
+const OAUTH_CALLBACK_PATH = "/dashboard/tools/oauth/callback";
+
+/** Kerby as an OAuth client: its client id, its one redirect URI, and its Client ID Metadata Document. */
+export type KerbyOAuthClient = {
+  clientId: string;
+  redirectUri: string;
+  metadata: Record<string, unknown>;
+};
+
+/**
+ * Kerby as an OAuth client of tenants' MCP servers, given the console's public address: its client id (the URL of its
+ * Client ID Metadata Document), its one redirect URI, and that document. A public client: no secret, PKCE always.
+ */
+export function kerbyOAuthClient(consolePublicUrl: string): KerbyOAuthClient {
+  const base = consolePublicUrl.replace(/\/+$/, "");
+  const clientId = `${base}${OAUTH_CLIENT_METADATA_PATH}`;
+  const redirectUri = `${base}${OAUTH_CALLBACK_PATH}`;
+  return {
+    clientId,
+    redirectUri,
+    metadata: {
+      client_id: clientId,
+      client_name: "Kerby",
+      client_uri: base,
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    },
+  };
+}
+
 /** `PATCH /v1/tool-servers/:slug/tools/:name`. `acceptDefinition` pins what the server lists now. */
 export const UpdateToolRequestSchema = z
   .object({
@@ -223,6 +295,7 @@ const ToolServerSummarySchema = z.object({
   kind: z.enum(["mcp", "builtin"]),
   url: z.string().nullable(),
   auth: ToolServerAuthSchema,
+  /** A credential is stored: the header's value, or for `oauth` the tokens of a connection ("connected"). */
   hasCredential: z.boolean(),
   /** `syncing` until a worker has listed its tools; `error` names why the last listing failed in `lastError`. */
   status: ToolServerStatusSchema,

@@ -337,12 +337,14 @@ export type ConsoleService = {
   toolServers(access: ChatAccess): Promise<ToolServerSummary[]>;
   /** One server with its tools and grants; undefined when there is none by that name. */
   toolServer(access: ChatAccess, slug: string): Promise<ToolServerView | undefined>;
-  /** Register a server: form fields `slug`, `url`, `auth` (`none`/`header`), `header`, `credential`. */
+  /**
+   * Register a server: form fields `slug`, `url`, `auth` (`none`/`header`/`oauth`), `header`, `credential`, `scope`.
+   */
   createToolServer(
     access: ChatAccess,
     form: FormInput,
   ): Promise<{ ok: true; slug: string } | FormFailure>;
-  /** A new URL or auth (`url`, `auth`, `header`, `credential`; a blank credential keeps the stored one). */
+  /** A new URL or auth (`url`, `auth`, `header`, `credential`, `scope`; a blank credential keeps the stored one). */
   updateToolServer(
     access: ChatAccess,
     slug: string,
@@ -373,6 +375,19 @@ export type ConsoleService = {
     id: string,
     form: FormInput,
   ): Promise<{ ok: true } | FormFailure>;
+  /** Start connecting an `oauth` server: where to send the person's browser (the authorization server). */
+  connectToolServer(
+    access: ChatAccess,
+    slug: string,
+  ): Promise<{ ok: true; authorizationUrl: string } | FormFailure>;
+  /**
+   * Finish a connection with what the authorization server sent back to the callback page (its query: `state`, `code`
+   * or `error` and `error_description`, `iss`): the server it connected, or what to tell the person.
+   */
+  finishToolServerOAuth(
+    access: ChatAccess,
+    answer: Record<string, string | undefined>,
+  ): Promise<{ ok: true; slug: string } | FormFailure>;
 };
 
 /** A refused Studio save or publish; `conflict` when the draft changed elsewhere since the editor loaded it. */

@@ -1,21 +1,34 @@
 "use client";
-// The forms of the Tools pages: adding a server, changing its address and auth, replacing its credential, listing its
-// tools again, each tool's switches, and the refresh while a worker lists the tools.
+// The forms of the Tools pages: adding a server, changing its address and auth, replacing its credential, connecting
+// an OAuth server and finishing that connection, listing its tools again, each tool's switches, and the refresh while
+// a worker lists the tools.
 import type { Tool, ToolServerAuth } from "@kerby/contracts";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useActionState, useEffect, useState, useTransition } from "react";
+import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import type { FormFailure } from "../../../types/index.ts";
 import { SubmitButton } from "../../_components/client.tsx";
 import { Field } from "../../_components/field.tsx";
 import { Alert, buttonStyles, Card } from "../../_components/ui.tsx";
 import {
   createToolServerAction,
+  finishToolServerOAuthAction,
   type NewServerState,
   type ToolFormState,
   toolServerSyncingAction,
   updateToolAction,
 } from "./actions.ts";
 
-/** No auth, or a credential sent in one header. The credential is never shown: blank keeps the stored one on a change. */
+const AUTH_LABELS: Record<ToolServerAuth["kind"], string> = {
+  none: "None",
+  header: "A credential in a header",
+  oauth: "OAuth (connect in the browser)",
+};
+
+/**
+ * No auth, a credential sent in one header, or OAuth. The credential is never shown: blank keeps the stored one on a
+ * change. An OAuth server is connected from its page once saved.
+ */
 function AuthFields({
   auth,
   hasCredential,
@@ -30,7 +43,7 @@ function AuthFields({
     <fieldset className="space-y-3">
       <legend className="text-sm font-medium text-zinc-800">Authentication</legend>
       <div className="flex gap-6 text-sm">
-        {(["none", "header"] as const).map((option) => (
+        {(["none", "header", "oauth"] as const).map((option) => (
           <label key={option} className="flex items-center gap-2">
             <input
               type="radio"
@@ -39,7 +52,7 @@ function AuthFields({
               checked={kind === option}
               onChange={() => setKind(option)}
             />
-            {option === "none" ? "None" : "A credential in a header"}
+            {AUTH_LABELS[option]}
           </label>
         ))}
       </div>
@@ -68,6 +81,18 @@ function AuthFields({
           />
         </div>
       ) : null}
+      {kind === "oauth" ? (
+        <Field
+          label="Scope"
+          name="scope"
+          maxLength={1000}
+          autoComplete="off"
+          defaultValue={auth?.kind === "oauth" ? auth.scope : undefined}
+          placeholder="Leave blank for what the server asks for"
+          hint="Space-separated scopes to ask for. After saving, connect it from its page: you approve Kerby at the server's sign-in, once for the whole workspace."
+          error={fields?.scope}
+        />
+      ) : null}
     </fieldset>
   );
 }
@@ -80,7 +105,11 @@ export function NewServerForm() {
   const auth: ToolServerAuth | undefined =
     state?.values.auth === "header"
       ? { kind: "header", header: state.values.header ?? "" }
-      : undefined;
+      : state?.values.auth === "oauth"
+        ? state.values.scope
+          ? { kind: "oauth", scope: state.values.scope }
+          : { kind: "oauth" }
+        : undefined;
   return (
     <Card>
       <form action={action} className="space-y-4">
@@ -104,7 +133,7 @@ export function NewServerForm() {
           autoComplete="off"
           placeholder="https://mcp.example.com/mcp"
           defaultValue={state?.values.url}
-          hint="Its MCP endpoint (Streamable HTTP). A server with a credential must use https."
+          hint="Its MCP endpoint (Streamable HTTP). A server with a credential or OAuth must use https."
           error={state?.fields?.url}
         />
         <AuthFields
@@ -180,6 +209,49 @@ export function CredentialForm({
       {failure?.error ? <Alert tone="error">{failure.error}</Alert> : null}
       <SubmitButton pending="Replacing…">Replace credential</SubmitButton>
     </form>
+  );
+}
+
+/** Connect (or reconnect) an OAuth server: the browser leaves for its authorization server and comes back here. */
+export function ConnectButton({
+  action,
+  connected,
+}: {
+  action: () => Promise<ToolFormState>;
+  connected: boolean;
+}) {
+  const [state, formAction] = useActionState<ToolFormState, FormData>(action, undefined);
+  return (
+    <form action={formAction} className="flex flex-wrap items-center gap-3">
+      <SubmitButton variant={connected ? "secondary" : "primary"} pending="Opening the sign-in…">
+        {connected ? "Reconnect" : "Connect"}
+      </SubmitButton>
+      {state && !state.ok ? <span className="text-sm text-red-600">{state.error}</span> : null}
+    </form>
+  );
+}
+
+/**
+ * The callback's work: hand the authorization server's answer to the api once (the action goes on to the server's
+ * page), and show why if it was refused.
+ */
+export function FinishConnection({ answer }: { answer: Record<string, string> }) {
+  const started = useRef(false);
+  const [failure, setFailure] = useState<FormFailure | undefined>();
+  useEffect(() => {
+    // Once: the answer's state can finish a connection only once (development mounts effects twice).
+    if (started.current) return;
+    started.current = true;
+    void finishToolServerOAuthAction(answer).then(setFailure);
+  }, [answer]);
+  if (!failure) return <p className="text-sm text-zinc-500">Finishing the connection…</p>;
+  return (
+    <div className="space-y-4">
+      <Alert tone="error">{failure.error ?? "The connection was refused."}</Alert>
+      <Link href="/dashboard/tools" className="text-sm text-indigo-600 hover:underline">
+        Back to Tools
+      </Link>
+    </div>
   );
 }
 
