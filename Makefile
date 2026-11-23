@@ -5,6 +5,11 @@ SHELL := /bin/bash
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
 
+# A worktree's .env (make worktree) names its compose project and published ports. Compose reads it by itself; the
+# scripts behind e2e, multitenant and logs-query read these from the environment, so export them.
+-include .env
+export KERBY_PROJECT KERBY_API_PORT KERBY_CONSOLE_PORT
+
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 

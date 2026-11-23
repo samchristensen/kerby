@@ -10,7 +10,7 @@ export const MAX_TOOLS_PER_SERVER = 200;
 /** Tools offered to one turn, and patterns one conversation or prompt may name. */
 export const MAX_CONVERSATION_TOOLS = 64;
 /** Patterns one integration may be granted. */
-export const MAX_TOOL_GRANTS = 200;
+const MAX_TOOL_GRANTS = 200;
 
 /** The reserved server of Kerby's own tools. */
 export const BUILTIN_TOOL_SERVER = "kerby";
@@ -35,7 +35,6 @@ export const ToolNameSchema = z
 export const ToolPatternSchema = z
   .string()
   .regex(PATTERN, "a tool is named <server>/<tool>, or <server>/* for every tool of a server");
-export type ToolPattern = z.infer<typeof ToolPatternSchema>;
 
 /** The tools a conversation or chat prompt names. None named, none offered: tools are never implied. */
 export const ToolSelectionSchema = z
@@ -64,7 +63,7 @@ export function exposedToolName(slug: string, tool: string): string | undefined 
 }
 
 /** `read`: may run again after a crash. `write`: never repeated; an interrupted call is reported instead. */
-export const ToolEffectSchema = z.enum(["read", "write"]);
+const ToolEffectSchema = z.enum(["read", "write"]);
 export type ToolEffect = z.infer<typeof ToolEffectSchema>;
 
 /** MCP's tool annotations: hints from the server, never trusted (they only pre-fill the console's choice of effect). */
@@ -112,14 +111,14 @@ export const ToolHeaderNameSchema = z
   }, "that header is set by the transport: use Authorization or a header of the server's own");
 
 /** How Kerby authenticates to a server: not at all, or with a credential sent in one header. */
-export const ToolServerAuthSchema = z.discriminatedUnion("kind", [
+const ToolServerAuthSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }),
   z.object({ kind: z.literal("header"), header: ToolHeaderNameSchema }),
 ]);
 export type ToolServerAuth = z.infer<typeof ToolServerAuthSchema>;
 
 /** A header's value, e.g. `Bearer <token>`: printable ASCII (no CR, LF or tab), at most 4 KiB. Never returned. */
-export const ToolCredentialSchema = z
+const ToolCredentialSchema = z
   .string()
   .min(1)
   .max(4_096)

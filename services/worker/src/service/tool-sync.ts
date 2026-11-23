@@ -25,7 +25,7 @@ export async function syncToolServer(
 ): Promise<void> {
   const server = await findToolServerById(ctx.db, params.serverId);
   // Deleted since it was queued, or the built-in one (its tools are code): nothing to list.
-  if (!server || server.kind !== "mcp" || server.url === null) return;
+  if (server?.kind !== "mcp" || server.url === null) return;
   const headers = await toolServerHeaders(deps, ctx.tenantId, server);
   let outcome: SyncOutcome;
   if ("missing" in headers) {
