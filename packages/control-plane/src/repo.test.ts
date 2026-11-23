@@ -349,7 +349,8 @@ describe("console people and sessions", () => {
       tenantStatus: "provisioning",
     });
     expect(await readConsoleSession(control.db, expired)).toBeUndefined();
-    expect(await readConsoleSession(control.db, `${live.slice(0, -1)}A`)).toBeUndefined();
+    const altered = `${live.slice(0, -1)}${live.endsWith("A") ? "B" : "A"}`;
+    expect(await readConsoleSession(control.db, altered)).toBeUndefined();
     expect(await readConsoleSession(control.db, "not a token")).toBeUndefined();
     // the table holds hashes, not tokens
     const stored = await control.db.query("select 1 from console_sessions where token_hash = $1", [
