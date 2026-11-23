@@ -8,7 +8,14 @@ import type { RunContext, TaskParams } from "@kerby/durable";
 import type { JudgmentOutcome, JudgmentRequest } from "@kerby/judgment";
 import { log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
-import type { Judge } from "./tools.ts";
+
+/** The agent's `judge` tool for one conversation: each call is its own judgment. */
+export type Judge = (
+  request: JudgmentRequest,
+  signal: AbortSignal,
+  /** The tool call's id: what makes the judgment's usage row once-only. */
+  callId: string,
+) => Promise<JudgmentOutcome>;
 
 /**
  * Judge `request` with the provider its model names. `usageKey` makes the usage row once-only: the same key twice is

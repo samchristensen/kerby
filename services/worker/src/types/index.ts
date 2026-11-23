@@ -33,7 +33,10 @@ export type WorkerDeps = {
     /** Turns this worker runs at once across every tenant (`MAX_RUNNING_TURNS`); bounds its tenant pools. */
     maxRunningTurns: number;
     sweepIntervalMs: number;
+    /** Offer the built-in `kerby/echo` to conversations that name it (development). */
     enableEchoTool: boolean;
+    /** One call to a tenant's MCP tool, at most; past it the model reads an error result. */
+    toolCallTimeoutMs: number;
     /** Bytes of message bodies a turn starts with; older whole turns past it are left out (`readHistory`). */
     historyBudgetBytes: number;
   };

@@ -470,16 +470,16 @@ describe("fake model", () => {
     });
   });
 
-  it("calls the echo tool for `echo ...` and reports what the tool said, from any rehydrated point", async () => {
+  it("calls the built-in echo tool for `echo ...` and reports what the tool said, from any rehydrated point", async () => {
     const { runtime, model } = fake();
     const executed: string[] = [];
     const run = (history: AgentMessage[]) =>
       makeRun({
         model,
         history,
-        tools: [echoSpec],
+        tools: [{ ...echoSpec, name: "kerby__echo" }],
         executeTool: async (call) => {
-          executed.push(call.id);
+          executed.push(`${call.name}:${call.id}`);
           return {
             content: [{ type: "text", text: String((call.input as { text: string }).text) }],
             isError: false,
@@ -496,6 +496,6 @@ describe("fake model", () => {
     );
     expect(resumed).toHaveLength(1);
     expect(resumed[0]).toMatchObject({ content: [{ text: "Tool said: ping" }] });
-    expect(executed).toEqual(["call_1"]);
+    expect(executed).toEqual(["kerby__echo:call_1"]);
   });
 });

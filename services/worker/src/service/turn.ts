@@ -19,8 +19,7 @@ import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
 import { alert, errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
 import { checkUserMessage, guardToolCall } from "./guardrails.ts";
-import { judgeTool } from "./judgments.ts";
-import { tenantTools } from "./tools.ts";
+import { interruptedResult, turnTools } from "./tools.ts";
 import { TraceRecorder, traceOf } from "./trace.ts";
 
 /** Live events are batched: text deltas arrive many times a second and each notification is a round trip. */
@@ -115,10 +114,13 @@ export async function runTurn(
     });
   }
   let nextSeq = history.lastSeq + 1;
-  const tools = tenantTools({
-    enableEcho: deps.settings.enableEchoTool,
-    judge: await judgeTool(deps, ctx.tenantId, conversationId),
-  });
+  const tools = await turnTools(deps, ctx, conversationId);
+  if ("refused" in tools) {
+    // The same tools give the same answer until the conversation changes: no retry.
+    await setLastError(ctx.db, conversationId, tools.refused);
+    log("warn", "turn refused: too many tools");
+    return;
+  }
 
   // Bring your own key: the tenant's key for the model's provider, opened for this run only.
   let apiKey: string | undefined;
@@ -138,23 +140,30 @@ export async function runTurn(
       return;
     }
   }
-  /** A provider's error can quote the key it rejected; nothing that leaves this function may. */
-  const scrub = (text: string): string => (apiKey ? text.replaceAll(apiKey, "[redacted]") : text);
+  /** A provider's error can quote the key it rejected, a server the credential it was sent: nothing that leaves here may. */
+  const scrub = (text: string): string =>
+    tools.scrub(apiKey ? text.replaceAll(apiKey, "[redacted]") : text);
 
   const agentRun: AgentRun = {
     system: conversation.system,
     model: conversation.model,
     ...(apiKey === undefined ? {} : { apiKey }),
     history: history.messages.map((s) => s.message),
-    tools: tools.specs(),
+    tools: tools.specs,
     // The only way a tool runs: an Absurd step keyed by the call id, so a retried turn gets the stored result and
-    // does not repeat a side effect. `recordToolExecution` counts real runs inside the step.
+    // does not repeat a side effect. `recordToolExecution` counts real runs inside the step: a second one means an
+    // earlier attempt began this call and never stored its result, so a write tool is reported, not run again.
     executeTool: (call, signal): Promise<ToolResult> =>
       run.step(`tool:${call.id}`, async () => {
         // A guardrail that stops the call answers in the tool's place: the model reads why, and the tool never runs.
         const stopped = await guardToolCall(deps, ctx.tenantId, conversation, call, signal);
         if (stopped) return stopped;
-        await recordToolExecution(ctx.db, { conversationId, callId: call.id, name: call.name });
+        const runs = await recordToolExecution(ctx.db, {
+          conversationId,
+          callId: call.id,
+          name: call.name,
+        });
+        if (runs > 1 && !tools.repeatable(call.name)) return interruptedResult(call.name);
         return tools.execute(call, signal);
       }),
     readBlob: async (blobId) => (await deps.blobs.get(ctx, blobId)).body,
@@ -261,7 +270,7 @@ export async function runTurn(
     });
   } catch (caught) {
     const error =
-      caught instanceof Error && apiKey && caught.message.includes(apiKey)
+      caught instanceof Error && scrub(caught.message) !== caught.message
         ? new Error(scrub(caught.message))
         : caught;
     if (error instanceof LeaseLostError) {
@@ -293,5 +302,7 @@ export async function runTurn(
       ).catch(() => {});
     }
     throw error;
+  } finally {
+    await tools.close();
   }
 }

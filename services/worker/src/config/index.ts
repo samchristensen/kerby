@@ -31,8 +31,16 @@ export const workerConfigSchema = z
     kerbyEnvironment: z.enum(["development", "production"]).default("production"),
     /** Answer with the scripted fake model instead of a real provider (local stacks and end-to-end tests). */
     kerbyFakeModel: z.stringbool().default(false),
-    /** Offer the built-in `echo` tool to every conversation (development). */
+    /**
+     * Make the built-in `kerby/echo` tool available (development). Like every tool, it is offered only to a
+     * conversation that names it; where this is off, the worker leaves it out of a turn.
+     */
     enableEchoTool: z.stringbool().default(false),
+    /**
+     * How long one call to a tenant's MCP tool may take, from the first byte sent to the last read; past it the model
+     * reads an error result (ADR 0019). Also bounds every exchange through the egress guard. Default 60 s.
+     */
+    toolCallTimeoutMs: z.coerce.number().int().positive().default(60_000),
     /**
      * Private key(s) that open tenants' sealed model keys, base64, comma separated: the key new secrets are sealed
      * to first, older ones after it while a rotation finishes. Not needed with the fake model.
