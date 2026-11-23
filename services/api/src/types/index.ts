@@ -1,5 +1,5 @@
 import type { Blobs } from "@kerby/blobs";
-import type { Limits } from "@kerby/contracts";
+import type { IntegrationRole, Limits } from "@kerby/contracts";
 import type { ControlDb, TenantPools } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
 
@@ -37,8 +37,18 @@ export type ApiDeps = {
   };
 };
 
-/** Who is calling: established from a verified API key or console session, never from a request body. `actor` is `key:<id>` or `user:<id>`. */
-export type Principal = { tenantId: string; actor: string; limits: Limits };
+/**
+ * Who is calling: established from a verified API key or console session, never from a request body. `actor` is
+ * `key:<id>` or `user:<id>`. `role` is the key's integration's (ADR 0019); a console session is `admin` with no
+ * integration.
+ */
+export type Principal = {
+  tenantId: string;
+  actor: string;
+  limits: Limits;
+  role: IntegrationRole;
+  integrationId: string | null;
+};
 
 /** No valid key. */
 export class UnauthorizedError extends Error {

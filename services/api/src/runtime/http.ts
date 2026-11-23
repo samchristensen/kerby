@@ -5,6 +5,7 @@ import {
   CreatePromptRequestSchema,
   GetConversationQuerySchema,
   GetTraceQuerySchema,
+  type IntegrationRole,
   ListConversationsQuerySchema,
   ListPromptsQuerySchema,
   ModelProviderSchema,
@@ -153,15 +154,29 @@ const rateLimited = (seconds: number, message: string): Response =>
 /** Keys each limiter remembers: tenants, and client addresses that failed to authenticate. */
 const MAX_LIMITER_KEYS = 100_000;
 
+/** Which roles may call a route (ADR 0019). Every route declares one. */
+type Access = readonly IntegrationRole[];
+const ANYONE: Access = ["admin", "restricted"];
+const ADMIN_ONLY: Access = ["admin"];
+/** What each role may do, for the message that refuses it. */
+const ROLE_SCOPE: Record<IntegrationRole, string> = {
+  admin: "may call every route",
+  restricted: "may call only /v1/conversations* and /v1/judgments*",
+};
+
 export function createApiApp(deps: ApiDeps): FetchHandler {
   const auth = createAuthenticator(deps.control, deps.settings.authCacheMs);
   const requests = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
   const failedAuth = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
 
-  /** Authenticate, then run `handler` with the tenant's context. The tenant id comes from the key only. */
+  /**
+   * Authenticate, check the caller's role may use the route, then run `handler` with the tenant's context. The tenant
+   * id comes from the key only.
+   */
   const authed =
     (
       route: string,
+      access: Access,
       handler: (
         request: Request,
         params: Record<string, string>,
@@ -206,6 +221,12 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       try {
         return await withTenant(principal.tenantId, async () => {
           try {
+            if (!access.includes(principal.role))
+              throw new HttpError(
+                403,
+                "forbidden",
+                `this key's integration has role "${principal.role}", which ${ROLE_SCOPE[principal.role]}. Fix: use a key of an admin integration`,
+              );
             const rate =
               principal.limits.requestsPerMinute ?? deps.settings.defaultRequestsPerMinute;
             const wait = requests.take(principal.tenantId, rate);
@@ -317,14 +338,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/model-keys",
-      authed("GET /v1/model-keys", async (_request, _params, principal) =>
+      authed("GET /v1/model-keys", ADMIN_ONLY, async (_request, _params, principal) =>
         json(200, await listTenantModelKeys(deps, principal)),
       ),
     ],
     [
       "PUT",
       "/v1/model-keys/:provider",
-      authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
+      authed("PUT /v1/model-keys/:provider", ADMIN_ONLY, async (request, params, principal) => {
         // The adapters' lists (ADR 0008, 0015): a key for a provider nothing can use would fail only at the first call.
         const provider = params.provider ?? "";
         const providers = [
@@ -344,7 +365,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "DELETE",
       "/v1/model-keys/:provider",
-      authed("DELETE /v1/model-keys/:provider", async (_request, params, principal) => {
+      authed("DELETE /v1/model-keys/:provider", ADMIN_ONLY, async (_request, params, principal) => {
         if (!(await removeModelKey(deps, principal, providerParam(params))))
           throw new NotFoundError("model key not found");
         return new Response(null, { status: 204 });
@@ -353,7 +374,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/conversations",
-      authed("POST /v1/conversations", async (request, _params, principal) => {
+      authed("POST /v1/conversations", ANYONE, async (request, _params, principal) => {
         const body = await readJson(request, CreateConversationRequestSchema);
         return json(201, await inTenant(principal, (ctx) => createConversation(deps, ctx, body)));
       }),
@@ -361,7 +382,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations",
-      authed("GET /v1/conversations", async (request, _params, principal) => {
+      authed("GET /v1/conversations", ANYONE, async (request, _params, principal) => {
         const query = ListConversationsQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
         );
@@ -380,7 +401,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/conversations/:id/messages",
-      authed("POST /v1/conversations/:id/messages", async (request, params, principal) => {
+      authed("POST /v1/conversations/:id/messages", ANYONE, async (request, params, principal) => {
         const id = conversationId(params);
         const body = await readJson(request, PostMessageRequestSchema, {
           maxBytes: MESSAGE_BODY_BYTES,
@@ -395,7 +416,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations/:id",
-      authed("GET /v1/conversations/:id", async (request, params, principal) => {
+      authed("GET /v1/conversations/:id", ANYONE, async (request, params, principal) => {
         const id = conversationId(params);
         const query = GetConversationQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
@@ -413,7 +434,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations/:id/events",
-      authed("GET /v1/conversations/:id/events", async (request, params, principal) => {
+      authed("GET /v1/conversations/:id/events", ANYONE, async (request, params, principal) => {
         const id = conversationId(params);
         const header =
           request.headers.get("last-event-id") ?? new URL(request.url).searchParams.get("after");
@@ -488,7 +509,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/conversations/:id/trace",
-      authed("GET /v1/conversations/:id/trace", async (request, params, principal) => {
+      authed("GET /v1/conversations/:id/trace", ANYONE, async (request, params, principal) => {
         const id = conversationId(params);
         const query = GetTraceQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
@@ -505,7 +526,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/judgments",
-      authed("POST /v1/judgments", async (request, _params, principal) => {
+      authed("POST /v1/judgments", ANYONE, async (request, _params, principal) => {
         const body = await readJson(request, SubmitJudgmentRequestSchema, {
           maxBytes: JUDGMENT_BODY_BYTES,
         });
@@ -515,7 +536,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/judgments/:id",
-      authed("GET /v1/judgments/:id", async (_request, params, principal) => {
+      authed("GET /v1/judgments/:id", ANYONE, async (_request, params, principal) => {
         const id = z.uuid().safeParse(params.id);
         if (!id.success) throw new HttpError(404, "not_found", "judgment not found");
         return json(200, await inTenant(principal, (ctx) => getJudgment(ctx, id.data)));
@@ -524,7 +545,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/prompts",
-      authed("GET /v1/prompts", async (request, _params, principal) => {
+      authed("GET /v1/prompts", ADMIN_ONLY, async (request, _params, principal) => {
         const query = ListPromptsQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
         );
@@ -536,7 +557,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/prompts",
-      authed("POST /v1/prompts", async (request, _params, principal) => {
+      authed("POST /v1/prompts", ADMIN_ONLY, async (request, _params, principal) => {
         const body = await readJson(request, CreatePromptRequestSchema);
         return json(
           201,
@@ -547,7 +568,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/prompts/:name",
-      authed("GET /v1/prompts/:name", async (_request, params, principal) => {
+      authed("GET /v1/prompts/:name", ADMIN_ONLY, async (_request, params, principal) => {
         const name = promptName(params);
         return json(200, await inTenant(principal, (ctx) => getTenantPrompt(ctx, name)));
       }),
@@ -555,7 +576,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PATCH",
       "/v1/prompts/:name",
-      authed("PATCH /v1/prompts/:name", async (request, params, principal) => {
+      authed("PATCH /v1/prompts/:name", ADMIN_ONLY, async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, RenamePromptRequestSchema);
         return json(
@@ -569,7 +590,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "DELETE",
       "/v1/prompts/:name",
-      authed("DELETE /v1/prompts/:name", async (_request, params, principal) => {
+      authed("DELETE /v1/prompts/:name", ADMIN_ONLY, async (_request, params, principal) => {
         const name = promptName(params);
         await inTenant(principal, (ctx) => deleteTenantPrompt(deps, principal, ctx, name));
         return new Response(null, { status: 204 });
@@ -578,7 +599,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PUT",
       "/v1/prompts/:name/draft",
-      authed("PUT /v1/prompts/:name/draft", async (request, params, principal) => {
+      authed("PUT /v1/prompts/:name/draft", ADMIN_ONLY, async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, SaveDraftRequestSchema);
         return json(
@@ -590,7 +611,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/prompts/:name/versions",
-      authed("POST /v1/prompts/:name/versions", async (request, params, principal) => {
+      authed("POST /v1/prompts/:name/versions", ADMIN_ONLY, async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, PublishPromptRequestSchema);
         return json(
@@ -602,20 +623,25 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/prompts/:name/versions/:version",
-      authed("GET /v1/prompts/:name/versions/:version", async (_request, params, principal) => {
-        const name = promptName(params);
-        const version = promptVersion(params);
-        return json(
-          200,
-          await inTenant(principal, (ctx) => getTenantPromptVersion(ctx, name, version)),
-        );
-      }),
+      authed(
+        "GET /v1/prompts/:name/versions/:version",
+        ADMIN_ONLY,
+        async (_request, params, principal) => {
+          const name = promptName(params);
+          const version = promptVersion(params);
+          return json(
+            200,
+            await inTenant(principal, (ctx) => getTenantPromptVersion(ctx, name, version)),
+          );
+        },
+      ),
     ],
     [
       "POST",
       "/v1/prompts/:name/versions/:version/render",
       authed(
         "POST /v1/prompts/:name/versions/:version/render",
+        ADMIN_ONLY,
         async (request, params, principal) => {
           const name = promptName(params);
           const version = promptVersion(params);
@@ -632,29 +658,37 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PUT",
       "/v1/prompts/:name/labels/:label",
-      authed("PUT /v1/prompts/:name/labels/:label", async (request, params, principal) => {
-        const name = promptName(params);
-        const label = promptLabel(params);
-        const body = await readJson(request, SetPromptLabelRequestSchema);
-        return json(
-          200,
-          await inTenant(principal, (ctx) =>
-            setTenantPromptLabel(deps, principal, ctx, name, label, body.version),
-          ),
-        );
-      }),
+      authed(
+        "PUT /v1/prompts/:name/labels/:label",
+        ADMIN_ONLY,
+        async (request, params, principal) => {
+          const name = promptName(params);
+          const label = promptLabel(params);
+          const body = await readJson(request, SetPromptLabelRequestSchema);
+          return json(
+            200,
+            await inTenant(principal, (ctx) =>
+              setTenantPromptLabel(deps, principal, ctx, name, label, body.version),
+            ),
+          );
+        },
+      ),
     ],
     [
       "DELETE",
       "/v1/prompts/:name/labels/:label",
-      authed("DELETE /v1/prompts/:name/labels/:label", async (_request, params, principal) => {
-        const name = promptName(params);
-        const label = promptLabel(params);
-        await inTenant(principal, (ctx) =>
-          removeTenantPromptLabel(deps, principal, ctx, name, label),
-        );
-        return new Response(null, { status: 204 });
-      }),
+      authed(
+        "DELETE /v1/prompts/:name/labels/:label",
+        ADMIN_ONLY,
+        async (_request, params, principal) => {
+          const name = promptName(params);
+          const label = promptLabel(params);
+          await inTenant(principal, (ctx) =>
+            removeTenantPromptLabel(deps, principal, ctx, name, label),
+          );
+          return new Response(null, { status: 204 });
+        },
+      ),
     ],
   ];
   return createRouter(routes);

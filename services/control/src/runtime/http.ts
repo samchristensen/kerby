@@ -1,4 +1,4 @@
-// The operator API: tenant lifecycle and keys, behind one bearer token. Never exposed to tenants. One more route,
+// The operator API: tenant lifecycle, integrations and keys, behind one bearer token. Never exposed to tenants. One more route,
 // self-serve sign-up, takes the console's token instead, which opens nothing else (ADR 0014).
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
@@ -6,11 +6,15 @@ import {
   type BackupResponse,
   ConsoleSignupRequestSchema,
   type ConsoleSignupResponse,
+  CreateIntegrationRequestSchema,
+  type CreateIntegrationResponse,
   CreateKeyRequestSchema,
   type CreateKeyResponse,
   CreateTenantRequestSchema,
   type CreateTenantResponse,
   type ExportResponse,
+  type Integration,
+  type ListIntegrationsResponse,
   type ListKeysResponse,
   type ListTenantsResponse,
   ReissueExportRequestSchema,
@@ -19,7 +23,7 @@ import {
   type RestoreResponse,
   type Tenant,
 } from "@kerby/contracts";
-import type { ApiKeyRecord, TenantRecord } from "@kerby/control-plane";
+import type { ApiKeyRecord, IntegrationRecord, TenantRecord } from "@kerby/control-plane";
 import {
   bearerToken,
   createRouter,
@@ -32,6 +36,7 @@ import {
 import { backupBuckets, restoreFromBackup } from "../service/backup.ts";
 import { rotateTenantDbPassword } from "../service/db-credentials.ts";
 import { exportTenant, reissueExportUrls } from "../service/export.ts";
+import { createOperatorIntegration, listOperatorIntegrations } from "../service/integrations.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
 import { signUp } from "../service/signups.ts";
@@ -63,10 +68,20 @@ function tenantResource(tenant: TenantRecord): Tenant {
 function keyResource(key: ApiKeyRecord): ApiKey {
   return {
     id: key.id,
+    integrationId: key.integrationId,
     label: key.label,
     createdAt: key.createdAt.toISOString(),
     lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
     revokedAt: key.revokedAt?.toISOString() ?? null,
+  };
+}
+
+function integrationResource(integration: IntegrationRecord): Integration {
+  return {
+    id: integration.id,
+    name: integration.name,
+    role: integration.role,
+    createdAt: integration.createdAt.toISOString(),
   };
 }
 
@@ -217,7 +232,7 @@ export function createControlApp(deps: ControlDeps, tokens: ControlTokens): Fetc
       "/v1/operator/tenants/:id/keys",
       authorized(async (request, params) => {
         const body = await readJson(request, CreateKeyRequestSchema);
-        const created = await createKey(deps, id(params), body.label);
+        const created = await createKey(deps, id(params), body.label, body.integrationId);
         const response: CreateKeyResponse = {
           apiKey: keyResource(created.key),
           secret: created.secret,
@@ -243,6 +258,28 @@ export function createControlApp(deps: ControlDeps, tokens: ControlTokens): Fetc
       authorized(async (_request, params) => {
         await revokeKey(deps, id(params), params.keyId ?? "");
         return new Response(null, { status: 204 });
+      }),
+    ],
+    [
+      "GET",
+      "/v1/operator/tenants/:id/integrations",
+      authorized(async (_request, params) => {
+        const response: ListIntegrationsResponse = {
+          integrations: (await listOperatorIntegrations(deps, id(params))).map(integrationResource),
+        };
+        return json(200, response);
+      }),
+    ],
+    [
+      "POST",
+      "/v1/operator/tenants/:id/integrations",
+      authorized(async (request, params) => {
+        const body = await readJson(request, CreateIntegrationRequestSchema);
+        const integration = await createOperatorIntegration(deps, id(params), body);
+        const response: CreateIntegrationResponse = {
+          integration: integrationResource(integration),
+        };
+        return json(201, response);
       }),
     ],
     [

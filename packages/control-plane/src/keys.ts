@@ -1,12 +1,15 @@
 // API keys look like `kb_<id>_<secret>`. The id is public and indexes the row; only a hash of the secret is
 // stored. The secret is 256 random bits, so a plain SHA-256 is enough: there is nothing to brute-force.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { IntegrationRole } from "@kerby/contracts";
 import type { ControlQueryable } from "@kerby/db";
+import { IntegrationNotFoundError } from "./integrations.ts";
 import { TENANT_COLUMNS, type TenantRecord, type TenantRow, tenantFromRow } from "./tenants.ts";
 
 export type ApiKeyRecord = {
   id: string;
   tenantId: string;
+  integrationId: string;
   label: string;
   createdAt: Date;
   lastUsedAt: Date | null;
@@ -16,18 +19,20 @@ export type ApiKeyRecord = {
 type KeyRow = {
   id: string;
   tenant_id: string;
+  integration_id: string;
   label: string;
   created_at: Date;
   last_used_at: Date | null;
   revoked_at: Date | null;
 };
 
-const KEY_COLUMNS = "id, tenant_id, label, created_at, last_used_at, revoked_at";
+const KEY_COLUMNS = "id, tenant_id, integration_id, label, created_at, last_used_at, revoked_at";
 
 function keyFromRow(row: KeyRow): ApiKeyRecord {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    integrationId: row.integration_id,
     label: row.label,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
@@ -45,20 +50,32 @@ export function parseApiKey(key: string): { id: string; secret: string } | undef
 
 export type CreatedKey = { key: ApiKeyRecord; secret: string };
 
-/** Create a key for a tenant. The returned `secret` is the whole key, shown once and never stored. */
+/**
+ * Create a key in one of the tenant's live integrations. The returned `secret` is the whole key, shown once and never
+ * stored. Throws `IntegrationNotFoundError` for an archived integration or another tenant's.
+ */
 export async function createApiKey(
   db: ControlQueryable,
   tenantId: string,
+  integrationId: string,
   label = "",
 ): Promise<CreatedKey> {
   const id = randomBytes(6).toString("hex");
   const secret = randomBytes(32).toString("base64url");
+  // `for share` waits for a concurrent archive and then sees it, so no live key lands in an archived integration.
   const { rows } = await db.query<KeyRow>(
-    `insert into api_keys (id, tenant_id, label, key_hash) values ($1, $2, $3, $4) returning ${KEY_COLUMNS}`,
-    [id, tenantId, label, hash(secret)],
+    `insert into api_keys (id, tenant_id, integration_id, label, key_hash)
+     select $1, i.tenant_id, i.id, $4, $5 from integrations i
+      where i.id::text = $3 and i.tenant_id::text = $2 and i.archived_at is null
+      for share
+     returning ${KEY_COLUMNS}`,
+    [id, tenantId, integrationId, label, hash(secret)],
   );
   const row = rows[0];
-  if (!row) throw new Error("api key insert returned no row");
+  if (!row)
+    throw new IntegrationNotFoundError(
+      `integration ${integrationId} is not a live integration of tenant ${tenantId}. Fix: create the key in one of the tenant's integrations`,
+    );
   return { key: keyFromRow(row), secret: `kb_${id}_${secret}` };
 }
 
@@ -83,11 +100,15 @@ export async function revokeApiKey(
   return rowCount === 1;
 }
 
-export type Authenticated = { tenant: TenantRecord; keyId: string };
+export type Authenticated = {
+  tenant: TenantRecord;
+  keyId: string;
+  integration: { id: string; name: string; role: IntegrationRole };
+};
 
 /**
- * Resolve a presented key to its tenant, or undefined. Looks the row up by id, compares the secret's hash in
- * constant time, and refuses revoked keys. Does not look at the tenant's status: the caller decides.
+ * Resolve a presented key to its tenant and integration, or undefined. Looks the row up by id, compares the secret's hash in
+ * constant time, and refuses revoked keys and keys of an archived integration. Does not look at the tenant's status: the caller decides.
  */
 export async function authenticateApiKey(
   db: ControlQueryable,
@@ -96,19 +117,30 @@ export async function authenticateApiKey(
   const parsed = parseApiKey(presented);
   if (!parsed) return undefined;
   const { rows } = await db.query<
-    TenantRow & { key_hash: Buffer; revoked_at: Date | null; last_used_at: Date | null }
+    TenantRow & {
+      key_hash: Buffer;
+      revoked_at: Date | null;
+      integration_id: string;
+      integration_name: string;
+      integration_role: IntegrationRole;
+      integration_archived_at: Date | null;
+    }
   >(
-    `select k.key_hash, k.revoked_at, k.last_used_at, ${TENANT_COLUMNS.split(", ")
-      .map((c) => `t.${c}`)
-      .join(", ")}
-       from api_keys k join tenants t on t.id = k.tenant_id where k.id = $1`,
+    `select k.key_hash, k.revoked_at, i.id as integration_id, i.name as integration_name,
+            i.role as integration_role, i.archived_at as integration_archived_at, ${TENANT_COLUMNS.split(
+              ", ",
+            )
+              .map((c) => `t.${c}`)
+              .join(", ")}
+       from api_keys k join tenants t on t.id = k.tenant_id
+       join integrations i on i.id = k.integration_id where k.id = $1`,
     [parsed.id],
   );
   const row = rows[0];
   // Compare even when the row is missing, so timing does not reveal which key ids exist.
   const expected = row?.key_hash ?? Buffer.alloc(32);
   const matches = timingSafeEqual(expected, hash(parsed.secret));
-  if (!row || !matches || row.revoked_at) return undefined;
+  if (!row || !matches || row.revoked_at || row.integration_archived_at) return undefined;
   // Recording use is bookkeeping, at most once a minute per key.
   await db.query(
     "update api_keys set last_used_at = now() where id = $1 and (last_used_at is null or last_used_at < now() - interval '1 minute')",
@@ -117,5 +149,6 @@ export async function authenticateApiKey(
   return {
     tenant: tenantFromRow(row),
     keyId: parsed.id,
+    integration: { id: row.integration_id, name: row.integration_name, role: row.integration_role },
   };
 }

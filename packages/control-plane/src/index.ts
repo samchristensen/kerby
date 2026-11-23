@@ -26,6 +26,17 @@ export {
   storeTenantDbPassword,
 } from "./db-credentials.ts";
 export {
+  archiveIntegration,
+  createIntegration,
+  findIntegrationByName,
+  getIntegration,
+  IntegrationNameTakenError,
+  IntegrationNotFoundError,
+  type IntegrationRecord,
+  listIntegrations,
+  updateIntegration,
+} from "./integrations.ts";
+export {
   type ApiKeyRecord,
   authenticateApiKey,
   type CreatedKey,

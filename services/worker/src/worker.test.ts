@@ -3,7 +3,13 @@ import type { AgentEvent, AgentMessage, AgentRuntime } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { createTestBlobs } from "@kerby/blobs/testing";
 import type { Limits } from "@kerby/contracts";
-import { createApiKey, insertTenant, putModelKey, setTenantStatus } from "@kerby/control-plane";
+import {
+  createApiKey,
+  createIntegration,
+  insertTenant,
+  putModelKey,
+  setTenantStatus,
+} from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import {
   conversationChannel,
@@ -109,7 +115,12 @@ async function harness(options: Options = {}) {
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    await createApiKey(control.db, row.id);
+    const integration = await createIntegration(control.db, {
+      tenantId: row.id,
+      name: "default",
+      role: "admin",
+    });
+    await createApiKey(control.db, row.id, integration.id);
     const database = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);

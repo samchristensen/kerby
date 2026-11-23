@@ -1,4 +1,5 @@
-import { createControlDb } from "@kerby/db";
+import { createControlDb, migrate, readMigrations } from "@kerby/db";
+import { createTestDatabase } from "@kerby/db/testing";
 import {
   createOpener,
   createSealer,
@@ -9,20 +10,28 @@ import {
 } from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
+  archiveIntegration,
   audit,
   authenticateApiKey,
   authenticateConsoleSession,
+  controlMigrationsDir,
   createApiKey,
   createConsoleSession,
+  createIntegration,
   deleteConsoleSession,
   deleteModelKey,
   EmailTakenError,
   findConsoleUser,
+  findIntegrationByName,
+  getIntegration,
   getTenant,
   hasModelKey,
+  IntegrationNameTakenError,
+  IntegrationNotFoundError,
   insertConsoleUser,
   insertTenant,
   listApiKeys,
+  listIntegrations,
   listModelKeys,
   listTenants,
   listTenantsWithoutDbPassword,
@@ -42,10 +51,21 @@ import {
   setTenantStatus,
   storeTenantDbPassword,
   TenantNameTakenError,
+  updateIntegration,
 } from "./index.ts";
 import { createTestControlDb } from "./testing.ts";
 
 const newTenant = (name: string) => ({ name, dbHost: "db.local", dbPort: 5432 });
+
+type Queryable = Parameters<typeof createApiKey>[0];
+
+/** A key in the tenant's `default` admin integration, made on first use. */
+async function keyFor(db: Queryable, tenantId: string, label?: string) {
+  const integration =
+    (await findIntegrationByName(db, tenantId, "default")) ??
+    (await createIntegration(db, { tenantId, name: "default", role: "admin" }));
+  return createApiKey(db, tenantId, integration.id, label);
+}
 
 describe("tenants", () => {
   it("inserts in provisioning state with names derived from the id, and refuses a duplicate name", async () => {
@@ -151,7 +171,7 @@ describe("api keys", () => {
   it("authenticates the key it created, to its tenant, and records use", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await createApiKey(control.db, tenant.id, "ci");
+    const { key, secret } = await keyFor(control.db, tenant.id, "ci");
     expect(secret).toMatch(/^kb_[0-9a-f]{12}_/);
     expect(parseApiKey(secret)?.id).toBe(key.id);
     const found = await authenticateApiKey(control.db, secret);
@@ -163,7 +183,7 @@ describe("api keys", () => {
   it("never stores the secret", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { secret } = await createApiKey(control.db, tenant.id);
+    const { secret } = await keyFor(control.db, tenant.id);
     const dump = JSON.stringify((await control.db.query("select * from api_keys")).rows);
     expect(dump).not.toContain(secret.slice(-20));
   });
@@ -171,7 +191,7 @@ describe("api keys", () => {
   it("refuses a wrong secret, a malformed key, an unknown id, and a revoked key", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await createApiKey(control.db, tenant.id);
+    const { key, secret } = await keyFor(control.db, tenant.id);
     const wrongSecret = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
     expect(await authenticateApiKey(control.db, wrongSecret)).toBeUndefined();
     expect(await authenticateApiKey(control.db, "garbage")).toBeUndefined();
@@ -187,9 +207,140 @@ describe("api keys", () => {
     await using control = await createTestControlDb();
     const a = await insertTenant(control.db, newTenant("a"));
     const b = await insertTenant(control.db, newTenant("b"));
-    const { key, secret } = await createApiKey(control.db, a.id);
+    const { key, secret } = await keyFor(control.db, a.id);
     expect(await revokeApiKey(control.db, b.id, key.id)).toBe(false);
     expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(a.id);
+  });
+});
+
+describe("integrations", () => {
+  it("creates, lists live ones by name, renames, changes role, and frees an archived name", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    const zed = await createIntegration(control.db, {
+      tenantId: tenant.id,
+      name: "zed",
+      role: "admin",
+    });
+    const bots = await createIntegration(control.db, {
+      tenantId: tenant.id,
+      name: "bots",
+      role: "restricted",
+    });
+    expect((await listIntegrations(control.db, tenant.id)).map((i) => i.name)).toEqual([
+      "bots",
+      "zed",
+    ]);
+    await expect(
+      createIntegration(control.db, { tenantId: tenant.id, name: "bots", role: "admin" }),
+    ).rejects.toBeInstanceOf(IntegrationNameTakenError);
+    await expect(
+      updateIntegration(control.db, tenant.id, zed.id, { name: "bots" }),
+    ).rejects.toBeInstanceOf(IntegrationNameTakenError);
+    const changed = await updateIntegration(control.db, tenant.id, bots.id, { role: "admin" });
+    expect(changed).toMatchObject({ name: "bots", role: "admin" });
+    expect(await getIntegration(control.db, tenant.id, "not-a-uuid")).toBeUndefined();
+    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(true);
+    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(false);
+    expect(await getIntegration(control.db, tenant.id, bots.id)).toBeUndefined();
+    expect(
+      await updateIntegration(control.db, tenant.id, bots.id, { role: "restricted" }),
+    ).toBeUndefined();
+    expect(
+      (await createIntegration(control.db, { tenantId: tenant.id, name: "bots", role: "admin" }))
+        .name,
+    ).toBe("bots");
+  });
+
+  it("never touches another tenant's integration", async () => {
+    await using control = await createTestControlDb();
+    const a = await insertTenant(control.db, newTenant("a"));
+    const b = await insertTenant(control.db, newTenant("b"));
+    const ai = await createIntegration(control.db, { tenantId: a.id, name: "x", role: "admin" });
+    expect(await getIntegration(control.db, b.id, ai.id)).toBeUndefined();
+    expect(await findIntegrationByName(control.db, b.id, "x")).toBeUndefined();
+    expect(
+      await updateIntegration(control.db, b.id, ai.id, { role: "restricted" }),
+    ).toBeUndefined();
+    expect(await archiveIntegration(control.db, b.id, ai.id)).toBe(false);
+    await expect(createApiKey(control.db, b.id, ai.id)).rejects.toBeInstanceOf(
+      IntegrationNotFoundError,
+    );
+    // and the schema refuses it too, whatever the query
+    await expect(
+      control.db.query(
+        "insert into api_keys (id, tenant_id, integration_id, key_hash) values ('000000000001', $1, $2, '\\x00')",
+        [b.id, ai.id],
+      ),
+    ).rejects.toThrow(/api_keys_integration_fk/);
+  });
+
+  it("authenticates with the integration's role; archiving revokes its keys and refuses new ones", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    const bots = await createIntegration(control.db, {
+      tenantId: tenant.id,
+      name: "bots",
+      role: "restricted",
+    });
+    const { key, secret } = await createApiKey(control.db, tenant.id, bots.id, "ci");
+    expect(key.integrationId).toBe(bots.id);
+    expect((await authenticateApiKey(control.db, secret))?.integration).toEqual({
+      id: bots.id,
+      name: "bots",
+      role: "restricted",
+    });
+    await updateIntegration(control.db, tenant.id, bots.id, { role: "admin" });
+    expect((await authenticateApiKey(control.db, secret))?.integration.role).toBe("admin");
+    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(true);
+    expect(await authenticateApiKey(control.db, secret)).toBeUndefined();
+    expect((await listApiKeys(control.db, tenant.id))[0]?.revokedAt).toBeInstanceOf(Date);
+    await expect(createApiKey(control.db, tenant.id, bots.id)).rejects.toBeInstanceOf(
+      IntegrationNotFoundError,
+    );
+  });
+
+  it("migration 0007 puts every existing key into an admin `default` integration of its tenant", async () => {
+    const database = await createTestDatabase();
+    const db = createControlDb(database.url, { max: 1 });
+    try {
+      const before = readMigrations([controlMigrationsDir]).filter(
+        (m) => m.name < "control-plane/0007",
+      );
+      expect(before.map((m) => m.name)).toContain("control-plane/0006_app_reads_sessions.sql");
+      await db.query(
+        "create table schema_migrations (name text primary key, applied_at timestamptz not null default now())",
+      );
+      for (const m of before) {
+        await db.query(m.sql);
+        await db.query("insert into schema_migrations (name) values ($1)", [m.name]);
+      }
+      const ids: string[] = [];
+      for (const name of ["a", "b"]) {
+        const { rows } = await db.query<{ id: string }>(
+          "insert into tenants (name, db_host, db_port, db_name, db_role) values ($1, 'h', 1, $1, $1) returning id",
+          [name],
+        );
+        ids.push(rows[0]?.id ?? "");
+      }
+      await db.query(
+        "insert into api_keys (id, tenant_id, key_hash) values ('aaaaaaaaaaa1', $1, '\\x00'), ('aaaaaaaaaaa2', $1, '\\x00'), ('bbbbbbbbbbb1', $2, '\\x00')",
+        ids,
+      );
+      expect(await migrate(db, [controlMigrationsDir])).toContain(
+        "control-plane/0007_integrations.sql",
+      );
+      for (const [index, tenantId] of ids.entries()) {
+        const integrations = await listIntegrations(db, tenantId);
+        expect(integrations).toMatchObject([{ name: "default", role: "admin" }]);
+        const keys = await listApiKeys(db, tenantId);
+        expect(keys).toHaveLength(index === 0 ? 2 : 1);
+        expect(keys.every((k) => k.integrationId === integrations[0]?.id)).toBe(true);
+      }
+    } finally {
+      await db.close();
+      await database.drop();
+    }
   });
 });
 
@@ -209,7 +360,7 @@ describe("the limited app role (what api and worker connect as)", () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
-    const { secret } = await createApiKey(control.db, tenant.id);
+    const { secret } = await keyFor(control.db, tenant.id);
     const box = createSecretBox([generateBoxKey()]);
     await storeTenantDbPassword(control.db, box, tenant.id, "tenant-db-password");
     const app = await asRole(control.url, "kerby_app");
@@ -239,6 +390,8 @@ describe("the limited app role (what api and worker connect as)", () => {
         "insert into tenants (name, db_host, db_port, db_name, db_role) values ('x', 'h', 1, 'd', 'r')",
         "update tenants set status = 'suspended'",
         "update api_keys set revoked_at = null",
+        "update integrations set role = 'admin'",
+        "insert into integrations (tenant_id, name, role) select id, 'x', 'admin' from tenants",
         "update api_keys set key_hash = '\\x00'",
         "delete from usage",
         "update audit_log set actor = 'x'",
@@ -277,10 +430,21 @@ describe("the console role", () => {
       expect((await readConsoleSession(role, token))?.tenantName).toBe("acme");
       await deleteConsoleSession(role, token);
       // keys: create, list, revoke; the new key works at the api
-      const { key, secret } = await createApiKey(role, tenant.id, "ci");
+      const { key, secret } = await keyFor(role, tenant.id, "ci");
       expect((await listApiKeys(role, tenant.id)).map((k) => k.label)).toEqual(["ci"]);
       expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(tenant.id);
       expect(await revokeApiKey(role, tenant.id, key.id)).toBe(true);
+      // integrations: create, rename, change role, archive
+      const bots = await createIntegration(role, {
+        tenantId: tenant.id,
+        name: "bots",
+        role: "restricted",
+      });
+      expect(
+        (await updateIntegration(role, tenant.id, bots.id, { name: "robots", role: "admin" }))
+          ?.role,
+      ).toBe("admin");
+      expect(await archiveIntegration(role, tenant.id, bots.id)).toBe(true);
       // model keys, and the audit trail of both
       await putModelKey(role, sealer, tenant.id, "anthropic", "sk-test-1234");
       expect((await listModelKeys(role, tenant.id)).map((k) => k.provider)).toEqual(["anthropic"]);
@@ -291,6 +455,9 @@ describe("the console role", () => {
         "select key_hash from api_keys",
         "update api_keys set key_hash = '\\x00'",
         "update api_keys set tenant_id = gen_random_uuid()",
+        "update api_keys set integration_id = gen_random_uuid()",
+        "update integrations set tenant_id = gen_random_uuid()",
+        "delete from integrations",
         "insert into console_users (tenant_id, email, password_hash) values (gen_random_uuid(), 'x', 'y')",
         "update console_users set password_hash = 'x'",
         "update console_users set tenant_id = gen_random_uuid()",

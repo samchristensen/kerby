@@ -7,6 +7,7 @@ import {
   revokeApiKey,
 } from "@kerby/control-plane";
 import { type ControlDeps, NotFoundError } from "../types/index.ts";
+import { keyIntegration } from "./integrations.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 const ACTOR = "operator";
@@ -15,14 +16,16 @@ export async function createKey(
   deps: ControlDeps,
   tenantId: string,
   label?: string,
+  integrationId?: string,
 ): Promise<CreatedKey> {
   await getTenantRecord(deps, tenantId);
-  const created = await createApiKey(deps.control, tenantId, label);
+  const integration = await keyIntegration(deps.control, tenantId, integrationId);
+  const created = await createApiKey(deps.control, tenantId, integration.id, label);
   await audit(deps.control, {
     tenantId,
     actor: ACTOR,
     action: "key.create",
-    detail: { keyId: created.key.id },
+    detail: { keyId: created.key.id, integrationId: integration.id },
   });
   return created;
 }
@@ -32,7 +35,10 @@ export async function listKeys(deps: ControlDeps, tenantId: string): Promise<Api
   return listApiKeys(deps.control, tenantId);
 }
 
-/** A new key, and the old one revoked in the same transaction: there is never a moment with neither. */
+/**
+ * A new key in the old key's integration, and the old one revoked in the same transaction: there is never a moment
+ * with neither, and access never moves with a key.
+ */
 export async function rotateKey(
   deps: ControlDeps,
   tenantId: string,
@@ -40,15 +46,20 @@ export async function rotateKey(
 ): Promise<CreatedKey> {
   await getTenantRecord(deps, tenantId);
   const created = await deps.control.transaction(async (tx) => {
-    if (!(await revokeApiKey(tx, tenantId, keyId)))
+    const old = (await listApiKeys(tx, tenantId)).find((key) => key.id === keyId);
+    if (!old || !(await revokeApiKey(tx, tenantId, keyId)))
       throw new NotFoundError(`key ${keyId} not found`);
-    return createApiKey(tx, tenantId, "rotated");
+    return createApiKey(tx, tenantId, old.integrationId, "rotated");
   });
   await audit(deps.control, {
     tenantId,
     actor: ACTOR,
     action: "key.rotate",
-    detail: { revokedKeyId: keyId, newKeyId: created.key.id },
+    detail: {
+      revokedKeyId: keyId,
+      newKeyId: created.key.id,
+      integrationId: created.key.integrationId,
+    },
   });
   return created;
 }

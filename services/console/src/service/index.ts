@@ -1,6 +1,7 @@
 import type { ConsoleDeps, ConsoleService } from "../types/index.ts";
 import { createAccounts } from "./accounts.ts";
 import { createChats } from "./chats.ts";
+import { createIntegrations } from "./integrations.ts";
 import { createStudio } from "./studio.ts";
 import { createWorkspace } from "./workspace.ts";
 
@@ -9,6 +10,7 @@ export function createConsoleService(deps: ConsoleDeps): ConsoleService {
   return {
     ...createAccounts(deps),
     ...createWorkspace(deps),
+    ...createIntegrations(deps),
     ...createChats(deps),
     ...createStudio(deps),
   };

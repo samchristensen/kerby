@@ -1,6 +1,7 @@
 import type {
   ConversationSummary,
   GetConversationResponse,
+  IntegrationRole,
   Judgment,
   Limits,
   PinnedPrompt,
@@ -88,11 +89,26 @@ export type SignedIn = { ok: true; token: string; expiresAt: string };
 
 export type ApiKeyView = {
   id: string;
+  integrationId: string;
   label: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
 };
+
+/** One of the tenant's live integrations (ADR 0019): a named client whose keys may do what its role allows. */
+export type IntegrationView = {
+  id: string;
+  name: string;
+  role: IntegrationRole;
+  createdAt: string;
+  updatedAt: string;
+  /** Keys not revoked. */
+  liveKeys: number;
+};
+
+/** An integration with its keys, newest first (revoked ones too, marked). */
+type IntegrationDetailView = IntegrationView & { keys: ApiKeyView[] };
 
 export type ProviderView = {
   /** As a model id spells it: `anthropic` in `anthropic/<model>`. */
@@ -168,10 +184,27 @@ export type ConsoleService = {
   /** The session for a cookie's token; undefined when it is unknown, expired, or its tenant is not active. */
   session(token: string): Promise<Session | undefined>;
   overview(session: Session): Promise<Overview>;
-  apiKeys(session: Session): Promise<ApiKeyView[]>;
-  /** `secret` is the whole key, shown once and never stored. */
+  /** The tenant's live integrations, by name. */
+  integrations(session: Session): Promise<IntegrationView[]>;
+  /** A live integration of the session's tenant with its keys; undefined for any other id. */
+  integration(session: Session, id: string): Promise<IntegrationDetailView | undefined>;
+  /** `name` and `role` (`admin` or `restricted`). */
+  createIntegration(
+    session: Session,
+    form: FormInput,
+  ): Promise<{ ok: true; integration: IntegrationView } | FormFailure>;
+  /** Rename it or change its role (`name`, `role`); a role change reaches the api within its auth cache window. */
+  updateIntegration(
+    session: Session,
+    id: string,
+    form: FormInput,
+  ): Promise<{ ok: true; integration: IntegrationView } | FormFailure>;
+  /** Archive a live integration and revoke its keys. False when the tenant has no such live integration. */
+  archiveIntegration(session: Session, id: string): Promise<boolean>;
+  /** A key in one of the tenant's live integrations; `secret` is the whole key, shown once and never stored. */
   createApiKey(
     session: Session,
+    integrationId: string,
     form: FormInput,
   ): Promise<{ ok: true; key: ApiKeyView; secret: string } | FormFailure>;
   /** False when the tenant has no such live key. */

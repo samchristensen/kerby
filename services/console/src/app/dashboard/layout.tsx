@@ -24,8 +24,8 @@ const nav = [
     icon: "M4 3.5h8l4 4V16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Zm8 0v4h4M6.5 11h7M6.5 14h4.5",
   },
   {
-    href: "/dashboard/api-keys",
-    label: "API keys",
+    href: "/dashboard/integrations",
+    label: "Integrations",
     exact: false,
     icon: "M12.5 3a4.5 4.5 0 1 1-4.3 5.8L3 14v3h3v-2h2v-2h1.2l.6-.6A4.5 4.5 0 0 1 12.5 3Zm1 3.5h.01",
   },

@@ -117,9 +117,10 @@ export default async function OverviewPage() {
                 </Link>
               </Step>
               <Step n={2} done={overview.activeApiKeys > 0} title="Create an API key">
-                API keys authenticate your calls to the tenant API.{" "}
+                API keys authenticate your calls to the tenant API; each belongs to an integration,
+                whose role decides what it may do.{" "}
                 <Link
-                  href="/dashboard/api-keys/new"
+                  href="/dashboard/integrations"
                   className="font-medium text-indigo-600 hover:text-indigo-500"
                 >
                   Create a key →
