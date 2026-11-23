@@ -323,6 +323,10 @@ Production (2026-11-22): a Slack app with an incoming webhook into the alerts ch
 - Do not replace `TENANT_DB_KEYS` in one step on a live system: add the new key first (Secrets, above).
 - Do not give `control` a public domain, or the console the operator token or the administrative database URL.
 - Do not delete `production` or its Postgres volume: backups belong to the volume.
+- Do not push a new service's first image to GHCR by hand (for a trial environment, say): the package is then created
+  without a link to the repository, and CI's pushes to it are refused (`denied: permission_denied: read_package`). Let
+  CI's `images` job create it. If it happened: delete the package (`gh api -X DELETE
+  /users/samchristensen/packages/container/kerby-<service>`) and re-run the failed jobs.
 
 ## Known gaps
 
