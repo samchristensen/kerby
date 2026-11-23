@@ -372,9 +372,8 @@ describe("through the egress guard", () => {
 });
 
 describe("a misbehaving server", () => {
-  let raw: Server;
   async function serve(route: (req: IncomingMessage, res: ServerResponse, body: string) => void) {
-    raw = createServer(async (req, res) => {
+    const raw: Server = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       route(req, res, Buffer.concat(chunks).toString());
@@ -507,5 +506,135 @@ describe("a misbehaving server", () => {
     const error = await mcpRejection(session(url).listTools(signal()));
     expect(error).toMatchObject({ kind: "http", status: 400 });
     expect(error.message).toContain("neither 2026-07-28 (HTTP 400) nor initialize");
+  });
+
+  it("stops a listing past its tool limit as soon as it is past, without reading further pages", async () => {
+    const tools = ["a", "b", "c", "d", "e"].map((name) => ({ name }));
+    const server = await fixture({ mode: "stateless", tools, pageSize: 2 });
+    const error = await mcpRejection(
+      session(server.url).listTools(signal(), { maxTools: 3, maxBytes: 1024 * 1024 }),
+    );
+    expect(error).toMatchObject({ kind: "protocol" });
+    expect(error.message).toContain("more than 3 tools");
+    expect(server.requests.filter((request) => request.method === "tools/list")).toHaveLength(2);
+  });
+
+  it("stops a listing past its byte limit across pages, and inside one page", async () => {
+    const tools = Array.from({ length: 10 }, (_, index) => ({
+      name: `t${index}`,
+      description: "d".repeat(10_000),
+    }));
+    const server = await fixture({ mode: "stateless", tools, pageSize: 1 });
+    const error = await mcpRejection(
+      session(server.url).listTools(signal(), { maxTools: 200, maxBytes: 25_000 }),
+    );
+    expect(error).toMatchObject({ kind: "protocol" });
+    expect(error.message).toContain("over 25000 bytes");
+    expect(server.requests.filter((request) => request.method === "tools/list")).toHaveLength(3);
+
+    // One page of 2 MB: refused while it arrives.
+    const url = await serve((_req, res, body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      const result = {
+        tools: [{ name: "big", description: "x".repeat(2 * 1024 * 1024), inputSchema: {} }],
+      };
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: idOf(body), result }));
+    });
+    const big = await mcpRejection(
+      session(url).listTools(signal(), { maxTools: 200, maxBytes: 1024 * 1024 }),
+    );
+    expect(big.message).toContain(`over ${1024 * 1024} bytes`);
+    expect((await session(url).listTools(signal())).map((tool) => tool.name)).toEqual(["big"]);
+  });
+
+  it("never follows a redirect, which would take the credential to another origin", async () => {
+    const elsewhere: { headers: IncomingMessage["headers"] }[] = [];
+    const target = await serve((req, res, body) => {
+      elsewhere.push({ headers: req.headers });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: idOf(body), result: { tools: [] } }));
+    });
+    const url = await serve((_req, res) => {
+      res.writeHead(307, { location: target }).end();
+    });
+    for (const fetcher of [fetch, createEgressFetch({ blockedRanges: [] })]) {
+      const client = openMcpSession({
+        url,
+        fetch: fetcher,
+        clientInfo,
+        headers: { "X-Api-Key": SECRET },
+      });
+      cleanups.push(() => client.close());
+      const error = await mcpRejection(client.callTool("t", {}, { callId: "c", signal: signal() }));
+      expect(error).toMatchObject({ kind: "http", status: 307 });
+      expect(error.message).toContain(`redirected to ${new URL(target).origin}`);
+      expect(error.message).toContain("register that URL instead");
+    }
+    expect(elsewhere).toEqual([]);
+  });
+
+  it("tells a failure about the call's own response from one before it was sent", async () => {
+    // A malformed tools/call result, and a gateway's 502, answer the call itself: it may have run.
+    const malformed = await serve((_req, res, body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: idOf(body), result: { content: "no" } }));
+    });
+    expect(
+      await mcpRejection(session(malformed).callTool("t", {}, { callId: "c", signal: signal() })),
+    ).toMatchObject({ kind: "protocol", afterResponse: true });
+    const ended = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(": nothing\n\n");
+    });
+    expect(
+      await mcpRejection(session(ended).callTool("t", {}, { callId: "c", signal: signal() })),
+    ).toMatchObject({ kind: "protocol", afterResponse: true });
+    const gateway = await serve((_req, res) => {
+      res.writeHead(502, { "content-type": "text/plain" }).end("bad gateway");
+    });
+    expect(
+      await mcpRejection(session(gateway).callTool("t", {}, { callId: "c", signal: signal() })),
+    ).toMatchObject({ kind: "http", status: 502, afterResponse: true });
+
+    // A handshake server whose initialize is malformed never got the call.
+    const handshake = await serve((_req, res, body) => {
+      const method = JSON.parse(body).method;
+      if (method === "initialize") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: idOf(body), result: { protocolVersion: 7 } }));
+      } else res.writeHead(400, { "content-type": "text/plain" }).end("initialize first");
+    });
+    expect(
+      await mcpRejection(session(handshake).callTool("t", {}, { callId: "c", signal: signal() })),
+    ).toMatchObject({ kind: "protocol", afterResponse: false });
+  });
+
+  it("quotes at most 2 000 characters of a server's error message or echoed id", async () => {
+    const long = "e".repeat(50_000);
+    const rpc = await serve((_req, res, body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({ jsonrpc: "2.0", id: idOf(body), error: { code: -1, message: long } }),
+      );
+    });
+    const error = await mcpRejection(session(rpc).listTools(signal()));
+    expect(error).toMatchObject({ kind: "rpc", code: -1 });
+    expect(error.message.length).toBeLessThan(2_100);
+    const wrongId = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: long, result: { tools: [] } }));
+    });
+    const echoed = await mcpRejection(session(wrongId).listTools(signal()));
+    expect(echoed).toMatchObject({ kind: "protocol" });
+    expect(echoed.message.length).toBeLessThan(2_200);
+  });
+
+  it("scrubs the token of a scheme-prefixed credential when the server echoes it alone", async () => {
+    const url = await serve((_req, res) => {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end(`token ${SECRET.slice("Bearer ".length)} is no good`);
+    });
+    const error = await mcpRejection(session(url, { Authorization: SECRET }).listTools(signal()));
+    expect(error.message).toContain("token [redacted] is no good");
   });
 });

@@ -1,3 +1,6 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createEgressFetch } from "@kerby/egress";
 import { describe, expect, it } from "vitest";
 import {
@@ -154,6 +157,45 @@ describe("OAuth (MCP authorization)", () => {
       /does not support PKCE with S256/,
     );
     await expect(discoverOAuth({ url: server.mcp.url, fetch })).rejects.toThrow(/must use https/);
+  });
+
+  it("follows no redirect while discovering, like token and registration requests", async () => {
+    const paths: string[] = [];
+    const server = createServer((req, res) => {
+      paths.push(req.url ?? "");
+      if (req.url === "/moved")
+        res
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ resource: `${base}/mcp`, authorization_servers: [base] }));
+      else if (req.url?.startsWith("/.well-known/"))
+        res.writeHead(302, { location: "/moved" }).end();
+      else res.writeHead(401).end();
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      await expect(
+        discoverOAuth({ url: `${base}/mcp`, fetch, insecure: loopback }),
+      ).rejects.toThrow(/publishes no OAuth protected resource metadata/);
+      expect(paths).not.toContain("/moved");
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("says a host is not public without naming the private address it resolves to", async () => {
+    const guarded = createEgressFetch({
+      resolve: async () => [{ address: "10.20.30.40", family: 4 }],
+    });
+    const error = await discoverOAuth({
+      url: "https://internal.example/mcp",
+      fetch: guarded,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(OAuthError);
+    expect((error as OAuthError).message).toContain("internal.example is not a public address");
+    expect((error as OAuthError).message).not.toContain("10.20.30.40");
   });
 
   it("applies RFC 9207's issuer table", () => {

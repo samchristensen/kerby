@@ -105,7 +105,12 @@ async function send(
   try {
     return await fetch(url, init);
   } catch (error) {
-    throw new OAuthError(`${doing} at ${hostOf(url)} failed: ${why(error)}`);
+    // An egress refusal of a private address names the address the host resolved to: the tenant reads the host only.
+    const failed =
+      error instanceof Error && "reason" in error && error.reason === "blocked_address"
+        ? `${hostOf(url)} is not a public address`
+        : why(error);
+    throw new OAuthError(`${doing} at ${hostOf(url)} failed: ${failed}`);
   }
 }
 
@@ -273,7 +278,8 @@ export async function discoverOAuth(options: {
     const response = await send(
       fetch,
       candidate,
-      init({ headers: { accept: "application/json" } }),
+      // Never followed: a metadata document lives at its own well-known URL (an answer elsewhere is no answer).
+      init({ redirect: "manual", headers: { accept: "application/json" } }),
       "reading the MCP server's protected resource metadata",
     );
     const body = response.ok
@@ -306,7 +312,7 @@ export async function discoverOAuth(options: {
     const response = await send(
       fetch,
       candidate,
-      init({ headers: { accept: "application/json" } }),
+      init({ redirect: "manual", headers: { accept: "application/json" } }),
       "reading the authorization server's metadata",
     );
     const body = response.ok
