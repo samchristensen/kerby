@@ -184,6 +184,9 @@ importers:
       '@kerby/durable':
         specifier: workspace:*
         version: link:../durable
+      '@kerby/events':
+        specifier: workspace:*
+        version: link:../events
       '@kerby/observability':
         specifier: workspace:*
         version: link:../observability
@@ -209,6 +212,21 @@ importers:
       '@types/pg':
         specifier: 'catalog:'
         version: 8.23.1
+
+  packages/delivery:
+    dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/delivery-webhook:
+    dependencies:
+      '@kerby/delivery':
+        specifier: workspace:*
+        version: link:../delivery
+      '@kerby/egress':
+        specifier: workspace:*
+        version: link:../egress
 
   packages/durable:
     dependencies:
@@ -237,6 +255,18 @@ importers:
       zod:
         specifier: 'catalog:'
         version: 4.6.7
+
+  packages/events:
+    dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
 
   packages/judgment: {}
 
@@ -287,6 +317,9 @@ importers:
       '@kerby/agent':
         specifier: workspace:*
         version: link:../agent
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@kerby/db':
         specifier: workspace:*
         version: link:../db
@@ -329,12 +362,24 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@kerby/delivery':
+        specifier: workspace:*
+        version: link:../../packages/delivery
+      '@kerby/delivery-webhook':
+        specifier: workspace:*
+        version: link:../../packages/delivery-webhook
       '@kerby/durable':
         specifier: workspace:*
         version: link:../../packages/durable
+      '@kerby/egress':
+        specifier: workspace:*
+        version: link:../../packages/egress
       '@kerby/embeddings-openai':
         specifier: workspace:*
         version: link:../../packages/embeddings-openai
+      '@kerby/events':
+        specifier: workspace:*
+        version: link:../../packages/events
       '@kerby/judgment-systemone':
         specifier: workspace:*
         version: link:../../packages/judgment-systemone
@@ -447,6 +492,12 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@kerby/durable':
+        specifier: workspace:*
+        version: link:../../packages/durable
+      '@kerby/events':
+        specifier: workspace:*
+        version: link:../../packages/events
       '@kerby/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -459,6 +510,52 @@ importers:
       zod:
         specifier: 'catalog:'
         version: 4.6.7
+
+  services/dispatcher:
+    dependencies:
+      '@kerby/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kerby/control-plane':
+        specifier: workspace:*
+        version: link:../../packages/control-plane
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@kerby/delivery':
+        specifier: workspace:*
+        version: link:../../packages/delivery
+      '@kerby/delivery-webhook':
+        specifier: workspace:*
+        version: link:../../packages/delivery-webhook
+      '@kerby/durable':
+        specifier: workspace:*
+        version: link:../../packages/durable
+      '@kerby/egress':
+        specifier: workspace:*
+        version: link:../../packages/egress
+      '@kerby/events':
+        specifier: workspace:*
+        version: link:../../packages/events
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secrets
+      '@kerby/serve':
+        specifier: workspace:*
+        version: link:../../packages/serve
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@kerby/conversations':
+        specifier: workspace:*
+        version: link:../../packages/conversations
 
   services/worker:
     dependencies:
@@ -492,6 +589,9 @@ importers:
       '@kerby/embeddings-openai':
         specifier: workspace:*
         version: link:../../packages/embeddings-openai
+      '@kerby/events':
+        specifier: workspace:*
+        version: link:../../packages/events
       '@kerby/judgment':
         specifier: workspace:*
         version: link:../../packages/judgment

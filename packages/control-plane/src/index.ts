@@ -26,11 +26,23 @@ export {
   storeTenantDbPassword,
 } from "./db-credentials.ts";
 export {
+  createIntegration,
+  deleteIntegration,
+  ensureDefaultIntegration,
+  getIntegration,
+  IntegrationNameTakenError,
+  type IntegrationRecord,
+  listIntegrations,
+  setIntegrationScopes,
+} from "./integrations.ts";
+export {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   authenticateApiKey,
   type CreatedKey,
   createApiKey,
   listApiKeys,
+  MAX_API_KEYS_PER_TENANT,
   parseApiKey,
   revokeApiKey,
 } from "./keys.ts";
@@ -45,6 +57,33 @@ export {
   readModelKey,
 } from "./secrets.ts";
 export {
+  allowEmails,
+  disallowEmail,
+  isSignupAllowed,
+  listAllowedEmails,
+  setConsoleAdmin,
+} from "./signup-allowlist.ts";
+export {
+  type DeliverableSubscription,
+  deleteSubscription,
+  disableSubscription,
+  getSubscription,
+  hasSubscriptions,
+  insertSubscription,
+  listDeletedSubscriptions,
+  listDeliverableSubscriptions,
+  listSubscriptions,
+  listTenantsWithSubscriptions,
+  openSubscriptionForDelivery,
+  purgeSubscription,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
+  rotateSubscriptionSecret,
+  SubscriptionLimitError,
+  type SubscriptionRecord,
+  updateSubscription,
+} from "./subscriptions.ts";
+export {
   deleteTenantRow,
   getTenant,
   insertTenant,
@@ -55,3 +94,9 @@ export {
   type TenantRecord,
 } from "./tenants.ts";
 export { recordUsage } from "./usage.ts";
+export {
+  hintTenantWork,
+  listDueTenants,
+  readWakeupVersion,
+  settleTenantWakeup,
+} from "./wakeups.ts";

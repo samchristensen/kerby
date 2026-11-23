@@ -1,4 +1,4 @@
-// Chat search (ADR 0019): `POST /v1/search` and `GET|PUT /v1/search/settings` on the tenant API.
+// Chat search (ADR 0021): `POST /v1/search` and `GET|PUT /v1/search/settings` on the tenant API.
 import { z } from "zod";
 
 /** The most hits one search returns. */

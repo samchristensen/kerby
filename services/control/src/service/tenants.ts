@@ -4,6 +4,7 @@ import {
   audit,
   createApiKey,
   deleteTenantRow,
+  ensureDefaultIntegration,
   getTenant,
   insertTenant,
   listTenants,
@@ -74,7 +75,8 @@ export async function provisionTenant(
     // The copy may predate the newest migrations: catch up, as the tenant's own role.
     await pools.use(tenant.id, (db) => migrate(db, tenantMigrationDirs));
     await setSchemaVersion(control, tenant.id, currentSchemaVersion());
-    const key = await createApiKey(control, tenant.id, "initial");
+    const integration = await ensureDefaultIntegration(control, tenant.id);
+    const key = await createApiKey(control, tenant.id, integration.id, "initial");
     const active = await setTenantStatus(control, tenant.id, "active");
     await audit(control, {
       tenantId: tenant.id,
@@ -129,9 +131,9 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
 }
 
 /**
- * Delete: refuse new work, drop the database and role, delete the object prefix, purge keys, secrets and the console's
- * people and sessions. Every step is safe to repeat, so a failed delete is retried by calling it again. The row stays,
- * status `deleted`.
+ * Delete: refuse new work, drop the database and role, delete the object prefix, purge subscriptions, keys,
+ * integrations, secrets, the console's people and sessions, and the workers' wake-up hint. Every step is safe to repeat,
+ * so a failed delete is retried by calling it again. The row stays, status `deleted`.
  */
 export async function deleteTenant(deps: ControlDeps, id: string): Promise<void> {
   const { control, cluster, buckets, pools } = deps;
@@ -143,11 +145,15 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
   await cluster.dropRole(tenant.dbRole);
   const objects = await buckets.primary.deletePrefix(tenantPrefix(id));
   await control.transaction(async (tx) => {
-    await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_sessions where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_users where tenant_id::text = $1", [id]);
+    // Foreign-key order: subscriptions and keys reference integrations.
+    await tx.query("delete from subscriptions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from api_keys where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from integrations where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_secrets where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_db_credentials where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_sessions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_users where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_wakeups where tenant_id = $1", [tenant.id]);
     await setTenantStatus(tx, id, "deleted");
   });
   await audit(control, {

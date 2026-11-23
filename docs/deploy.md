@@ -8,18 +8,19 @@ deployed and smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 One Railway project, `kerby`. Per environment (`production` is the standing one):
 
-| Service                | What                                                                                                                           | Reachable from                                                                     |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                           | the other services, privately                                                      |
-| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                   | the other services, by endpoint and keys                                           |
-| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                      | `control` only, by its keys; presigned URLs                                        |
-| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                   | `control` only, by its keys                                                        |
-| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                              | `railway ssh --service control`; the console, privately, on its sign-up route only |
-| `api`                  | tenant API (`:8080`), public Railway domain; listens on `::` for the private network                                           | the internet; the console, privately, with a person's session token                |
-| `worker`               | runs turns, health on `:8082`, no public domain                                                                                | nothing                                                                            |
-| `console`              | tenant console (`:3000`): sign-up, sign-in, API keys, model keys, chat ([ADR 0014](adr/0014-tenant-console.md)); public domain | the internet                                                                       |
+| Service                | What                                                                                                                                                             | Reachable from                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                                                             | the other services, privately                                                      |
+| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                                                     | the other services, by endpoint and keys                                           |
+| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                                                        | `control` only, by its keys; presigned URLs                                        |
+| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                                                     | `control` only, by its keys                                                        |
+| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                                                                | `railway ssh --service control`; the console, privately, on its sign-up route only |
+| `api`                  | tenant API (`:8080`), public Railway domain; listens on `::` for the private network                                                                             | the internet; the console, privately, with a person's session token                |
+| `worker`               | runs turns, health on `:8082`, no public domain                                                                                                                  | nothing                                                                            |
+| `dispatcher`           | pushes events to subscriptions ([ADR 0019](adr/0019-events-and-delivery.md)), health on `:8083`, no public domain; posts to the internet                         | nothing                                                                            |
+| `console`              | tenant console (`:3000`): sign-up, sign-in, integrations and their keys, subscriptions, model keys, chat ([ADR 0014](adr/0014-tenant-console.md)); public domain | the internet                                                                       |
 
-`control`, `api`, `worker` and `console` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
+`control`, `api`, `worker`, `dispatcher` and `console` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
 (`ghcr.io/samchristensen/kerby-<name>`); Railway builds nothing. Each environment runs the tag named after it
 (`kerby-api:production`); a release moves that tag. Services are health-checked on `/healthz`. Postgres is reached at
 `postgres.railway.internal` on the private network, without TLS.
@@ -49,7 +50,10 @@ pair once: the private key is `SECRETS_PRIVATE_KEYS` on `worker`, the public hal
 the private key from `worker`: every stored tenant key is sealed to it. Its copy outside Railway is the operator's macOS
 login keychain item `kerby SECRETS_PRIVATE_KEYS` (account `kerby-production`); keep a second copy in a password manager.
 Check a copy is the live key: `publicKeyOf(copy)` from `@kerby/secrets` must equal `api`'s `SECRETS_PUBLIC_KEY`. After
-a key rotation (ADR 0008), update the copy.
+a key rotation (ADR 0008), update the copy. It also makes a delivery secrets key pair once ([ADR 0019](adr/0019-events-and-delivery.md)):
+`DELIVERY_SECRETS_PRIVATE_KEYS` on `dispatcher`, `DELIVERY_SECRETS_PUBLIC_KEY` on `api`. Every subscription's signing secret
+is sealed to it: lose the private key and every subscription must have its secret rotated (`POST /v1/subscriptions/:id/secret`)
+and its receiver updated, so keep a copy beside the other (keychain item `kerby DELIVERY_SECRETS_PRIVATE_KEYS`).
 
 The api's and the console's addresses are in `railway service list --json` (`url`). A custom domain: add
 `domains: ["api.example.com"]` to the service in `.railway/railway.ts` and apply, then add the DNS records Railway prints.
@@ -72,21 +76,42 @@ console.log(r.status, await r.text());'
 
 `limits` is optional: an absent key takes the default (`maxConcurrentTurns` 4, `requestsPerMinute` 600 per api
 process, `storageBytes` 1 GiB; ARCHITECTURE.md#tenancy). The response holds the tenant's API key once. Then
-`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. Tenant migrations fan out to every
-tenant database during a release: `scripts/railway.ts deploy` calls `POST /v1/operator/migrate` inside the control
-container after control rolls out and before the api, worker and console do, and stops the release if any tenant fails, so a
-release that adds one needs no manual step. Run the call yourself (as above) to retry a failed tenant (the `migration
-fan-out failed` alert). Code must tolerate schema versions n and n-1 while it runs.
+`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. Migrations run as control's release
+command (Railway's pre-deploy command, `node services/control/src/index.ts migrate`, set in `.railway/railway.ts`): with
+the new image and control's variables it migrates the control database and fans the tenant migrations out to every tenant
+database, before the new control starts. A tenant that fails fails the command, Railway keeps the previous control running,
+and `scripts/railway.ts deploy` stops before the api, worker and console move, so a release that adds a migration needs no
+manual step and CI needs no SSH key. Call `POST /v1/operator/migrate` yourself (as above) to retry a failed tenant (the
+`migration fan-out failed` alert). Code must tolerate schema versions n and n-1 while it runs.
 
 ## The console
 
-People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)): each sign-up provisions a tenant exactly
+People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)), but only with an email on the allowlist
+(`signup_allowlist`; anything else is refused before a tenant is made). Each sign-up provisions a tenant exactly
 as `POST /v1/operator/tenants` does (audited with actor `console`, default limits) and stores its first person, who sees
 the tenant's first API key once. An operator can still provision by hand; such a tenant has no person and cannot be
 signed in to. Suspending or deleting a tenant ends its console sessions at once (deleting also removes its people).
+
+**Admins and the allowlist.** The release that added the list put every existing account's email on it. An admin edits it
+in the console under Sign-ups (`/dashboard/admin`). The first admin is made by the operator, inside the control container
+as above (the email must already have an account; `admin: false` undoes it; each call is audited):
+
+```sh
+railway ssh --service control -- node --input-type=module -e '
+const r = await fetch("http://127.0.0.1:8081/v1/operator/console-admins", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
+  body: JSON.stringify({ email: "you@example.com", admin: true }),
+});
+console.log(r.status, await r.text());'
+```
+
+The console's own database role can read the flag and never write it. Removing an address from the list stops a future
+sign-up; it does not delete or lock an account that exists.
+
 Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-ins per address and per account
-(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. There is no email
-verification, password reset or second person per tenant yet (tech debt). To see who signed up:
+(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. A tenant holds at most 50
+live API keys. There is no email verification, password reset or second person per tenant yet (tech debt). To see who signed up:
 `select email, tenant_id, created_at, last_login_at from console_users order by created_at` (psql below).
 
 ## Judgments
@@ -106,12 +131,13 @@ in the conversation's `lastError`. There is no alert; judgments `failed` after f
 
 ## Chat search
 
-[ADR 0019](adr/0019-chat-search.md). Every tenant database holds a search index of its chats (`search_chunks`), built by
-the worker after each turn on the Absurd queue `index` and queried with `POST /v1/search` (or the console's chat list).
-Keyword search needs nothing. Semantic search needs an embedding model (`PUT /v1/search/settings`, or the console's Search
-page) and the tenant's key for its provider (`openai`, `google`, `mistral`, `fireworks`, `openrouter`: the same key as for
-chat), so the worker needs outbound HTTPS to those providers too. Setting a model starts a backfill that re-embeds every
-chat; `GET /v1/search/settings` shows `chunks`, `embedded` and the last refusal (`lastError`, e.g. a key that was removed).
+[ADR 0021](adr/0021-chat-search.md). Every tenant database holds a search index of its chats (`search_chunks`), built by
+the worker after each turn on the Absurd queue `index` and queried with `POST /v1/search` (scope `conversations`; a key
+without `tenant` finds only its integration's chats) or the console's chat list. Keyword search needs nothing. Semantic
+search needs an embedding model (`PUT /v1/search/settings`, scope `admin`, or the console's Search page) and the
+tenant's key for its provider (`openai`, `google`, `mistral`, `fireworks`, `openrouter`: the same key as for chat), so
+the worker needs outbound HTTPS to those providers too. Setting a model starts a backfill that re-embeds every chat;
+`GET /v1/search/settings` shows `chunks`, `embedded` and the last refusal (`lastError`, e.g. a key that was removed).
 The worker runs indexing and searches in their own lanes (`MAX_RUNNING_INDEX_TASKS`, default 2, one per tenant;
 `MAX_RUNNING_SEARCHES`, default 4, four per tenant), never in a turn's slot. Usage lands in `usage` as the embedding model
 (`embed:...` and `search:...` dedupe keys). Stuck or failed indexing: `select task_name, state, count(*) from absurd.t_index
@@ -120,9 +146,26 @@ scratch with `delete from search_progress where conversation_id = ...` and `dele
 any new turn (or a model change) indexes it again.
 
 `vector` (pgvector, in Railway's `postgres-ssl:18` image) is not a trusted extension: the template gets it from control's
-superuser migration, and `POST /v1/operator/migrate` installs it in each tenant database as the cluster admin before the
-tenant migrations run. A tenant migrated any other way fails at `search/0001_search.sql` with `permission denied to
-create extension "vector"`: run the operator migrate.
+superuser migration, and the release's migrate (control's pre-deploy command, or `POST /v1/operator/migrate`) installs it
+in each tenant database as the cluster admin before the tenant migrations run. A tenant migrated any other way fails at
+`search/0001_search.sql` with `permission denied to create extension "vector"`: run the operator migrate.
+
+## Events and webhooks
+
+[ADR 0019](adr/0019-events-and-delivery.md), [ADR 0020](adr/0020-integrations-and-scopes.md). Every tenant starts with a
+`default` integration holding every scope; its first key belongs to it, and so does a key an operator makes without naming
+an integration (`POST /v1/operator/tenants/<id>/keys` takes `{ label?, integrationId? }`). People make further
+integrations, their keys and their subscriptions in the console. A key polls with `GET /v1/events` (scope `events`); a
+subscription is pushed by `dispatcher`, which needs outbound HTTPS to the whole internet (every request goes through the
+egress guard, ADR 0010). `ALLOW_LOCAL_DESTINATIONS` (plain http and private addresses) is refused outside development:
+never set it on Railway. A tenant may hold `limits.subscriptions` subscriptions (default 10, the api's
+`DEFAULT_SUBSCRIPTIONS`) and run `limits.concurrentDeliveries` deliveries at once (default 4); the dispatcher runs at most
+`MAX_RUNNING_DELIVERIES` (20) across tenants and scales with replicas. A delivery that keeps failing is retried 20 times
+over about two and a half days; a subscription failing for 48 hours, or answered 410, is disabled, which the tenant sees
+in the console and fixes by re-enabling it. That is the tenant's business, so there is no alert. Logs name the
+subscription and the outcome, never the URL or the body: `make logs-query SERVICE=dispatcher TENANT=<id>`. Each tenant's
+delivery log is `select * from delivery_attempts order by id desc` in its database. Control's nightly job deletes events
+and attempts older than 30 days and Absurd's finished tasks past their queue's TTL.
 
 ## Export a tenant
 
@@ -184,12 +227,12 @@ deleted by `make`. CI does not make these: its token is scoped to `production` a
 
 ## Releasing
 
-A merge to `main` is a release. CI (`.github/workflows/ci.yml`) runs `check` and `test`, builds the four images and pushes
+A merge to `main` is a release. CI (`.github/workflows/ci.yml`) runs `check` and `test`, builds the five images and pushes
 them as `sha-<commit>`, then the `release` job: `railway config apply --yes` on production (a deletion fails here: review
 it with `make railway-plan` and run `railway config apply` yourself), `scripts/railway.ts secrets` and `domains` (a secret
 or public service the IaC file just added is created once, never replaced), `scripts/railway.ts registry`, and
 `scripts/railway.ts deploy production sha-<commit>`, which moves each service's `production` tag and redeploys control,
-then api, worker and console, waiting for each. When the IaC file adds a service, `config apply` creates it pointing at
+then api, worker, dispatcher and console, waiting for each. When the IaC file adds a service, `config apply` creates it pointing at
 an image tag that does not exist yet, so its first deployment fails (and the project webhook reports it) until `deploy`
 moves the tag a minute later. Pull requests show the IaC plan in the `railway-plan` check. If a deployment fails,
 read why with `railway logs --service <name>`; roll back with `make deploy TAG=sha-<previous commit>`.
@@ -241,31 +284,36 @@ on purpose: a generated value there would be made again on every apply.
 
 ## Postgres
 
-- `max_connections` must be 500 (the template starts at 100). Set it once per environment, then restart Postgres (a
+- `max_connections` must be 550 (the template starts at 100). Set it once per environment, then restart Postgres (a
   restart drops every connection for a few seconds; the services reconnect):
 
   ```sh
-  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -c "alter system set max_connections = 500"'
+  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -c "alter system set max_connections = 550"'
   railway restart --service Postgres --yes
-  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -tAc "show max_connections"'   # 500
+  railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -tAc "show max_connections"'   # 550
   ```
+
+  `railway restart` may not return even though Postgres restarted: check `select pg_postmaster_start_time()` through the
+  same `railway ssh` instead of waiting on it.
 
   `ALTER SYSTEM` writes `postgresql.auto.conf` on the volume, so the value survives restarts and redeploys. Neither the
   template nor `railway postgres` (only `pitr`, `ha`, `pgbouncer`) has a setting for it, and a custom start command
   (`-c max_connections=...`) would make the database ours to manage instead of Railway's. A new environment
-  (`ENV=pr-123`) gets its own volume: check `show max_connections` there and run the same two commands if it says 100.
+  (`ENV=pr-123`) gets its own volume: check `show max_connections` there and run the same two commands if it says less.
 - **Connection budget.** Every process opens at most (upper bounds, from the code's defaults):
 
-  | Process | Connections                                     | Terms                                                                                                                                                                                                                                                                                                                                                    |
-  | ------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | api     | `2 × max(maxPools, D + R) + D + 10`             | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                                                                                                                        |
-  | worker  | `2 × max(maxPools, min(C + I + S, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50), `I` index tasks (`MAX_RUNNING_INDEX_TASKS`, 2) and `S` searches (`MAX_RUNNING_SEARCHES`, 4); `W` tenants with a task running or being claimed here, each holding its pool for as long as it does, so at most `C + I + S`; the control pool; one `LISTEN` on the control database |
-  | control | `2 × maxPools + 10 + 2 + 1`                     | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                                                                                                                                 |
-  | console | `5`                                             | the control pool, as `kerby_console`; the console opens no tenant database                                                                                                                                                                                                                                                                               |
+  | Process    | Connections                                     | Terms                                                                                                                                                                                                                                                                                                                                                    |
+  | ---------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | api        | `2 × max(maxPools, D + R) + D + 10`             | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                                                                                                                        |
+  | worker     | `2 × max(maxPools, min(C + I + S, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50), `I` index tasks (`MAX_RUNNING_INDEX_TASKS`, 2) and `S` searches (`MAX_RUNNING_SEARCHES`, 4); `W` tenants with a task running or being claimed here, each holding its pool for as long as it does, so at most `C + I + S`; the control pool; one `LISTEN` on the control database |
+  | control    | `2 × maxPools + 10 + 2 + 1`                     | tenant pools (migration fan-out, exports, nightly retention); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                                                                                                              |
+  | dispatcher | `2 × 20 + 5 + 1`                                | at most 20 tenant pools of 2 (`MAX_RUNNING_DELIVERIES` 20, and fan-out holds one tenant's pool at a time); a control pool of 5; one `LISTEN` on the control database                                                                                                                                                                                     |
+  | console    | `5`                                             | the control pool, as `kerby_console`; the console opens no tenant database                                                                                                                                                                                                                                                                               |
 
   The sum over all processes, plus `superuser_reserved_connections` (3) and room for operators' `psql` (say 17), must
-  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 123 + control 113 + console 5 +
-  20 = 471 of 500. Each extra worker adds 123 and each extra api 210: raise `max_connections` by as much first (and
+  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 123 + control 113 + dispatcher
+  46 + console 5 + 20 = 517 of 550 (500 sufficed before the dispatcher). Each extra worker adds 123, each extra dispatcher
+  46 and each extra api 210: raise `max_connections` by as much first (and
   `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api. The worker's 123 holds at
   its caps (50 + 2 + 4) however many tenants run at once: past a cap a worker claims nothing more on that lane and queues
   the tenants that ask, longest-waiting first. Raising a cap costs 2 connections per extra tenant, up to
@@ -279,14 +327,25 @@ on purpose: a generated value there would be made again on every apply.
 - **Caps**, set from those numbers: `MAX_STREAMS_PER_PROCESS` 60 (503 `server_busy` past it) keeps one api process's
   worst case at 210; `MAX_STREAMS_PER_TENANT` 15 (429 `too_many_streams`), a quarter of that, so one tenant cannot take
   a whole process (its own streams cost nothing more); `TENANT_ROLE_CONNECTION_LIMIT` 20 per tenant role, from 3 per api
-  process, 2 per worker and 3 from control (pool and `pg_dump`): enough for 3 api and 4 workers, or 4 api and 2. A role
-  made before a change gets the new limit at the next `POST /v1/operator/migrate`.
+  process, 2 per worker, 2 per dispatcher and 3 from control (pool and `pg_dump`): enough for 3 api, 2 workers and 1
+  dispatcher, or 2 of each. A role made before a change gets the new limit at the next `POST /v1/operator/migrate`.
 - **PgBouncer** (`railway postgres pgbouncer`) is not used. Transaction pooling breaks `LISTEN`, which event streams and
   the worker's scheduler rely on, and Railway repoints every service referencing the database's variables to the
   pooler; session pooling saves nothing, since Kerby's connections are long-lived pools already; and PgBouncer pools per
   user and database, which is per tenant here. Revisit when the budget outgrows one Postgres's memory: transaction
   pooling for tenant pools only, with `LISTEN` and control on `DATABASE_UNPOOLED_URL`.
 - About 1 GiB of memory per 200 tenant databases was measured locally.
+- **`NOTIFY` is sent outside writing transactions.** Postgres commits every transaction that sent a `NOTIFY` under one
+  lock for the whole cluster, held through the commit's WAL flush, so a `NOTIFY` inside a write makes every tenant's
+  writes flush one at a time. Measured on Postgres 18 (`pgbench`, 32 clients, local Docker): inserts that also notify in
+  the same transaction 9.2k/s; the same inserts with the `NOTIFY` sent after the commit 20k/s; a `NOTIFY` alone does not
+  wait for a flush (47k/s, with or without `synchronous_commit`). So a stored message is announced after its commit
+  (`announcePersisted`), and live deltas are `NOTIFY`s alone. When streaming load makes this lock show up (waits on
+  `object` locks in `pg_stat_activity`), move live events to a message bus (tech debt).
+- **Idle transactions.** A tenant database session left idle inside a transaction for 60 s is ended by the server
+  (`idle_in_transaction_session_timeout`, set by `createTenantDb`), so a process stalled mid-claim cannot hold the claim's
+  advisory lock, and every worker's claims for that tenant, until TCP gives up. Control's pools have none: the bucket
+  backup holds a control transaction (its advisory lock) for the whole copy on purpose.
 - Backups: a daily backup of the Postgres volume, kept 6 days (`railway postgres pitr schedule list --service Postgres`;
   set with `railway postgres pitr schedule set --daily`). Restore: `railway postgres pitr backup list`, then
   `railway postgres pitr backup restore <id> --service Postgres` (replaces the volume's contents: take an on-demand backup

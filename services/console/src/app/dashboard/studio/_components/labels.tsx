@@ -25,23 +25,23 @@ export function LabelsEditor({
   const versions = Array.from({ length: latestVersion }, (_, index) => latestVersion - index);
   return (
     <div className="space-y-4">
-      <ul className="divide-y divide-zinc-100 text-sm">
+      <ul className="divide-y divide-line text-sm">
         <li className="flex items-center justify-between gap-3 py-2 first:pt-0">
           <span className="flex items-center gap-2">
-            <Badge tone="green">latest</Badge>
-            <span className="text-zinc-500">always the newest version</span>
+            <Badge tone="live">latest</Badge>
+            <span className="text-muted">always the newest version</span>
           </span>
-          <span className="font-medium text-zinc-900">v{latestVersion}</span>
+          <span className="font-medium text-fg">v{latestVersion}</span>
         </li>
         {Object.entries(labels).map(([label, version]) => (
           <li key={label} className="flex items-center justify-between gap-3 py-2">
-            <Badge tone="indigo">{label}</Badge>
+            <Badge tone="brand">{label}</Badge>
             <span className="flex items-center gap-3">
-              <span className="font-medium text-zinc-900">v{version}</span>
+              <span className="font-medium text-fg">v{version}</span>
               <button
                 type="button"
                 disabled={pending}
-                className="text-sm text-red-600 hover:underline disabled:opacity-60"
+                className="text-sm text-danger hover:underline disabled:opacity-60"
                 onClick={() =>
                   startTransition(async () => {
                     setRemoveError((await removeLabelAction(name, label))?.error);
@@ -86,7 +86,7 @@ export function LabelsEditor({
           Set label
         </SubmitButton>
       </form>
-      <p className="text-xs text-zinc-500">
+      <p className="text-xs text-muted">
         Setting a label that exists moves it. A conversation or judgment keeps the version it
         started with.
       </p>

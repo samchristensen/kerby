@@ -11,8 +11,8 @@ export function LogInForm() {
   const fields = state?.fields ?? {};
   return (
     <div>
-      <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Sign in to Kerby</h1>
-      <p className="mt-1 text-sm text-zinc-500">Welcome back.</p>
+      <h1 className="text-xl font-semibold tracking-tight text-fg">Sign in to Kerby</h1>
+      <p className="mt-1 text-sm text-muted">Welcome back.</p>
       <form action={action} className="mt-6 space-y-4">
         <Field
           label="Email"
@@ -36,9 +36,9 @@ export function LogInForm() {
           Sign in
         </SubmitButton>
       </form>
-      <p className="mt-6 text-center text-sm text-zinc-500">
+      <p className="mt-6 text-center text-sm text-muted">
         New to Kerby?{" "}
-        <Link href="/signup" className="font-medium text-indigo-600 hover:text-indigo-500">
+        <Link href="/signup" className="font-medium text-brand-text hover:text-brand-text/80">
           Create a workspace
         </Link>
       </p>

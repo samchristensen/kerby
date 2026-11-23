@@ -4,13 +4,14 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-chat-search.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md), [0021](docs/adr/0021-chat-search.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
-services/   deployables: api (tenants' code calls it), worker (runs turns), control (operators run it), console (tenants'
-           people sign up, manage keys and chat in it); they own no tables
+services/   deployables: api (tenants' code calls it), worker (runs turns), dispatcher (pushes events to subscriptions),
+           control (operators run it), console (tenants' people sign up, manage integrations and chat in it); they own
+           no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -48,6 +49,9 @@ types -> config -> repo -> service -> runtime
 
 `src/index.ts` is the composition root: it builds the real adapters and hands them down. Tests may import any layer.
 
+SQL compares a uuid column as uuid (`id = $1`), after checking the value with `isUuid` from `@kerby/db` (anything else is
+not found); a column cast to text matches no index, so every call would scan the table (enforced, rule `queries`).
+
 A service built on Next.js (the console) keeps its pages and server actions in `src/app`, where Next.js looks for them:
 that is its `runtime` layer. Next.js bundles `src/app`, so it imports Kerby packages and the rest of `src/` with
 `import type` only, and reaches values through what `src/index.ts` installed (`consoleService()`); otherwise the bundle
@@ -65,23 +69,26 @@ Each external system lives behind exactly one package; nothing else imports the 
 | Pi Durable and its libraries        | `runtime-pi-durable` | an `AgentRuntime`                                                           |
 | Tenant-supplied URLs                | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 | System One API (TypeSafe, OpenCode) | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`            |
-| OpenAI-format embeddings APIs       | `embeddings-openai`  | an `EmbeddingProvider` (ADR 0019); the port is `packages/embeddings`        |
+| Webhook endpoints (via `egress`)    | `delivery-webhook`   | a `Destination` (ADR 0019); the port is `packages/delivery`                 |
+| OpenAI-format embeddings APIs       | `embeddings-openai`  | an `EmbeddingProvider` (ADR 0021); the port is `packages/embeddings`        |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
 Judgment and embedding providers follow the same rule: `packages/judgment` and `packages/embeddings` define
 `JudgmentProvider` and `EmbeddingProvider` (types only, plus the embeddings fake at `@kerby/embeddings/fake`),
 `packages/judgment-<provider>` and `packages/embeddings-<wire format>` adapt providers to them, and only a service's
-`src/index.ts` may import an adapter.
+`src/index.ts` may import an adapter. So do event destinations: `packages/delivery` defines `Destination` (types only),
+`packages/delivery-<kind>` delivers to one kind, and the composition roots of api (which only makes and checks secrets
+and configs) and dispatcher wire them.
 
 ## Tenancy
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                                                                        | Migrations                                                                 |
-| ------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions`                                             | `packages/control-plane/migrations/control/`                               |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the chat search index (`search_chunks`, `search_progress`, `search_settings`; pgvector), the Absurd schema | `packages/{durable,blobs,conversations,prompts,search}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                                                                                                                                               | Migrations                                                                        |
+| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, `tenant_wakeups` (when each tenant's queue is due), the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                                      |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the event log (`events`, `subscription_cursors`, `delivery_attempts`), the chat search index (`search_chunks`, `search_progress`, `search_settings`; pgvector), the Absurd schema | `packages/{durable,blobs,conversations,prompts,events,search}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -89,6 +96,10 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `TenantDb` comes only from a verified API key resolved in the control plane.
 - A tenant id reaches code only through a verified API key (api), a verified console session (console, and the api when the
   console forwards one for the browser's chat), never through a request body or a URL. _review_
+- An API key belongs to an integration ([ADR 0020](docs/adr/0020-integrations-and-scopes.md)), which holds its scopes
+  (`conversations`, `judgments`, `events`, `tenant`, `admin`); every api route declares the scope it needs. Without
+  `tenant`, a key sees only what its integration started: conversation, judgment and event reads take a `Visibility`, so
+  none can forget the filter. A console session acts as the tenant, with every scope.
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
@@ -113,12 +124,16 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
   deleted tenants' copies (ADR 0013).
 - Self-serve sign-up ([ADR 0014](docs/adr/0014-tenant-console.md)): the console hashes the password and calls control's
-  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control provisions as above and stores
+  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control refuses an email that is not on
+  `signup_allowlist` (403 `not_invited`), otherwise provisions as above and stores
   the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
   kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
   `kerby_console`: API keys (never their hashes), model keys, people and sessions, appending to the audit log as
   `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
-  account (failed sign-ins an hour), per process like the api's limits.
+  account (failed sign-ins an hour), per process like the api's limits; sign-ins to one account take turns and an
+  address checks four at once, each looking at the limits when its turn comes, so a concurrent burst cannot outrun them.
+  A tenant holds at most 50 live API keys (`MAX_API_KEYS_PER_TENANT`; 409 `api_key_limit` from control, a message in
+  the console); rotating a key at the cap works.
 - Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
@@ -127,7 +142,11 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `packages/prompts`), when a message is posted, before anything is stored and again inside the post's transaction, and
   when a prompt's draft grows or it is published: 413 `storage_quota_exceeded`; a turn already admitted finishes.
   Before a key is verified, the only work is the key lookup: a client address that fails `FAILED_AUTH_PER_MINUTE` (30)
-  times in a minute gets 429 without one. The
+  times in a minute gets 429 without one. Lookups from one address take turns, four at once
+  (`LOOKUPS_PER_ADDRESS`), each checking the limit when its turn comes and counting a wrong key before giving its turn
+  up, so a concurrent burst of bad keys gets at most three lookups past the limit while many good keys at once only
+  wait; a credential the cache answers, or one already being looked up for another request, needs no lookup. The cache keeps at most 10,000
+  credentials (`MAX_CACHED_CREDENTIALS`), least recently used first, each for `AUTH_CACHE_SECONDS`. The
   address is the socket peer, or with `TRUST_PROXY=true` (Railway, whose edge sets `X-Forwarded-For` with the client
   first) the left-most `X-Forwarded-For` entry. The numbers are defaults until pricing (plan 0001, M9).
 
@@ -151,7 +170,12 @@ flowchart LR
   S -->|live deltas| C[client SSE]
 ```
 
-1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` (a periodic sweep catches missed ones) and
+1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` and from `tenant_wakeups`: after enqueueing,
+   the api marks the tenant due and then sends the `NOTIFY` (two statements, never one transaction); after each claim,
+   the worker writes when that tenant's queue next needs a look (now for work left over, a retry's backoff, a lease that
+   lapses; nothing when the queue is empty), unless a newer hint arrived meanwhile. Every `SWEEP_INTERVAL_SECONDS` (10)
+   it looks at the tenants that are due; every `FULL_SWEEP_INTERVAL_SECONDS` (300), at start and when its `LISTEN`
+   reconnects, at every active tenant, the backstop for a hint lost between the api's commit and its write. It
    claims from that tenant's database only while the tenant is under its concurrency limit, counted across every
    worker: the claim runs in a tenant-database transaction holding an advisory lock, counts the turns running there
    under a live lease and claims at most the difference. A worker already at the limit by itself does not ask. A worker
@@ -181,7 +205,8 @@ flowchart LR
 6. **Retry** is a rerun of step 2 onward. The conversation resumes after its last persisted message.
 
 - **One turn at a time per conversation.** Posting a message while a turn is queued or running is a 409; the check and the
-  insert share a row lock on the conversation, so concurrent posts serialize.
+  insert share a row lock on the conversation, so concurrent posts serialize. A turn whose outcome event is recorded
+  counts as finished, though its task is still closing: nothing is written after the outcome (ADR 0019).
 - **Object keys carry a content hash** (`conversations/<id>/messages/<seq>-<sha16>.json`): a retry of the same message
   overwrites itself, and a stale writer's different content lands under a different key and can never replace bytes an
   index row already points at.
@@ -193,8 +218,10 @@ flowchart LR
   last row's `updated_at` to the microsecond and its id. The console's chat uses it and the rest of this API with the person's
   session token ([ADR 0014](docs/adr/0014-tenant-console.md#amendment-chat-and-browsing-in-the-console-2026-11-22)).
 - **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
-  then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
-  events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
+  then tails the tenant database with `LISTEN`: the api and the worker `NOTIFY` `{persisted: seq}` once a message has
+  committed, and the worker sends live events (deltas, tool events) in full when they fit in 7500 bytes. A `NOTIFY` is
+  never sent inside a transaction that writes: Postgres commits such transactions one at a time across the whole
+  cluster, every tenant's ([docs/deploy.md](docs/deploy.md#postgres)). Live events carry no SSE id and are not replayed;
   a poll every 5 s is the backstop for a lost notification. The model's reasoning (`thinking_delta`, `thinking_end`) is
   among the live events but the api drops it unless the request says `?include=thinking`. All streams on one tenant database in an api process share
   one `LISTEN` connection; a process caps its open streams per tenant (429) and in all (503), to stay inside the
@@ -223,16 +250,34 @@ flowchart LR
   `POST /v1/judgments { state, prompt }` resolve a label once, when they are made, and record `{ name, version }`; a
   conversation keeps the rendered system prompt, model and guardrails in its own row, so a turn never reads the prompt
   tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
-- **Search** ([ADR 0019](docs/adr/0019-chat-search.md)). Every tenant database holds an index of its chats
+- **Events** ([ADR 0019](docs/adr/0019-events-and-delivery.md)). Every durable fact (`conversation.created`,
+  `message.created`, `turn.started`, one of `turn.completed`/`turn.blocked`/`turn.failed` per turn on every path,
+  `judgment.completed`/`judgment.failed`) is a row of the tenant's `events` table (`packages/events`), written in the
+  transaction that makes the fact true and keyed so a retry records it once; thin: ids, `seq` and status, never content.
+  A reader returns only rows whose transaction is below `pg_snapshot_xmin`, ordered by `(tx, position)`, so a cursor
+  never skips a late commit (the horizon is cluster-wide: a long write transaction anywhere delays events, never loses
+  them). `GET /v1/events?after&limit&types&conversationId&wait` pages and long-polls it (counted with the SSE streams);
+  the turn's live `run_end` now comes on every path, `failed` when the last attempt failed. Kept 30 days (control's
+  nightly job, which also runs Absurd's cleanup).
+- **Delivery** (ADR 0019). A subscription (control database) belongs to an integration and names a destination, type
+  patterns and a scope. After committing an event the api and worker `NOTIFY tenant_events` on control; the
+  `dispatcher`, the worker's scheduler shape on its own Absurd queue `deliveries`, fans out under the subscription's
+  cursor lock (read events after the cursor, spawn `deliver-events` tasks, advance, one tenant transaction) and delivers
+  through the `Destination` port: webhooks signed by Standard Webhooks v1 through `egress`, at least once, unordered,
+  20 attempts over about two and a half days, disabled after a 410 or 48 hours of failures. Signing secrets are sealed to a
+  key pair only the dispatcher opens. `/v1/subscriptions` (scope `admin` or the console) manages them, sends a test ping,
+  lists delivery attempts and redelivers.
+- **Search** ([ADR 0021](docs/adr/0021-chat-search.md)). Every tenant database holds an index of its chats
   (`packages/search`): user and assistant text cut into chunks, each with an English `tsvector` and, when the tenant has
   chosen an embedding model, a pgvector embedding made with the tenant's own key. A finished turn spawns
   `index-conversation` on the `index` queue; the task chunks messages past the conversation's watermark (never a
   guardrail-blocked one) and embeds what the current model has not, holding no connection during a provider call and
   advancing the watermark only from where it read it. Changing the model spawns `index-backfill`, a page of 50
-  conversations per task. `POST /v1/search` fuses full-text and cosine rankings (reciprocal rank) into the best chunk per
+  conversations per task. `POST /v1/search` (scope `conversations`, with the caller's visibility: a key without `tenant`
+  finds only its integration's chats) fuses full-text and cosine rankings (reciprocal rank) into the best chunk per
   conversation: keyword-only in the api when no model is set, otherwise through a `run-search` task on the `search` queue,
   since only a worker can open the key; the task returns references and the api reads the snippets. A worker that is
-  unavailable or refused degrades the answer to keyword matches with a `notice`.
+  unavailable or refused degrades the answer to keyword matches with a `notice`. The settings are scope `admin`.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
@@ -247,13 +292,13 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 
 ## Local stack
 
-`make up` runs [compose.yaml](compose.yaml): Postgres (pgvector's Postgres 18 image; Railway's ships pgvector too), RustFS, `control`, `api`, `worker`, `console`, built from each service's
+`make up` runs [compose.yaml](compose.yaml): Postgres (pgvector's Postgres 18 image; Railway's ships pgvector too), RustFS, `control`, `api`, `worker`, `dispatcher`, `console`, built from each service's
 `Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
 then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
 
 - Two published ports: the API on `127.0.0.1:${KERBY_API_PORT:-8080}` and the console on
-  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control and worker are reached only
-  inside the network (`make up` provisions through `docker compose exec`).
+  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control, worker and dispatcher are
+  reached only inside the network (`make up` provisions through `docker compose exec`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
   `make worktree NAME=<name>` makes a checkout under `worktrees/<name>` with its own project and port pair in `.env`.
@@ -261,7 +306,9 @@ then provisions a `default` tenant through the operator API and prints its key. 
   worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
   `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
   `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
-  key pair; `make secrets-key` makes a real one.
+  key pair; `make secrets-key` makes a real one. It carries a development delivery key pair too (the api seals
+  subscription secrets, the dispatcher opens them), and api and dispatcher run with `ALLOW_LOCAL_DESTINATIONS=true`
+  (development only), so a webhook may point at `http://host.docker.internal:<port>/`.
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
@@ -282,11 +329,12 @@ then provisions a `default` tenant through the operator API and prints its key. 
 ## Hosting
 
 Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker` and `console` running the images CI builds from
+ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker`, `dispatcher` and `console` running the images CI builds from
 the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
 [ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` and `console` are public; services reach
 Postgres and each other over Railway's private network (the console reaches control's sign-up route and the api there), and the bucket through
 its S3 endpoint and keys. The secrets private key is a variable on `worker` only; the api and the console get the public half.
+The delivery secrets private key is a variable on `dispatcher` only; the api gets its public half.
 
 ## Dependencies
 

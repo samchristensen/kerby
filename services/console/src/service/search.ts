@@ -1,4 +1,4 @@
-// Searching the tenant's chats and choosing the embedding model that makes the search semantic (ADR 0019). Both go
+// Searching the tenant's chats and choosing the embedding model that makes the search semantic (ADR 0021). Both go
 // through the api with the person's session token, like the chats themselves (ADR 0014). The query travels only in a
 // POST body: never in a URL the console, the api or a proxy would log.
 import {

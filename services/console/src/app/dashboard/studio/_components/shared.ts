@@ -5,9 +5,9 @@ import type { ChatPromptBody, PromptSummary } from "@kerby/contracts";
 export type Json = ChatPromptBody["guardrails"][number]["instructions"];
 
 export const inputClass =
-  "block w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:outline-2 focus:outline-offset-0 focus:outline-indigo-500";
+  "block w-full rounded-lg border border-line bg-page px-3 py-2 text-sm text-fg shadow-sm placeholder:text-muted/60 focus:outline-2 focus:outline-offset-0 focus:outline-brand";
 
-export const labelClass = "block text-sm font-medium text-zinc-800";
+export const labelClass = "block text-sm font-medium text-fg";
 
 /** Every way to ask for a published version: the labels (`latest` first) and then each number, newest first. */
 export function versionChoices(

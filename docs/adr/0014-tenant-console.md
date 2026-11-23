@@ -50,7 +50,9 @@ routes in `src/app`, and its checker needs TypeScript's JavaScript API, which Ty
   (`@kerby/runtime-pi-durable/providers`, imported by `src/index.ts`).
 - **Before sign-in, bounded work**: sign-ups per address per hour (each makes a database; default 5), failed sign-ins
   per address per minute (10) and per account per hour (20). Per process, like the api's limits (`TokenBuckets`, now in
-  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist.
+  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist. Amended 2026-11-23:
+  sign-ins to one account take turns (an address checks four at once) and look at the limits when their turn comes, so
+  concurrent attempts cannot outrun them; a tenant holds at most 50 live API keys.
 - **Hosting.** A Railway service `console` with a generated domain, from the image CI builds (ADR 0011). Control listens on
   `::` so the console reaches it over the private network. `scripts/railway.ts secrets` creates `CONSOLE_TOKEN` and
   `CONSOLE_DATABASE_PASSWORD` once; `domains` adds the public domains; the release runs both.
@@ -87,10 +89,28 @@ call or console). The data is the tenant's, behind the api; the console never op
   could not do; a compromised api can read session hashes, which no one can invert. Messages render as plain text (no
   markdown: a renderer is a dependency and an ADR line). There is no way to delete or rename a conversation.
 
+## Amendment: sign-up by invitation, and an admin (2026-11-23)
+
+- **Control refuses a sign-up whose email is not on `signup_allowlist`** (migration `0007_signup_allowlist.sql`): 403
+  `not_invited`, before it provisions anything and before it says whether the address has an account. The check lives in
+  control, not the console, because control is the only door to provisioning. The migration puts every existing account's
+  email on the list. Removing an address stops a future sign-up; it does not touch an account that exists.
+- **An admin is a `console_users` row with `is_admin`.** The operator sets it, over control's operator API
+  (`POST /v1/operator/console-admins`, audited, 404 for an email with no account: docs/deploy.md#the-console). The
+  console's role reads the flag and has no grant to write it, so a console bug or a forged form cannot make an admin. It
+  is not a role in a tenant: the admin's own tenant is an ordinary one, and the flag only opens the Sign-ups page.
+- **Admins edit the list in the console** (`/dashboard/admin`, shown in the navigation to admins only; anyone else gets a
+  404). The service checks the flag again on each call. Changes are audited as `user:<id>` with a count, never an address.
+- Rejected: an `ADMIN_EMAILS` variable (an address would be an admin by naming it, before it proves it owns the address;
+  and a redeploy per change); an allowlist in a variable (the point is to edit it from the console).
+- Consequences: an admin account is the keys to who may join, so its password matters; there is still no second factor
+  (tech debt).
+
 ## Consequences
 
-- Sign-up is open to anyone who reaches the console. The per-address limit bounds one address, not a botnet: there is no
-  CAPTCHA, email verification, password reset or invitation of a second person yet (tech debt).
+- Sign-up is by invitation (amendment above), not open. The per-address limit still bounds one address; there is no CAPTCHA,
+  email verification, password reset or invitation of a second person yet (tech debt). Verification matters more now:
+  an allowlisted address is trusted without proof that the person who types it owns it.
 - The console can create keys for any tenant and set its model keys if its process is taken over, as the api can read
   any tenant's data: both are trusted processes facing the internet. It cannot open a model key, provision, delete or
   export.

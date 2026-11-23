@@ -19,6 +19,7 @@ export const RULES = [
   "providers",
   "config",
   "docker",
+  "queries",
 ] as const;
 type Rule = (typeof RULES)[number];
 export type Violation = { rule: Rule; file: string; message: string };
@@ -44,6 +45,8 @@ const BUILTINS = new Set(builtinModules);
 const READS_ENV =
   /\bprocess\s*(?:\.|\?\.)\s*env\b|\bprocess\s*\[\s*["']env["']\s*\]|import\s*\{[^}]*\benv\b[^}]*\}\s*from\s*["'](?:node:)?process["']/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+/** A uuid column compared as text (`id::text = $1`, `tenant_id::text in (...)`): no index can serve it. */
+const UUID_AS_TEXT = /\b\w*id::text\s*(?:=|<>|!=|\bin\b)/;
 
 /**
  * External systems, each behind exactly one package. A dependency listed here may be imported only by
@@ -58,6 +61,16 @@ const CONFINED = new Map<string, string>([
   ["@earendil-works/pi-ai", "runtime-pi-durable"],
   ["@earendil-works/chord", "runtime-pi-durable"],
 ]);
+
+/**
+ * Adapters behind a port, by package prefix, and the port everything but a composition root depends on. Only a service's
+ * src/index.ts imports an adapter: harnesses (ADR 0003), judgment providers (ADR 0015), destinations (ADR 0019).
+ */
+const ADAPTER_PORTS: readonly (readonly [prefix: string, port: string])[] = [
+  ["@kerby/runtime-", "AgentRuntime from @kerby/agent"],
+  ["@kerby/judgment-", "JudgmentProvider from @kerby/judgment"],
+  ["@kerby/delivery-", "Destination from @kerby/delivery"],
+];
 
 function readJson(path: string): Pkg {
   const value: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -229,6 +242,13 @@ export function checkArchitecture(root: string): Violation[] {
           );
         }
       }
+      if (ws.kind !== "scripts" && !file.endsWith(".test.ts") && UUID_AS_TEXT.test(text)) {
+        add(
+          "queries",
+          file,
+          "compares a uuid column as text (`id::text = $1`), which no index serves: every call scans the whole table. Fix: compare as uuid (`id = $1`) and check the value with isUuid (@kerby/db) first, treating anything else as not found. See ARCHITECTURE.md#layers",
+        );
+      }
       const importerLayer =
         ws.kind === "services" && !file.endsWith(".test.ts")
           ? layerIndex(src, file, nextApp !== undefined)
@@ -302,11 +322,12 @@ export function checkArchitecture(root: string): Violation[] {
         }
         const isIndex =
           ws.kind === "services" && relative(ws.dir, file) === join("src", "index.ts");
-        if (name.startsWith("@kerby/runtime-") && !isIndex) {
+        const port = ADAPTER_PORTS.find(([prefix]) => name.startsWith(prefix));
+        if (port && !isIndex) {
           add(
             "providers",
             file,
-            `adapter ${name} may only be imported by a service's src/index.ts, which wires it in. Fix: depend on AgentRuntime from @kerby/agent and receive the adapter as an argument. See ARCHITECTURE.md#providers`,
+            `adapter ${name} may only be imported by a service's src/index.ts, which wires it in. Fix: depend on ${port[1]} and receive the adapter as an argument. See ARCHITECTURE.md#providers`,
           );
         }
         if (!declared.has(name)) {

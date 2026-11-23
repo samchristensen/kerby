@@ -1,4 +1,4 @@
-// The port between Kerby and any embedding provider (ADR 0019). Types only: nothing here names a provider or its SDK.
+// The port between Kerby and any embedding provider (ADR 0021). Types only: nothing here names a provider or its SDK.
 // An adapter (`packages/embeddings-<wire format>`) maps one provider onto this contract; the chat search index and its
 // queries see only these types. The development and test fake lives at `@kerby/embeddings/fake`.
 

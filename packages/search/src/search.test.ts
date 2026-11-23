@@ -21,8 +21,14 @@ import {
 
 type Said = { role: "user" | "assistant"; text: string };
 
-async function conversation(tenant: TestTenant, externalUserId?: string): Promise<string> {
-  return (await insertConversation(tenant.db, { model: "m", system: "", externalUserId })).id;
+async function conversation(
+  tenant: TestTenant,
+  externalUserId?: string,
+  integrationId: string | null = null,
+): Promise<string> {
+  return (
+    await insertConversation(tenant.db, { model: "m", system: "", externalUserId, integrationId })
+  ).id;
 }
 
 /** Append message rows (their bodies are not needed here) and return their seqs. */
@@ -152,13 +158,39 @@ describe("searchChunks", () => {
     await indexed(tenant, bob, [{ role: "assistant", text: "Pricing the renewal is next." }]);
     await indexed(tenant, await conversation(tenant), [{ role: "user", text: "unrelated" }]);
 
-    const hits = await searchChunks(tenant.db, { query: "renewal pricing", limit: 10 });
+    const hits = await searchChunks(tenant.db, { query: "renewal pricing", limit: 10 }, "tenant");
     expect(hits.map((h) => h.conversationId).sort()).toEqual([alice, bob].sort());
     expect(
-      await searchChunks(tenant.db, { query: "renewing", limit: 10, externalUserId: "alice" }),
+      await searchChunks(
+        tenant.db,
+        { query: "renewing", limit: 10, externalUserId: "alice" },
+        "tenant",
+      ),
     ).toEqual([{ conversationId: alice, seq: 1, part: 0, score: expect.any(Number) }]);
-    expect(await searchChunks(tenant.db, { query: "the and of", limit: 10 })).toEqual([]);
-    expect(await searchChunks(tenant.db, { query: "renewal", limit: 1 })).toHaveLength(1);
+    expect(await searchChunks(tenant.db, { query: "the and of", limit: 10 }, "tenant")).toEqual([]);
+    expect(await searchChunks(tenant.db, { query: "renewal", limit: 1 }, "tenant")).toHaveLength(1);
+  });
+
+  it("finds only the conversations its visibility sees: one integration's, or the tenant's", async () => {
+    await using tenant = await createTestTenant();
+    const mine = crypto.randomUUID();
+    const theirs = crypto.randomUUID();
+    const ours = await conversation(tenant, undefined, mine);
+    const others = await conversation(tenant, undefined, theirs);
+    const fromConsole = await conversation(tenant);
+    for (const id of [ours, others, fromConsole])
+      await indexed(tenant, id, [{ role: "user", text: "the acme renewal" }]);
+    const found = async (visibility: "tenant" | { integrationId: string }) =>
+      (await searchChunks(tenant.db, { query: "renewal", limit: 10 }, visibility))
+        .map((hit) => hit.conversationId)
+        .sort();
+
+    expect(await found({ integrationId: mine })).toEqual([ours]);
+    expect(await found("tenant")).toEqual([ours, others, fromConsole].sort());
+    // Reading hits by reference applies it again: refs from a wider search show only what this caller sees.
+    const all = await searchChunks(tenant.db, { query: "renewal", limit: 10 }, "tenant");
+    const read = await readHits(tenant.db, "renewal", all, { integrationId: theirs });
+    expect(read.map((hit) => hit.conversationId)).toEqual([others]);
   });
 
   it("returns the best chunk of each conversation once", async () => {
@@ -168,7 +200,7 @@ describe("searchChunks", () => {
       { role: "user", text: "the invoice" },
       { role: "assistant", text: "the invoice, the invoice, and the other invoice" },
     ]);
-    const hits = await searchChunks(tenant.db, { query: "invoice", limit: 10 });
+    const hits = await searchChunks(tenant.db, { query: "invoice", limit: 10 }, "tenant");
     expect(hits).toEqual([{ conversationId: id, seq: 2, part: 0, score: expect.any(Number) }]);
   });
 
@@ -194,17 +226,25 @@ describe("searchChunks", () => {
     await embed(tenant, otherDims, model, [1, 0, 0, 0]);
 
     // Keyword alone ranks the chunk that repeats the word first.
-    const keyword = await searchChunks(tenant.db, { query: "renewal", limit: 10 });
+    const keyword = await searchChunks(tenant.db, { query: "renewal", limit: 10 }, "tenant");
     expect(keyword.map((h) => h.conversationId)).toEqual([wordy, close]);
 
     const embedding = { model, vector: [1, 0, 0] };
-    const hybrid = await searchChunks(tenant.db, { query: "renewal", limit: 10, embedding });
+    const hybrid = await searchChunks(
+      tenant.db,
+      { query: "renewal", limit: 10, embedding },
+      "tenant",
+    );
     // close: keyword 2nd and semantic 1st; wordy: keyword 1st and semantic 3rd; meaningOnly: semantic 2nd only.
     expect(hybrid.map((h) => h.conversationId)).toEqual([close, wordy, meaningOnly]);
     expect(hybrid[0]?.score).toBeCloseTo(1 / 62 + 1 / 61);
 
     // A query of stopwords still finds by meaning.
-    const semantic = await searchChunks(tenant.db, { query: "the", limit: 10, embedding });
+    const semantic = await searchChunks(
+      tenant.db,
+      { query: "the", limit: 10, embedding },
+      "tenant",
+    );
     expect(semantic.map((h) => h.conversationId)).toEqual([close, meaningOnly, wordy]);
   });
 });
@@ -221,10 +261,10 @@ describe("readHits", () => {
       { role: "assistant", text: long },
     ]);
     await indexed(tenant, second, [{ role: "user", text: "renewal dates" }]);
-    const refs = await searchChunks(tenant.db, { query: "renewal", limit: 10 });
+    const refs = await searchChunks(tenant.db, { query: "renewal", limit: 10 }, "tenant");
     const reversed = [...refs].reverse();
 
-    const hits = await readHits(tenant.db, "renewal", reversed);
+    const hits = await readHits(tenant.db, "renewal", reversed, "tenant");
     expect(hits.map((h) => h.conversationId)).toEqual(reversed.map((r) => r.conversationId));
     const acme = hits.find((h) => h.conversationId === first);
     expect(acme).toMatchObject({ role: "assistant", title: "Acme renewal", seq: 2 });
@@ -234,10 +274,10 @@ describe("readHits", () => {
     expect(acme?.createdAt).toBeInstanceOf(Date);
 
     await tenant.db.query("delete from conversations where id = $1", [second]);
-    expect((await readHits(tenant.db, "renewal", refs)).map((h) => h.conversationId)).toEqual([
-      first,
-    ]);
-    expect(await readHits(tenant.db, "renewal", [])).toEqual([]);
+    expect(
+      (await readHits(tenant.db, "renewal", refs, "tenant")).map((h) => h.conversationId),
+    ).toEqual([first]);
+    expect(await readHits(tenant.db, "renewal", [], "tenant")).toEqual([]);
   });
 });
 

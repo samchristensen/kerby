@@ -21,3 +21,4 @@ export {
 export { LISTEN_APPLICATION_NAME } from "./listen.ts";
 export { migrate, migrateTenants, readMigrations } from "./migrate.ts";
 export { type TenantLease, TenantPools } from "./pools.ts";
+export { isUuid } from "./uuid.ts";

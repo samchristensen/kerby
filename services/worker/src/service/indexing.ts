@@ -1,9 +1,9 @@
-// The chat search index (ADR 0019): built after turns on the `index` queue, queried on the `search` queue. Both need the
+// The chat search index (ADR 0021): built after turns on the `index` queue, queried on the `search` queue. Both need the
 // tenant's model key for the embedding provider, which only a worker can open (ADR 0008). Indexing is derived data: it
 // may lag a turn, it never holds a database connection while a provider answers, and a duplicate or concurrent task does
 // no harm (`writeChunks` advances a conversation's watermark only from where the task read it).
 import { parseModelId } from "@kerby/contracts";
-import { recordUsage } from "@kerby/control-plane";
+import { hintTenantWork, recordUsage } from "@kerby/control-plane";
 import { readMessages } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { type RunContext, spawnInTx, type TaskParams } from "@kerby/durable";
@@ -200,16 +200,14 @@ async function spawnIndexTask<N extends "index-conversation" | "index-backfill">
   idempotencyKey: string,
 ): Promise<void> {
   await ctx.db.transaction((tx) => spawnInTx(tx, name, params, { idempotencyKey }));
-  // At-least-once: the worker's periodic sweep finds the task even if this notification is lost.
-  await deps.control
-    .query("select pg_notify('tenant_work', $1)", [ctx.tenantId])
-    .catch((error: unknown) => {
-      log(
-        "warn",
-        "could not notify workers; the sweep will find the index task",
-        errorFields(error),
-      );
-    });
+  // Mark the tenant due, so the due sweep finds the task even if the doorbell's NOTIFY is lost.
+  await hintTenantWork(deps.control, ctx.tenantId).catch((error: unknown) => {
+    log(
+      "warn",
+      "could not hint workers; the full sweep will find the index task",
+      errorFields(error),
+    );
+  });
 }
 
 /**
@@ -313,7 +311,7 @@ export async function runSearchTask(
   const keyword = async (notice: string | null): Promise<SearchOutcome> => ({
     mode: "keyword",
     notice,
-    hits: await searchChunks(ctx.db, query),
+    hits: await searchChunks(ctx.db, query, params.visibility),
   });
   const semantic = async (model: string): Promise<SearchOutcome> => {
     const embedder = await openEmbedder(deps, ctx.tenantId, model);
@@ -334,7 +332,11 @@ export async function runSearchTask(
     return {
       mode: "hybrid",
       notice: null,
-      hits: await searchChunks(ctx.db, { ...query, embedding: { model, vector } }),
+      hits: await searchChunks(
+        ctx.db,
+        { ...query, embedding: { model, vector } },
+        params.visibility,
+      ),
     };
   };
   const { embeddingModel } = await readSearchSettings(ctx.db);

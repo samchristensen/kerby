@@ -1,0 +1,54 @@
+/*
+ * Operator color scheme — paste into your global stylesheet (or import it).
+ * Raw palette first, then semantic tokens to use in your UI.
+ * Dark is the default theme; add data-theme="light" on <html> for light.
+ * All text pairings below meet WCAG AA (4.5:1) contrast.
+ */
+:root {
+  /* Raw palette */
+  --op-ink: #0a0b10; /* outlines, deepest dark */
+  --op-night: #14161d; /* page background (dark) */
+  --op-navy: #232838; /* cards / icon tile */
+  --op-navy-raised: #2c3244; /* hover / raised surfaces */
+  --op-slate: #3a4156; /* borders, dividers */
+  --op-mist: #a3aabd; /* secondary text on dark */
+  --op-cloud: #eef1f8; /* primary text on dark */
+  --op-amber: #f2b33d; /* brand / primary accent */
+  --op-amber-light: #ffd98a; /* highlights */
+  --op-amber-deep: #8a5a00; /* amber text on light backgrounds */
+  --op-green: #39ff7f; /* electric green — live / active / success */
+  --op-green-deep: #0b7a3b; /* green text on light backgrounds */
+  --op-paper: #fafaf7; /* page background (light) */
+
+  /* Semantic tokens — dark theme (default) */
+  --color-bg: var(--op-night);
+  --color-surface: var(--op-navy);
+  --color-surface-raised: var(--op-navy-raised);
+  --color-border: var(--op-slate);
+  --color-text: var(--op-cloud);
+  --color-text-muted: var(--op-mist);
+  --color-primary: var(--op-amber); /* buttons, links, focus rings */
+  --color-on-primary: var(--op-ink); /* text on amber buttons */
+  --color-accent: var(--op-green); /* status dots, "running", success */
+  --color-on-accent: var(--op-ink);
+}
+
+[data-theme="light"] {
+  --color-bg: var(--op-paper);
+  --color-surface: #ffffff;
+  --color-surface-raised: #f1f2f5;
+  --color-border: #dadde5;
+  --color-text: var(--op-night);
+  --color-text-muted: #5a6072;
+  --color-primary: var(--op-amber); /* fills only; use --color-primary-text for text */
+  --color-primary-text: var(--op-amber-deep);
+  --color-on-primary: var(--op-ink);
+  --color-accent: var(--op-green); /* fills only; use --color-accent-text for text */
+  --color-accent-text: var(--op-green-deep);
+  --color-on-accent: var(--op-ink);
+}
+
+:root:not([data-theme="light"]) {
+  --color-primary-text: var(--op-amber);
+  --color-accent-text: var(--op-green);
+}

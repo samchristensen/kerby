@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@kerby/agent": "workspace:*",
+    "@kerby/contracts": "workspace:*",
     "@kerby/db": "workspace:*"
   },
   "devDependencies": {

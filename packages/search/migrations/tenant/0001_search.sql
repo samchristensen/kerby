@@ -1,4 +1,4 @@
--- The chat search index (ADR 0019): pieces of user and assistant text, with a full-text vector and, once the tenant
+-- The chat search index (ADR 0021): pieces of user and assistant text, with a full-text vector and, once the tenant
 -- chooses an embedding model, an embedding. Derived data: it may lag a turn, and every row cascades with its message.
 --
 -- `vector` is not a trusted extension, so a tenant role cannot create it: control installs it as the admin in the
@@ -26,7 +26,7 @@ create table search_progress (
 );
 
 -- A piece of one message's text (`part` from 0). Embeddings of any dimension share the column, told apart by
--- `embedding_model`; a search scans them exactly (no ANN index yet: see ADR 0019 for when to add one).
+-- `embedding_model`; a search scans them exactly (no ANN index yet: see ADR 0021 for when to add one).
 create table search_chunks (
   conversation_id uuid not null,
   seq integer not null,
@@ -44,7 +44,7 @@ create table search_chunks (
 create index search_chunks_tsv_idx on search_chunks using gin (tsv);
 
 -- A database that already has conversations indexes them in the background: the first `index-backfill` page
--- (`TASKS` in packages/durable, queue `index`; options as `spawnInTx` writes them, ADR 0019). A new database has
+-- (`TASKS` in packages/durable, queue `index`; options as `spawnInTx` writes them, ADR 0021). A new database has
 -- nothing to index, and each turn indexes its own conversation from then on.
 select absurd.spawn_task(
   'index',

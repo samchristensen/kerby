@@ -43,3 +43,14 @@ export class ConflictError extends Error {
     this.code = code;
   }
 }
+
+/** A request this deployment does not allow; `code` is the error code the response carries. */
+export class ForbiddenError extends Error {
+  override name = "ForbiddenError";
+  readonly code: string;
+
+  constructor(message: string, code = "forbidden") {
+    super(message);
+    this.code = code;
+  }
+}

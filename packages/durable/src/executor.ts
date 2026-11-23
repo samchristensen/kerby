@@ -1,6 +1,6 @@
-// Claim and run one queue's tasks from one tenant's database. The worker's tenant scheduler decides whom to claim for;
-// this module does the claiming (within the tenant's limit for that queue across every worker), the lease heartbeat for
-// the whole run, and fencing.
+// Claim and run tasks from one queue of one tenant's database. A scheduler (the worker's for turns, the dispatcher's for
+// deliveries) decides whom to claim for; this module does the claiming (within the tenant's limit across every
+// process), the lease heartbeat for the whole run, and fencing.
 //
 // Facts from plan 0001 S2 that shape it:
 //  - A lapsed lease lets a second worker claim while the first still runs; the first only fails at its next step.
@@ -10,7 +10,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { rawPool, type TenantDb, type TenantQueryable, withConnectRetry } from "@kerby/db";
 import { errorFields, log } from "@kerby/observability";
 import { Absurd, type ClaimedTask } from "absurd-sdk";
-import { type Queue, TASKS, type TaskName, type TaskParams, type TaskResults } from "./tasks.ts";
+import {
+  type Queue,
+  TASKS,
+  type TaskName,
+  type TaskOf,
+  type TaskParams,
+  type TaskResults,
+} from "./tasks.ts";
 
 /** What a running task knows about itself. */
 export type RunContext = {
@@ -27,30 +34,56 @@ export type RunContext = {
   step<T>(name: string, fn: () => Promise<T>): Promise<T>;
 };
 
-export type TaskHandlers = {
-  [N in TaskName]: (params: TaskParams[N], run: RunContext) => Promise<TaskResults[N]>;
+/** The handlers of every task on queue `Q` (default `turns`, the worker's). */
+export type TaskHandlers<Q extends Queue = "turns"> = {
+  [N in TaskOf<Q>]: (params: TaskParams[N], run: RunContext) => Promise<TaskResults[N]>;
 };
+
+/**
+ * The handlers in `handlers` whose tasks run on `queue`: what one queue's executor takes from a process that serves
+ * several (the worker: turns, index, search; ADR 0021).
+ */
+export function handlersOn<All extends Queue, Q extends All>(
+  handlers: Partial<TaskHandlers<All>>,
+  queue: Q,
+): Partial<TaskHandlers<Q>> {
+  return Object.fromEntries(
+    Object.entries(handlers).filter(([name]) => TASKS[name as TaskName].queue === queue),
+  ) as Partial<TaskHandlers<Q>>;
+}
 
 type ClaimedRun = ClaimedTask;
 
-export type ExecutorOptions = {
-  /** Identifies this worker in Absurd's run rows. */
+type ExecutorOptions<Q extends Queue> = {
+  /** The queue to claim from (default `turns`). Its running tasks are what `claim`'s limit counts. */
+  queue?: Q;
+  /** Identifies this process in Absurd's run rows. */
   workerId: string;
-  /** The queue to claim from (default `turns`). Only its handlers are registered, and only its running tasks count. */
-  queue?: Queue;
   /** Lease length in seconds (default 120). Heartbeats extend it for as long as a handler runs. */
   claimTimeoutSeconds?: number;
   /** How often to extend the lease. Default a third of the lease. Tests lengthen it to let a lease lapse. */
   heartbeatEveryMs?: number;
 };
 
+/** What one claim took, and when the tenant's queue next needs a look. */
+type ClaimResult = {
+  /** Each must be passed to `execute`. */
+  tasks: ClaimedRun[];
+  /**
+   * When a claim could next take something, as of this claim's commit: the earliest a waiting run becomes claimable
+   * (now or past for runs ready but over the limit; a retry's backoff; a delay) or a running run's lease lapses (a
+   * crashed worker's run is failed and retried by a claim). Null: nothing waits, until new work is spawned.
+   */
+  nextDueAt: Date | null;
+};
+
 export interface TenantExecutor {
   /**
-   * Claim runnable tasks while fewer than `limit` of this tenant's tasks on the queue run, counted across every worker
-   * on the tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that
-   * is not run sits until its lease lapses). Each claimed task must be passed to `execute`.
+   * Claim runnable tasks while fewer than `limit` of this tenant's tasks on the queue run, counted across every process
+   * on the tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that is
+   * not run sits until its lease lapses). Each claimed task must be passed to `execute`.
    */
-  claim(limit: number, max?: number): Promise<ClaimedRun[]>;
+  claim(limit: number, max?: number): Promise<ClaimResult>;
   /** Run a claimed task to completion. Never throws: failures are recorded on the task and retried by Absurd. */
   execute(task: ClaimedRun): Promise<void>;
 }
@@ -66,23 +99,21 @@ const absurdLog = {
 type Claim = { task: ClaimedRun; signal: AbortSignal; abort: (reason: Error) => void };
 const claims = new AsyncLocalStorage<Claim>();
 
-/**
- * Serializes claims on one queue within one tenant database (an advisory lock is scoped to its database): one constant
- * per queue, so a claim never waits on another queue's.
- */
-const CLAIM_LOCKS: Record<Queue, number> = {
+/** Serializes claims on one queue within one tenant database (an advisory lock is scoped to its database). */
+const CLAIM_LOCKS: Readonly<Record<Queue, number>> = {
   turns: 7_271_001,
   system: 7_271_002,
-  index: 7_271_003,
-  search: 7_271_004,
+  deliveries: 7_271_003,
+  index: 7_271_004,
+  search: 7_271_005,
 };
 
-export function createTenantExecutor(
+export function createTenantExecutor<Q extends Queue = "turns">(
   db: TenantDb,
-  handlers: Partial<TaskHandlers>,
-  options: ExecutorOptions,
+  handlers: Partial<TaskHandlers<Q>>,
+  options: ExecutorOptions<Q>,
 ): TenantExecutor {
-  const queue = options.queue ?? "turns";
+  const queue: Queue = options.queue ?? "turns";
   const claimTimeout = options.claimTimeoutSeconds ?? 120;
   const heartbeatEvery = options.heartbeatEveryMs ?? (claimTimeout * 1000) / 3;
   const pool = rawPool(db);
@@ -92,8 +123,8 @@ export function createTenantExecutor(
     TaskName,
     (params: never, run: RunContext) => Promise<unknown>,
   ][]) {
-    // Absurd refuses to run a task registered on another queue than its client's; this executor never claims one.
-    if (TASKS[name].queue !== queue) continue;
+    if (TASKS[name].queue !== queue)
+      throw new Error(`task ${name} runs on queue ${TASKS[name].queue}, not ${queue}`);
     absurd.registerTask({ name, queue }, async (params, ctx) => {
       const claim = claims.getStore();
       if (!claim) throw new Error(`task ${name} ran outside TenantExecutor.execute`);
@@ -116,7 +147,7 @@ export function createTenantExecutor(
           runId: claim.task.run_id,
           attempt: claim.task.attempt,
           maxAttempts: claim.task.max_attempts,
-          queue,
+          queue: TASKS[name].queue,
           signal: claim.signal,
           step: (stepName, fn) => ctx.step(stepName, fn),
         });
@@ -128,10 +159,9 @@ export function createTenantExecutor(
 
   return {
     async claim(limit, max = Number.POSITIVE_INFINITY) {
-      if (limit <= 0 || max <= 0) return [];
-      // Count and claim in one transaction holding the queue's per-database lock: every worker's claim on this queue
-      // for this tenant waits its turn and sees the runs the previous one committed. A lapsed lease no longer counts;
-      // the claim below fails that run and may hand its task to this worker.
+      // Count and claim in one transaction holding a per-database lock: every worker's claim for this tenant waits
+      // its turn and sees the runs the previous one committed. A lapsed lease no longer counts; the claim below
+      // fails that run and may hand its task to this worker.
       const client = await withConnectRetry(() => pool.connect());
       // A checked-out client has no pool error listener: a connection cut while it waits on the lock must not crash
       // the process. The failure reaches the pending query, which throws below.
@@ -152,8 +182,20 @@ export function createTenantExecutor(
                 .bindToConnection(client)
                 .claimTasks({ batchSize: free, claimTimeout, workerId: options.workerId })
             : [];
+        // What `absurd.claim_task` would take next: a waiting run once `available_at` passes (a sleep forever on an
+        // event is 'infinity': only the event wakes it), or a running run once its lease lapses.
+        const due = await client.query<{ next_due_at: Date | null }>(
+          `select least(
+             (select min(r.available_at) from absurd.r_${queue} r
+                join absurd.t_${queue} t on t.task_id = r.task_id
+               where r.state in ('pending', 'sleeping') and t.state in ('pending', 'sleeping', 'running')
+                 and r.available_at < 'infinity'),
+             (select min(claim_expires_at) from absurd.r_${queue}
+               where state = 'running' and claim_expires_at is not null)
+           ) as next_due_at`,
+        );
         await client.query("commit");
-        return tasks;
+        return { tasks, nextDueAt: due.rows[0]?.next_due_at ?? null };
       } catch (error) {
         await client.query("rollback").catch((rollbackError: unknown) => {
           // The connection is unusable: release it with the error so the pool discards it.

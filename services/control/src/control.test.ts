@@ -12,13 +12,22 @@ import type {
   RestoreResponse,
   Tenant,
 } from "@kerby/contracts";
+import { SCOPES } from "@kerby/contracts";
 import {
+  allowEmails,
   authenticateApiKey,
+  createApiKey,
   createConsoleSession,
+  createIntegration,
+  disallowEmail,
   findConsoleUser,
   getTenant,
+  hintTenantWork,
   insertConsoleUser,
+  insertSubscription,
   insertTenant,
+  listIntegrations,
+  MAX_API_KEYS_PER_TENANT,
   readConsoleSession,
   readTenantDbPassword,
   resolveTenantDbUrl,
@@ -39,8 +48,14 @@ import {
   TenantPools,
 } from "@kerby/db";
 import { adminUrl } from "@kerby/db/testing";
+import { recordDeliveryAttempt } from "@kerby/events";
 import { configureLogging } from "@kerby/observability";
-import { createSecretBox, generateBoxKey } from "@kerby/secrets";
+import {
+  createSealer,
+  createSecretBox,
+  generateBoxKey,
+  generateSecretsKeyPair,
+} from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createControlApp } from "./index.ts";
@@ -48,6 +63,7 @@ import { startNightly, untilNext } from "./runtime/nightly.ts";
 import { BACKUP_LOCK_KEY, backupBuckets, checkBackupFreshness } from "./service/backup.ts";
 import { ensureTenantDbPasswords } from "./service/db-credentials.ts";
 import { deleteExpiredExports } from "./service/export.ts";
+import { pruneTenants } from "./service/retention.ts";
 import { signUp } from "./service/signups.ts";
 import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
@@ -217,6 +233,19 @@ describe("provisioning", () => {
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(200);
   });
 
+  it("makes the default integration with every scope, and the first key belongs to it", async () => {
+    const { provision, control } = await start();
+    const created = await provision("acme");
+    const integrations = await listIntegrations(control.db, created.tenant.id);
+    expect(integrations.map((i) => ({ name: i.name, scopes: [...i.scopes].sort() }))).toEqual([
+      { name: "default", scopes: [...SCOPES].sort() },
+    ]);
+    expect(created.apiKey.integrationId).toBe(integrations[0]?.id);
+    expect((await authenticateApiKey(control.db, created.secret))?.integration.name).toBe(
+      "default",
+    );
+  });
+
   it("refuses a tenant role on the maintenance databases and the template, and still provisions from it", async () => {
     const { provision, control, cluster, deps, tenantUrl } = await start();
     const created = await provision("acme");
@@ -326,10 +355,85 @@ describe("lifecycle", () => {
     expect(await authenticateApiKey(control.db, extra.secret)).toBeUndefined();
   });
 
-  it("deletes everything: database, role, objects, keys; and frees the name", async () => {
+  it("makes a key for a named integration, never another tenant's, and rotating keeps its integration", async () => {
+    const { call, provision, control } = await start();
+    const { tenant } = await provision("acme");
+    const other = await provision("globex");
+    const zapier = await createIntegration(control.db, tenant.id, {
+      name: "zapier",
+      scopes: ["events"],
+    });
+    const created = await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, {
+      label: "zap",
+      integrationId: zapier.id,
+    });
+    expect(created.status).toBe(201);
+    const key = (await created.json()) as CreateKeyResponse;
+    expect(key.apiKey.integrationId).toBe(zapier.id);
+    expect((await authenticateApiKey(control.db, key.secret))?.integration.id).toBe(zapier.id);
+
+    // Without an integration: the default one.
+    const plain = (await (
+      await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, {})
+    ).json()) as CreateKeyResponse;
+    expect((await authenticateApiKey(control.db, plain.secret))?.integration.name).toBe("default");
+
+    // Another tenant's integration is not found, and makes no key.
+    const foreign = await call("POST", `/v1/operator/tenants/${other.tenant.id}/keys`, {
+      integrationId: zapier.id,
+    });
+    expect(foreign.status).toBe(404);
+    expect(
+      (await control.db.query("select 1 from api_keys where tenant_id = $1", [other.tenant.id]))
+        .rowCount,
+    ).toBe(1);
+
+    const rotated = (await (
+      await call("POST", `/v1/operator/tenants/${tenant.id}/keys/${key.apiKey.id}/rotate`)
+    ).json()) as CreateKeyResponse;
+    expect(rotated.apiKey.integrationId).toBe(zapier.id);
+    expect((await authenticateApiKey(control.db, rotated.secret))?.integration.id).toBe(zapier.id);
+  });
+
+  it("refuses a key past the tenant's cap with 409 api_key_limit, and still rotates one at the cap", async () => {
+    const { call, provision, control } = await start();
+    const { tenant, apiKey } = await provision("acme");
+    // The provisioned first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      await createApiKey(control.db, tenant.id, apiKey.integrationId, `k${i}`);
+    const refused = await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: "api_key_limit" } });
+
+    const rotate = await call("POST", `/v1/operator/tenants/${tenant.id}/keys/${apiKey.id}/rotate`);
+    expect(rotate.status).toBe(201);
+    const rotated = (await rotate.json()) as CreateKeyResponse;
+    expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
+    expect(
+      (await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" })).status,
+    ).toBe(409);
+  });
+
+  it("deletes everything: database, role, objects, keys, integrations, subscriptions, wake-up hint; and frees the name", async () => {
     const { call, provision, cluster, control, blobs, buckets, tenantUrl } = await start();
-    const { tenant, secret } = await provision("acme");
+    const { tenant, secret, apiKey } = await provision("acme");
     const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
+    await createIntegration(control.db, tenant.id, { name: "zapier", scopes: ["events"] });
+    await insertSubscription(
+      control.db,
+      createSealer(generateSecretsKeyPair().publicKey),
+      {
+        id: crypto.randomUUID(),
+        tenantId: tenant.id,
+        integrationId: apiKey.integrationId,
+        destination: { kind: "webhook", url: "https://example.com/hook" },
+        types: ["*"],
+        scope: "own",
+        description: "",
+        secret: "whsec_test",
+      },
+      10,
+    );
     const own = createTenantDb(await tenantUrl(row.id));
     await blobs.put(
       { tenantId: tenant.id, db: own },
@@ -343,6 +447,7 @@ describe("lifecycle", () => {
     await own.close();
     const objects = () => Array.fromAsync(buckets.primary.list(tenantPrefix(tenant.id)));
     expect((await objects()).length).toBe(1);
+    await hintTenantWork(control.db, tenant.id);
 
     expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
 
@@ -350,15 +455,23 @@ describe("lifecycle", () => {
     expect(await cluster.roleExists(row.dbRole)).toBe(false);
     expect(await objects()).toEqual([]);
     expect(await authenticateApiKey(control.db, secret)).toBeUndefined();
-    expect(
-      (await control.db.query("select 1 from api_keys where tenant_id = $1", [tenant.id])).rowCount,
-    ).toBe(0);
+    for (const table of ["api_keys", "subscriptions", "integrations"]) {
+      expect(
+        (await control.db.query(`select 1 from ${table} where tenant_id = $1`, [tenant.id]))
+          .rowCount,
+        table,
+      ).toBe(0);
+    }
     expect(
       (
         await control.db.query("select 1 from tenant_db_credentials where tenant_id = $1", [
           tenant.id,
         ])
       ).rowCount,
+    ).toBe(0);
+    expect(
+      (await control.db.query("select 1 from tenant_wakeups where tenant_id = $1", [tenant.id]))
+        .rowCount,
     ).toBe(0);
     expect((await getTenant(control.db, tenant.id))?.status).toBe("deleted");
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(404);
@@ -387,6 +500,7 @@ describe("console sign-up", () => {
 
   it("provisions a tenant with its first person and key, audited as the console", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     const response = await h.call(
       "POST",
       "/v1/console/signups",
@@ -426,6 +540,7 @@ describe("console sign-up", () => {
 
   it("refuses a taken email or workspace name, and a body that is not a sign-up", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com", "bob@example.com"], null);
     const post = (body: unknown) => h.call("POST", "/v1/console/signups", body, CONSOLE_TOKEN);
     expect((await post({ name: "acme", email: "ada@example.com", passwordHash })).status).toBe(201);
     const tenants = async () => (await h.control.db.query("select 1 from tenants")).rowCount;
@@ -451,6 +566,7 @@ describe("console sign-up", () => {
 
   it("leaves no tenant behind when another sign-up takes the email first", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     // The other sign-up lands between the check and this one's insert.
     const control = {
       ...h.deps.control,
@@ -479,6 +595,7 @@ describe("console sign-up", () => {
 
   it("deleting the tenant removes its people and sessions and frees the email", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     const post = (name: string) =>
       h.call(
         "POST",
@@ -496,6 +613,63 @@ describe("console sign-up", () => {
     expect(await readConsoleSession(h.control.db, token)).toBeUndefined();
     expect(await findConsoleUser(h.control.db, "ada@example.com")).toBeUndefined();
     expect((await post("acme")).status).toBe(201);
+  });
+
+  it("refuses an email that is not on the allowlist before provisioning anything, and lets it in once added", async () => {
+    const h = await start();
+    const post = (email: string) =>
+      h.call("POST", "/v1/console/signups", { name: "acme", email, passwordHash }, CONSOLE_TOKEN);
+    await allowEmails(h.control.db, ["ada@example.com"], null);
+
+    const refused = await post("grace@example.com");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: { code: "not_invited" } });
+    expect((await h.control.db.query("select 1 from tenants")).rowCount).toBe(0);
+    expect(await findConsoleUser(h.control.db, "grace@example.com")).toBeUndefined();
+
+    expect((await post("Ada@Example.com")).status).toBe(201);
+    // The list wins over an existing account's 409: a stranger learns nothing about who has one.
+    await disallowEmail(h.control.db, "ada@example.com");
+    expect((await post("ada@example.com")).status).toBe(403);
+  });
+
+  it("makes a console person an admin for the operator only, audited, and 404s for no such account", async () => {
+    const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
+    const created = (await (
+      await h.call(
+        "POST",
+        "/v1/console/signups",
+        { name: "acme", email: "ada@example.com", passwordHash },
+        CONSOLE_TOKEN,
+      )
+    ).json()) as ConsoleSignupResponse;
+    const token = await createConsoleSession(
+      h.control.db,
+      { id: created.userId, tenantId: created.tenantId },
+      new Date(Date.now() + 60_000),
+    );
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    const set = (email: string, admin: boolean, bearer: string | null = TOKEN) =>
+      h.call("POST", "/v1/operator/console-admins", { email, admin }, bearer);
+    expect((await set("ada@example.com", true, null)).status).toBe(401);
+    expect((await set("ada@example.com", true, CONSOLE_TOKEN)).status).toBe(401);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    expect((await set(" ADA@example.com", true)).status).toBe(200);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(true);
+    expect((await set("nobody@example.com", true)).status).toBe(404);
+    expect((await set("ada@example.com", false)).status).toBe(200);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    const { rows } = await h.control.db.query<{ actor: string; detail: unknown }>(
+      "select actor, detail from audit_log where action = 'console.admin.set' order by id",
+    );
+    expect(rows).toEqual([
+      { actor: "operator", detail: { userId: created.userId, admin: true } },
+      { actor: "operator", detail: { userId: created.userId, admin: false } },
+    ]);
   });
 });
 
@@ -778,7 +952,11 @@ describe("bucket backup", () => {
     const kept = await provision("kept");
     const gone = await provision("gone");
     const ctx = await tenantDb(kept.tenant.id);
-    const conversation = await insertConversation(ctx.db, { model: "m", system: "" });
+    const conversation = await insertConversation(ctx.db, {
+      integrationId: null,
+      model: "m",
+      system: "",
+    });
     await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text: "hello" }], {
       storageBytes: 1024 ** 3,
     });
@@ -939,6 +1117,77 @@ describe("bucket backup", () => {
         expect.objectContaining({ recorded: true, ageHours: 30 }),
       ]);
     });
+  });
+});
+
+describe("event retention", () => {
+  it("deletes events and delivery attempts older than 30 days in every live tenant, and keeps recent ones", async () => {
+    const { call, provision, deps, tenantDb } = await start();
+    const tenants = [await provision("acme"), await provision("globex")];
+    // Suspended tenants keep their data, so retention still applies to them.
+    await call("POST", `/v1/operator/tenants/${tenants[1]?.tenant.id}/suspend`);
+    const dbs = await Promise.all(tenants.map(({ tenant }) => tenantDb(tenant.id)));
+    const subscriptionId = crypto.randomUUID();
+    for (const { db } of dbs) {
+      for (const age of ["31 days", "29 days"]) {
+        const conversation = await insertConversation(db, {
+          integrationId: null,
+          model: "m",
+          system: "",
+        });
+        await db.query(
+          `update events set created_at = now() - $1::interval where conversation_id = $2`,
+          [age, conversation.id],
+        );
+        await recordDeliveryAttempt(db, {
+          subscriptionId,
+          eventIds: [],
+          attempt: 1,
+          outcome: "delivered",
+          willRetry: false,
+          status: 200,
+          error: null,
+          response: null,
+          durationMs: 5,
+        });
+        await db.query(
+          "update delivery_attempts set at = now() - $1::interval where id = (select max(id) from delivery_attempts)",
+          [age],
+        );
+      }
+    }
+
+    expect(await pruneTenants(deps)).toMatchObject({
+      tenants: 2,
+      events: 2,
+      attempts: 2,
+      failed: [],
+    });
+    for (const { db } of dbs) {
+      const ages = async (sql: string) =>
+        (await db.query<{ days: number }>(sql)).rows.map((r) => r.days);
+      expect(
+        await ages("select extract(day from now() - created_at)::int as days from events"),
+      ).toEqual([29]);
+      expect(
+        await ages("select extract(day from now() - at)::int as days from delivery_attempts"),
+      ).toEqual([29]);
+    }
+  });
+
+  it("logs a tenant that fails, goes on with the rest, and alerts once", async () => {
+    const { provision, deps, cluster, control } = await start();
+    const broken = await provision("broken");
+    await provision("fine");
+    const row = (await getTenant(control.db, broken.tenant.id)) ?? expect.fail("no tenant row");
+    await deps.pools.evict(row.id);
+    await cluster.dropDatabase(row.dbName);
+    const logs = captureLogs();
+    const run = await pruneTenants(deps);
+    expect(run).toMatchObject({ tenants: 1, failed: [broken.tenant.id] });
+    expect(logs.filter((l) => l.alert)).toEqual([
+      expect.objectContaining({ alert: "tenant retention failed", failed: 1 }),
+    ]);
   });
 });
 

@@ -22,24 +22,24 @@ function ChatItem({ chat }: { chat: ChatSummaryView }) {
       >
         <span className="flex items-center justify-between gap-2">
           <span
-            className={`truncate text-sm font-medium ${chat.title ? "text-zinc-900" : "text-zinc-500 italic"}`}
+            className={`truncate text-sm font-medium ${chat.title ? "text-fg" : "text-muted italic"}`}
           >
             {chat.title ?? "Untitled chat"}
           </span>
           {chat.origin === "console" ? (
-            <Badge tone="indigo">Console</Badge>
+            <Badge tone="brand">Console</Badge>
           ) : chat.origin === "studio" ? (
-            <Badge tone="green">Studio</Badge>
+            <Badge tone="live">Studio</Badge>
           ) : (
-            <Badge tone="zinc">API</Badge>
+            <Badge tone="neutral">API</Badge>
           )}
         </span>
-        <span className="mt-1 flex items-center justify-between gap-2 text-xs text-zinc-500">
+        <span className="mt-1 flex items-center justify-between gap-2 text-xs text-muted">
           <code className="truncate font-mono">{chat.model}</code>
           <span className="shrink-0">{formatDateTime(chat.updatedAt)}</span>
         </span>
         {chat.origin === "api" && chat.externalUserId ? (
-          <span className="mt-0.5 block truncate text-xs text-zinc-400">
+          <span className="mt-0.5 block truncate text-xs text-muted">
             user {chat.externalUserId}
           </span>
         ) : null}
@@ -88,7 +88,7 @@ export function ChatList({ initial }: { initial: ChatListView }) {
 
   if (chats.length === 0) {
     return (
-      <p className="px-4 py-8 text-center text-sm text-zinc-500">
+      <p className="px-4 py-8 text-center text-sm text-muted">
         No conversations yet. Start one here, or call the API.
       </p>
     );
@@ -106,7 +106,7 @@ export function ChatList({ initial }: { initial: ChatListView }) {
             type="button"
             onClick={loadOlder}
             disabled={loading}
-            className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-60"
+            className="w-full rounded-lg border border-line bg-panel px-3 py-2 text-sm font-medium text-fg shadow-sm hover:bg-raised disabled:opacity-60"
           >
             {loading ? "Loading…" : "Load older chats"}
           </button>

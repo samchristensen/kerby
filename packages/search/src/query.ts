@@ -1,5 +1,6 @@
-// Searching the index (ADR 0019): Postgres full-text matches and, with a query embedding, cosine neighbours among
+// Searching the index (ADR 0021): Postgres full-text matches and, with a query embedding, cosine neighbours among
 // chunks of the same model, fused by reciprocal rank. Exact scans: there is no ANN index yet.
+import type { Visibility } from "@kerby/contracts";
 import type { TenantQueryable } from "@kerby/db";
 import { vectorLiteral } from "./repo.ts";
 
@@ -21,18 +22,29 @@ export type SearchQuery = {
 
 type HitRow = { conversation_id: string; seq: number; part: number; score: number };
 
+/** The `$n` filter of a visibility: null sees the tenant, an id sees that integration's conversations only (ADR 0020). */
+const visibleTo = (visibility: Visibility): string | null =>
+  visibility === "tenant" ? null : visibility.integrationId;
+
 /**
- * The best-matching chunk of each matching conversation, best first, at most `limit`. A query of stopwords only has no
- * keyword matches (not an error); without `embedding` that means no hits.
+ * The best-matching chunk of each matching conversation `visibility` sees, best first, at most `limit`. A query of
+ * stopwords only has no keyword matches (not an error); without `embedding` that means no hits.
  */
 export async function searchChunks(
   db: TenantQueryable,
   query: SearchQuery,
+  visibility: Visibility,
 ): Promise<SearchHitRef[]> {
   if (!Number.isInteger(query.limit) || query.limit < 1)
     throw new RangeError(`a search returns at least 1 hit, not ${query.limit}`);
-  const params: unknown[] = [query.query, query.externalUserId ?? null, query.limit];
-  const scope = "($2::text is null or v.external_user_id = $2)";
+  const params: unknown[] = [
+    query.query,
+    query.externalUserId ?? null,
+    query.limit,
+    visibleTo(visibility),
+  ];
+  const scope =
+    "($2::text is null or v.external_user_id = $2) and ($4::uuid is null or v.integration_id = $4)";
   let semantic = "";
   if (query.embedding) {
     params.push(
@@ -43,9 +55,9 @@ export async function searchChunks(
     semantic = `
       union all
       (select c.conversation_id, c.seq, c.part,
-              row_number() over (order by c.embedding <=> $4::halfvec, c.conversation_id, c.seq, c.part) as rank
+              row_number() over (order by c.embedding <=> $5::halfvec, c.conversation_id, c.seq, c.part) as rank
          from search_chunks c join conversations v on v.id = c.conversation_id
-        where c.embedding_model = $5 and vector_dims(c.embedding) = $6 and ${scope}
+        where c.embedding_model = $6 and vector_dims(c.embedding) = $7 and ${scope}
         order by rank limit ${CANDIDATES})`;
   }
   const { rows } = await db.query<HitRow>(
@@ -93,11 +105,15 @@ type RecordRow = HitRow & {
   created_at: Date;
 };
 
-/** What to show for `refs`, in their order. A ref whose chunk is gone (its conversation deleted since) is left out. */
+/**
+ * What to show for `refs`, in their order. A ref whose chunk is gone (its conversation deleted since), or whose
+ * conversation `visibility` does not see, is left out.
+ */
 export async function readHits(
   db: TenantQueryable,
   query: string,
   refs: readonly SearchHitRef[],
+  visibility: Visibility,
 ): Promise<SearchHitRecord[]> {
   if (refs.length === 0) return [];
   const { rows } = await db.query<RecordRow>(
@@ -107,6 +123,7 @@ export async function readHits(
        from unnest($2::uuid[], $3::int[], $4::int[], $5::float8[]) with ordinality as r(conversation_id, seq, part, score, ord)
        join search_chunks c on c.conversation_id = r.conversation_id and c.seq = r.seq and c.part = r.part
        join conversations v on v.id = r.conversation_id
+      where ($6::uuid is null or v.integration_id = $6)
       order by r.ord`,
     [
       query,
@@ -114,6 +131,7 @@ export async function readHits(
       refs.map((ref) => ref.seq),
       refs.map((ref) => ref.part),
       refs.map((ref) => ref.score),
+      visibleTo(visibility),
     ],
   );
   return rows.map((row) => ({

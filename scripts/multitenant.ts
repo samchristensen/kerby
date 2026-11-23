@@ -1,6 +1,7 @@
 // Multi-tenant proof on the real Compose stack (plan 0002, T13; plan 0001, M6). Run with `make multitenant`.
 //   1. two tenants, provisioned through the operator API, each with a conversation answered by the worker;
-//   2. the cross-tenant attempt suite: conversations, event streams, database roles, tasks, object prefixes, keys;
+//   2. the cross-tenant attempt suite: conversations, event streams, database roles, tasks, object prefixes, keys,
+//      events and subscriptions, integrations without `tenant`, keys without `admin`;
 //   3. a database password rotation: the old password is refused and api and worker log in with the new one;
 //   4. suspension takes effect within the API's auth cache TTL, and only for that tenant;
 //   5. a load run with N tenants (default 200): provisioning, a turn each, connections, memory, then deletion;
@@ -252,6 +253,101 @@ async function crossTenantSuite(a: Tenant, b: Tenant): Promise<void> {
     (await api(`kb_${"0".repeat(12)}_${"A".repeat(43)}`, "GET", `/v1/conversations/${convA.id}`))
       .status === 401,
     "a fabricated key is refused",
+  );
+
+  await integrationSuite(a, b, convA.id);
+}
+
+/** An integration of `tenant` with `scopes`, made as the console does (it has no public route), and a key for it through the operator API. */
+async function integrationKey(tenant: Tenant, name: string, scopes: string[]): Promise<string> {
+  const integrationId = psql(
+    "kerby_control",
+    `insert into integrations (tenant_id, name, scopes) values ('${tenant.id}', '${name}', array[${scopes
+      .map((scope) => `'${scope}'`)
+      .join(", ")}]) returning id`,
+  ).split("\n")[0];
+  const created = await operator("POST", `/tenants/${tenant.id}/keys`, {
+    label: name,
+    integrationId,
+  });
+  check(
+    created.status === 201 &&
+      (created.body.apiKey as { integrationId: string }).integrationId === integrationId,
+    `a key for A's ${name} integration`,
+  );
+  return String(created.body.secret);
+}
+
+/** The ids of every event `key` can pull, from the start of the log. */
+async function pullEvents(key: string): Promise<{ id: string; body: string }[]> {
+  const pulled = await api(key, "GET", "/v1/events?limit=500");
+  check(pulled.status === 200, `GET /v1/events answers 200 (${pulled.status})`);
+  return (pulled.body.events as { id: string }[]).map((event) => ({
+    id: event.id,
+    body: JSON.stringify(event),
+  }));
+}
+
+/** Events, subscriptions and integrations (ADR 0019, 0020): across tenants, across integrations, and by scope. */
+async function integrationSuite(a: Tenant, b: Tenant, convA: string): Promise<void> {
+  console.log("integration and event isolation");
+  const eventsA = await pullEvents(a.secret);
+  check(
+    eventsA.some((event) => event.body.includes(convA)),
+    "A's default key pulls A's conversation events",
+  );
+  const idsA = new Set(eventsA.map((event) => event.id));
+  const eventsB = await pullEvents(b.secret);
+  check(
+    eventsB.every((event) => !idsA.has(event.id) && !event.body.includes(convA)),
+    "B's key pulls none of A's events",
+  );
+
+  // A subscription of A's, probed with B's key on every route.
+  const created = await api(a.secret, "POST", "/v1/subscriptions", {
+    destination: { kind: "webhook", url: "https://example.com/kerby-hook" },
+    types: ["*"],
+  });
+  check(created.status === 201, `A creates a subscription (${created.status})`);
+  const subscriptionId = String((created.body.subscription as { id: string }).id);
+  const event = eventsA[0]?.id ?? "";
+  const probes: [string, string, unknown?][] = [
+    ["GET", `/v1/subscriptions/${subscriptionId}`],
+    ["PATCH", `/v1/subscriptions/${subscriptionId}`, { enabled: false }],
+    ["POST", `/v1/subscriptions/${subscriptionId}/test`],
+    ["GET", `/v1/subscriptions/${subscriptionId}/deliveries`],
+    ["POST", `/v1/subscriptions/${subscriptionId}/redeliver`, { eventId: event }],
+    ["DELETE", `/v1/subscriptions/${subscriptionId}`],
+  ];
+  for (const [method, path, body] of probes) {
+    const status = (await api(b.secret, method, path, body)).status;
+    check(status === 404, `B gets 404 on ${method} ${path} of A's subscription (${status})`);
+  }
+  check(
+    (await api(a.secret, "GET", `/v1/subscriptions/${subscriptionId}`)).status === 200,
+    "A's subscription survives B's attempts",
+  );
+
+  // A second integration of A without `tenant`: it sees only its own work.
+  const own = await integrationKey(a, "own-only", ["conversations", "events"]);
+  const ownStatus = (await api(own, "GET", `/v1/conversations/${convA}`)).status;
+  check(
+    ownStatus === 404,
+    `an integration without tenant gets 404 on another's conversation (${ownStatus})`,
+  );
+  const ownEvents = await pullEvents(own);
+  check(
+    ownEvents.every((e) => !idsA.has(e.id) && !e.body.includes(convA)),
+    "...and pulls none of its events",
+  );
+
+  // Without `admin`, subscriptions are refused.
+  const listed = (await api(own, "GET", "/v1/subscriptions")).status;
+  check(listed === 403, `a key without admin gets 403 on /v1/subscriptions (${listed})`);
+
+  check(
+    (await api(a.secret, "DELETE", `/v1/subscriptions/${subscriptionId}`)).status === 204,
+    "A deletes its subscription",
   );
 }
 

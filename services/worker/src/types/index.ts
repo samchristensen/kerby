@@ -12,7 +12,7 @@ export type WorkerDeps = {
   runtime: AgentRuntime;
   /** The judgment providers behind the port (ADR 0015), by the provider id in a model id: only `src/index.ts` knows which. */
   judgments: readonly JudgmentProvider[];
-  /** The embedding providers behind the port (ADR 0019), by the provider id in a model id: only `src/index.ts` knows which. */
+  /** The embedding providers behind the port (ADR 0021), by the provider id in a model id: only `src/index.ts` knows which. */
   embeddings: readonly EmbeddingProvider[];
   /**
    * A tenant's own model key for a provider, opened (bring your own key). Undefined only for the development fake
@@ -32,7 +32,10 @@ export type WorkerDeps = {
     maxRunningIndexTasks: number;
     /** Searches this worker runs at once across every tenant (`MAX_RUNNING_SEARCHES`); 4 per tenant. */
     maxRunningSearches: number;
+    /** Look at the tenants whose work is due (`SWEEP_INTERVAL_SECONDS`). */
     sweepIntervalMs: number;
+    /** Look at every active tenant, the backstop for a lost hint (`FULL_SWEEP_INTERVAL_SECONDS`). */
+    fullSweepIntervalMs: number;
     enableEchoTool: boolean;
     /** Bytes of message bodies a turn starts with; older whole turns past it are left out (`readHistory`). */
     historyBudgetBytes: number;

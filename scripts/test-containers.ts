@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TestProject } from "vitest/node";
 
-// Postgres 18 with pgvector (ADR 0019), as hosted: Railway's `postgres-ssl:18` ships the extension too.
+// Postgres 18 with pgvector (ADR 0021), as hosted: Railway's `postgres-ssl:18` ships the extension too.
 export const POSTGRES_IMAGE = "pgvector/pgvector:0.8.7-pg18-trixie";
 const RUSTFS_IMAGE = "rustfs/rustfs:1.0.6";
 

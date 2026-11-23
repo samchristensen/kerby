@@ -6,7 +6,7 @@ import type { EventEnvelope, PublicMessage } from "@kerby/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatView } from "../../../../types/index.ts";
 import { formatDateTime } from "../../../_components/format.ts";
-import { Alert, Badge } from "../../../_components/ui.tsx";
+import { Alert, Badge, Mascot } from "../../../_components/ui.tsx";
 import { chatStatusAction, sendMessageAction } from "../actions.ts";
 
 type Entry = ChatView["messages"][number];
@@ -62,19 +62,19 @@ function ToolCall({
 }) {
   const status = result ? (result.isError ? "failed" : "done") : running ? "running…" : "no result";
   return (
-    <details className="rounded-lg border border-zinc-200 bg-zinc-50 text-sm">
-      <summary className="cursor-pointer px-3 py-2 text-zinc-700">
+    <details className="rounded-lg border border-line bg-page text-sm">
+      <summary className="cursor-pointer px-3 py-2 text-fg">
         <span className="font-mono text-xs">{call.name}</span>
-        <span className={`ml-2 text-xs ${result?.isError ? "text-red-600" : "text-zinc-500"}`}>
+        <span className={`ml-2 text-xs ${result?.isError ? "text-danger" : "text-muted"}`}>
           {status}
         </span>
       </summary>
-      <div className="space-y-2 border-t border-zinc-200 px-3 py-2">
-        <pre className="overflow-x-auto font-mono text-xs break-words whitespace-pre-wrap text-zinc-700">
+      <div className="space-y-2 border-t border-line px-3 py-2">
+        <pre className="overflow-x-auto font-mono text-xs break-words whitespace-pre-wrap text-fg">
           {JSON.stringify(call.input, null, 2)}
         </pre>
         {result ? (
-          <pre className="overflow-x-auto border-t border-zinc-200 pt-2 font-mono text-xs break-words whitespace-pre-wrap text-zinc-700">
+          <pre className="overflow-x-auto border-t border-line pt-2 font-mono text-xs break-words whitespace-pre-wrap text-fg">
             {resultText(result)}
           </pre>
         ) : null}
@@ -98,7 +98,7 @@ function MessageView({
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] space-y-2 rounded-2xl rounded-br-md bg-indigo-600 px-4 py-2.5 text-sm text-white">
+        <div className="max-w-[85%] space-y-2 rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-sm text-on-brand">
           <Parts content={message.content} />
         </div>
       </div>
@@ -106,7 +106,7 @@ function MessageView({
   }
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 text-sm text-zinc-900 shadow-sm">
+      <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-md border border-line bg-panel px-4 py-2.5 text-sm text-fg shadow-sm">
         {message.content.map((part, index) =>
           part.type === "tool_call" ? (
             <ToolCall key={index} call={part} result={results.get(part.id)} running={busy} />
@@ -230,12 +230,12 @@ export function ChatThread({ chat }: { chat: ChatView }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-6">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line bg-panel px-6">
         <div className="min-w-0">
-          <h1 className="truncate text-sm font-semibold text-zinc-900">
+          <h1 className="truncate text-sm font-semibold text-fg">
             {chat.title ?? "Untitled chat"}
           </h1>
-          <p className="truncate text-xs text-zinc-500">
+          <p className="truncate text-xs text-muted">
             <code className="font-mono">{chat.model}</code>
             {chat.prompt ? (
               <>
@@ -250,16 +250,16 @@ export function ChatThread({ chat }: { chat: ChatView }) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {connection === "reconnecting" ? (
-            <span className="text-xs text-zinc-400">Reconnecting…</span>
+            <span className="text-xs text-muted">Reconnecting…</span>
           ) : connection === "closed" ? (
-            <span className="text-xs text-red-600">Disconnected. Reload the page.</span>
+            <span className="text-xs text-danger">Disconnected. Reload the page.</span>
           ) : null}
           {chat.origin === "console" ? (
-            <Badge tone="indigo">Console</Badge>
+            <Badge tone="brand">Console</Badge>
           ) : chat.origin === "studio" ? (
-            <Badge tone="green">Studio</Badge>
+            <Badge tone="live">Studio</Badge>
           ) : (
-            <Badge tone="zinc">
+            <Badge tone="neutral">
               {chat.externalUserId ? `API · ${chat.externalUserId}` : "API"}
             </Badge>
           )}
@@ -277,42 +277,44 @@ export function ChatThread({ chat }: { chat: ChatView }) {
       >
         <div className="mx-auto max-w-3xl space-y-4">
           {chat.system ? (
-            <details className="rounded-lg border border-dashed border-zinc-300 text-sm text-zinc-600">
+            <details className="rounded-lg border border-dashed border-line text-sm text-muted">
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
                 System prompt
               </summary>
-              <p className="border-t border-dashed border-zinc-300 px-3 py-2 break-words whitespace-pre-wrap">
+              <p className="border-t border-dashed border-line px-3 py-2 break-words whitespace-pre-wrap">
                 {chat.system}
               </p>
             </details>
           ) : null}
           {messages.length === 0 && !busy ? (
-            <p className="py-12 text-center text-sm text-zinc-500">
-              No messages yet. Say something.
-            </p>
+            <div className="flex flex-col items-center gap-2 py-12 text-center text-sm text-muted">
+              <Mascot state="friendly" size={96} />
+              <p>No messages yet. Say something.</p>
+            </div>
           ) : null}
           {messages.map((entry) => (
             <MessageView key={entry.seq} entry={entry} results={results} busy={busy} />
           ))}
           {live ? (
             <div className="flex justify-start">
-              <div className="max-w-[85%] rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 text-sm break-words whitespace-pre-wrap text-zinc-900 shadow-sm">
+              <div className="max-w-[85%] rounded-2xl rounded-bl-md border border-line bg-panel px-4 py-2.5 text-sm break-words whitespace-pre-wrap text-fg shadow-sm">
                 {live}
-                <span className="ml-0.5 animate-pulse text-zinc-400">▍</span>
+                <span className="ml-0.5 animate-pulse text-muted">▍</span>
               </div>
             </div>
           ) : busy ? (
-            <p className="text-sm text-zinc-400">
+            <div className="flex items-center gap-2 text-sm text-muted">
+              <Mascot state="thinking" size={48} />
               <span className="animate-pulse">Working…</span>
-            </p>
+            </div>
           ) : null}
           {error && !busy ? <Alert tone="error">{error}</Alert> : null}
         </div>
       </div>
 
-      <footer className="shrink-0 border-t border-zinc-200 bg-white px-6 py-4">
+      <footer className="shrink-0 border-t border-line bg-panel px-6 py-4">
         <div className="mx-auto max-w-3xl">
-          {sendError ? <p className="mb-2 text-sm text-red-600">{sendError}</p> : null}
+          {sendError ? <p className="mb-2 text-sm text-danger">{sendError}</p> : null}
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -337,12 +339,12 @@ export function ChatThread({ chat }: { chat: ChatView }) {
                   ? "Waiting for the reply…"
                   : "Write a message. Enter sends, Shift+Enter adds a line."
               }
-              className="block max-h-48 min-h-11 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:outline-2 focus:outline-indigo-500"
+              className="block max-h-48 min-h-11 w-full resize-y rounded-lg border border-line bg-page px-3 py-2 text-sm text-fg shadow-sm placeholder:text-muted/60 focus:outline-2 focus:outline-brand"
             />
             <button
               type="submit"
               disabled={busy || sending || draft.trim() === ""}
-              className="inline-flex h-11 shrink-0 items-center justify-center rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-11 shrink-0 items-center justify-center rounded-lg bg-brand px-4 text-sm font-medium text-on-brand shadow-sm hover:bg-brand/85 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {sending ? "Sending…" : "Send"}
             </button>

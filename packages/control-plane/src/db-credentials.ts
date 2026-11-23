@@ -1,7 +1,7 @@
 // Tenant database passwords (ADR 0009): random per tenant, stored sealed with the secret box under TENANT_DB_KEYS.
 // Control writes them (provisioning, rotation, startup); api and worker read them to open tenant databases.
 import { randomBytes } from "node:crypto";
-import type { ControlDb, ControlQueryable } from "@kerby/db";
+import { type ControlDb, type ControlQueryable, isUuid } from "@kerby/db";
 import type { SecretBox } from "@kerby/secrets";
 import {
   TENANT_COLUMNS,
@@ -60,8 +60,9 @@ export async function readTenantDbPassword(
   box: SecretBox,
   tenantId: string,
 ): Promise<string | undefined> {
+  if (!isUuid(tenantId)) return undefined;
   const { rows } = await db.query<{ ciphertext: Buffer }>(
-    "select ciphertext from tenant_db_credentials where tenant_id::text = $1",
+    "select ciphertext from tenant_db_credentials where tenant_id = $1",
     [tenantId],
   );
   const sealed = rows[0]?.ciphertext;
@@ -75,10 +76,11 @@ export async function resolveTenantDbUrl(
   tenantId: string,
   sslmode?: "disable" | "require" | "verify-full",
 ): Promise<string> {
+  if (!isUuid(tenantId)) throw new Error(`tenant ${tenantId} does not exist`);
   const { rows } = await db.query<TenantRow & { ciphertext: Buffer | null }>(
     `select ${TENANT_COLUMNS}, c.ciphertext
        from tenants t left join tenant_db_credentials c on c.tenant_id = t.id
-      where t.id::text = $1`,
+      where t.id = $1`,
     [tenantId],
   );
   const row = rows[0];

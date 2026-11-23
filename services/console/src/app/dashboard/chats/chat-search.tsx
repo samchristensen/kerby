@@ -20,16 +20,16 @@ function HitItem({ hit }: { hit: ChatSearchHitView }) {
       >
         <span className="flex items-center justify-between gap-2">
           <span
-            className={`truncate text-sm font-medium ${hit.title ? "text-zinc-900" : "text-zinc-500 italic"}`}
+            className={`truncate text-sm font-medium ${hit.title ? "text-fg" : "text-muted italic"}`}
           >
             {hit.title ?? "Untitled chat"}
           </span>
-          <Badge tone={hit.role === "user" ? "indigo" : "zinc"}>
+          <Badge tone={hit.role === "user" ? "brand" : "neutral"}>
             {hit.role === "user" ? "User" : "Assistant"}
           </Badge>
         </span>
-        <span className="mt-1 line-clamp-3 text-xs break-words text-zinc-600">{hit.snippet}</span>
-        <span className="mt-1 block text-xs text-zinc-400">{formatDateTime(hit.createdAt)}</span>
+        <span className="mt-1 line-clamp-3 text-xs break-words text-muted">{hit.snippet}</span>
+        <span className="mt-1 block text-xs text-muted">{formatDateTime(hit.createdAt)}</span>
       </NavLink>
     </li>
   );
@@ -48,7 +48,7 @@ function Results({ state }: { state: SearchChatsState }) {
   const { hits, mode, notice } = state.result;
   return (
     <>
-      <p className="px-4 pt-1 pb-2 text-xs text-zinc-500">
+      <p className="px-4 pt-1 pb-2 text-xs text-muted">
         {hits.length === 1 ? "1 chat" : `${hits.length} chats`} ·{" "}
         {mode === "hybrid" ? "words and meaning" : "words only"}
       </p>
@@ -58,9 +58,9 @@ function Results({ state }: { state: SearchChatsState }) {
         </div>
       ) : null}
       {hits.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-zinc-500">No chats match.</p>
+        <p className="px-4 py-8 text-center text-sm text-muted">No chats match.</p>
       ) : (
-        <ul className="border-t border-zinc-100">
+        <ul className="border-t border-line">
           {hits.map((hit) => (
             <HitItem key={hit.conversationId} hit={hit} />
           ))}
@@ -92,7 +92,7 @@ export function ChatSearch({ children }: { children: ReactNode }) {
     <>
       <form
         onSubmit={search}
-        className="sticky top-0 z-10 flex gap-2 border-b border-zinc-100 bg-white p-3"
+        className="sticky top-0 z-10 flex gap-2 border-b border-line bg-panel p-3"
       >
         <input
           type="search"
@@ -105,12 +105,12 @@ export function ChatSearch({ children }: { children: ReactNode }) {
             if (!event.target.value) setState(undefined);
           }}
           maxLength={1000}
-          className="block min-w-0 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:outline-2 focus:outline-offset-0 focus:outline-indigo-500"
+          className="block min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-sm text-fg shadow-sm placeholder:text-muted focus:outline-2 focus:outline-offset-0 focus:outline-brand"
         />
         <button
           type="submit"
           disabled={pending}
-          className="rounded-lg px-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-60"
+          className="rounded-lg px-2 text-sm font-medium text-muted hover:bg-raised hover:text-fg disabled:opacity-60"
         >
           {pending ? "Searching…" : "Search"}
         </button>
@@ -118,7 +118,7 @@ export function ChatSearch({ children }: { children: ReactNode }) {
           <button
             type="button"
             onClick={clear}
-            className="rounded-lg px-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+            className="rounded-lg px-2 text-sm font-medium text-muted hover:bg-raised hover:text-fg"
           >
             Clear
           </button>
@@ -127,8 +127,8 @@ export function ChatSearch({ children }: { children: ReactNode }) {
       {state ? (
         <>
           <Results state={state} />
-          <p className="px-4 py-3 text-xs text-zinc-400">
-            <Link href="/dashboard/chats/search-settings" className="hover:text-zinc-600">
+          <p className="px-4 py-3 text-xs text-muted">
+            <Link href="/dashboard/chats/search-settings" className="hover:text-fg">
               Search settings
             </Link>
           </p>

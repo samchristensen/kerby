@@ -1,5 +1,5 @@
 // The OpenAI embeddings wire format (https://platform.openai.com/docs/api-reference/embeddings) behind the
-// EmbeddingProvider port (ADR 0019): the only place that knows it. Several providers serve it at `<base>/embeddings`
+// EmbeddingProvider port (ADR 0021): the only place that knows it. Several providers serve it at `<base>/embeddings`
 // with their chat key; `provider-ids.ts` lists them and where each was confirmed. One adapter, one provider id each.
 import type { EmbeddingOutcome, EmbeddingProvider, EmbeddingRun } from "@kerby/embeddings";
 import { z } from "zod";

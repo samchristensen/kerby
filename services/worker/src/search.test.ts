@@ -1,4 +1,4 @@
-// The chat search index from the worker's side (ADR 0019): what a finished turn leaves in the index, what a semantic
+// The chat search index from the worker's side (ADR 0021): what a finished turn leaves in the index, what a semantic
 // search answers with and without the tenant's key, and the backfill a model change starts. Real Postgres, RustFS and
 // scheduler; embeddings from the deterministic fake, which ranks texts that share words closer.
 import { setTimeout as sleep } from "node:timers/promises";
@@ -72,6 +72,8 @@ async function harness(options: { modelKeys?: WorkerDeps["modelKeys"] } = {}) {
       maxRunningIndexTasks: 2,
       maxRunningSearches: 4,
       sweepIntervalMs: 200,
+      // Out of reach of a test: work no hint announced is found only by the full sweep at start.
+      fullSweepIntervalMs: 600_000,
       enableEchoTool: true,
       historyBudgetBytes: 8 * 1024 * 1024,
     },
@@ -92,7 +94,11 @@ async function harness(options: { modelKeys?: WorkerDeps["modelKeys"] } = {}) {
     },
     /** A conversation answered by a real turn (the fake model replies "Echo: <text>"). */
     async chat(text: string) {
-      const conversation = await insertConversation(ctx.db, { model: "fake/fake-1", system: "" });
+      const conversation = await insertConversation(ctx.db, {
+        model: "fake/fake-1",
+        system: "",
+        integrationId: null,
+      });
       await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text }], {
         storageBytes: 1024 ** 3,
       });
@@ -102,7 +108,11 @@ async function harness(options: { modelKeys?: WorkerDeps["modelKeys"] } = {}) {
     },
     /** A conversation whose messages are stored without the worker (no turn, so nothing indexes it). */
     async stored(text: string) {
-      const conversation = await insertConversation(ctx.db, { model: "fake/fake-1", system: "" });
+      const conversation = await insertConversation(ctx.db, {
+        model: "fake/fake-1",
+        system: "",
+        integrationId: null,
+      });
       await postUserMessage(ctx, blobs, conversation.id, [{ type: "text", text }], {
         storageBytes: 1024 ** 3,
       });
@@ -129,7 +139,7 @@ async function harness(options: { modelKeys?: WorkerDeps["modelKeys"] } = {}) {
     async search(query: string) {
       const taskId = await this.spawn(
         "run-search",
-        { query, limit: 10, externalUserId: null },
+        { query, limit: 10, externalUserId: null, visibility: "tenant" },
         `search:${crypto.randomUUID()}`,
       );
       const task = await eventually("the search", async () => {
@@ -214,7 +224,7 @@ describe("chat search in the worker", () => {
     await h.stored("quarterly invoice totals for the accounting team");
     // Past one backfill page (50), so the backfill must hand over to a second task to reach them all.
     for (let i = 0; i < 50; i++)
-      await insertConversation(h.ctx.db, { model: "fake/fake-1", system: "" });
+      await insertConversation(h.ctx.db, { model: "fake/fake-1", system: "", integrationId: null });
     const { settings } = await h.useModel(MODEL);
     await h.start();
 

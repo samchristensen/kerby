@@ -98,6 +98,33 @@ describe("handles", () => {
     }
     expect((await db.query("select 1 as one")).rows).toEqual([{ one: 1 }]);
   });
+
+  it("ends a tenant transaction left idle, so its locks do not outlive a stalled process", async () => {
+    const url = (await database()).url;
+    const stalled = createTenantDb(url, { idleInTransactionTimeoutMillis: 300 });
+    const other = createTenantDb(url);
+    cleanups.push(
+      () => stalled.close(),
+      () => other.close(),
+    );
+    const locked = Promise.withResolvers<void>();
+    const stuck = stalled
+      .transaction(async (tx) => {
+        await tx.query("select pg_advisory_xact_lock(42)");
+        locked.resolve();
+        await sleep(1_500); // idle inside the transaction, like a process stopped mid-claim
+        await tx.query("select 1");
+      })
+      .then(
+        () => "committed",
+        () => "ended",
+      );
+    await locked.promise;
+    const started = Date.now();
+    await other.transaction((tx) => tx.query("select pg_advisory_xact_lock(42)"));
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(await stuck).toBe("ended");
+  });
 });
 
 describe("migrate", () => {

@@ -23,9 +23,9 @@ export default async function SearchSettingsPage() {
         description="Search in the chats pane finds the chats that mention your words. An embedding model adds the ones that mean the same."
         actions={
           settings.embeddingModel ? (
-            <Badge tone="green">Words and meaning</Badge>
+            <Badge tone="live">Words and meaning</Badge>
           ) : (
-            <Badge tone="zinc">Words only</Badge>
+            <Badge tone="neutral">Words only</Badge>
           )
         }
       />
@@ -38,7 +38,7 @@ export default async function SearchSettingsPage() {
                 value: settings.embeddingModel ? (
                   <code className="font-mono text-xs">{settings.embeddingModel}</code>
                 ) : (
-                  <span className="text-zinc-400">None: search by words only</span>
+                  <span className="text-muted">None: search by words only</span>
                 ),
               },
               {
@@ -59,7 +59,7 @@ export default async function SearchSettingsPage() {
           ) : null}
         </Card>
         <Card title="Embedding model">
-          <div className="mb-4 space-y-3 text-sm text-zinc-500">
+          <div className="mb-4 space-y-3 text-sm text-muted">
             <p>
               Setting a model sends the text of every chat in this workspace to its provider, with
               your key for that provider, to embed it; new messages follow as they are written.
@@ -78,7 +78,7 @@ export default async function SearchSettingsPage() {
             suggestions={settings.suggestions.map((suggestion) => suggestion.model)}
           />
           {settings.embeddingModel ? (
-            <div className="mt-6 border-t border-zinc-100 pt-6">
+            <div className="mt-6 border-t border-line pt-6">
               <ConfirmAction
                 action={clearEmbeddingModelAction}
                 label="Turn off"
@@ -89,26 +89,26 @@ export default async function SearchSettingsPage() {
           ) : null}
         </Card>
         <Card title="Suggested models">
-          <ul className="divide-y divide-zinc-100">
+          <ul className="divide-y divide-line">
             {settings.suggestions.map((suggestion) => (
               <li
                 key={suggestion.model}
                 className="flex items-center justify-between gap-4 py-3 text-sm first:pt-0 last:pb-0"
               >
                 <span className="min-w-0">
-                  <span className="block font-medium text-zinc-900">
+                  <span className="block font-medium text-fg">
                     {providerName(suggestion.provider)}
                   </span>
-                  <code className="block truncate font-mono text-xs text-zinc-500">
+                  <code className="block truncate font-mono text-xs text-muted">
                     {suggestion.model}
                   </code>
                 </span>
                 {suggestion.configured ? (
-                  <Badge tone="green">Key set</Badge>
+                  <Badge tone="live">Key set</Badge>
                 ) : (
                   <Link
                     href={`/dashboard/providers/${suggestion.provider}`}
-                    className="shrink-0 text-xs font-medium text-indigo-600 hover:text-indigo-500"
+                    className="shrink-0 text-xs font-medium text-brand-text hover:text-brand-text/80"
                   >
                     Add a key
                   </Link>

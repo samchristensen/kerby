@@ -1,4 +1,4 @@
-// Building the index (ADR 0019): chunks are written a batch at a time behind a per-conversation watermark, then
+// Building the index (ADR 0021): chunks are written a batch at a time behind a per-conversation watermark, then
 // embedded. No connection is held across a provider call: the caller reads, calls out, then writes in one short
 // transaction that checks nothing moved meanwhile.
 import type { TenantDb, TenantQueryable } from "@kerby/db";

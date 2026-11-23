@@ -1,4 +1,4 @@
-// The tenant's one `search_settings` row (ADR 0019): which embedding model indexes its chats, and how indexing went.
+// The tenant's one `search_settings` row (ADR 0021): which embedding model indexes its chats, and how indexing went.
 import type { TenantQueryable, TenantTx } from "@kerby/db";
 
 export type SearchSettingsRecord = {

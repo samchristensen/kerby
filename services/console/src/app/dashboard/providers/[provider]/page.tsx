@@ -41,9 +41,9 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
         description={`Model ids for this provider start with ${provider.id}/. It runs ${uses(provider)}.`}
         actions={
           provider.configured ? (
-            <Badge tone="green">Key set</Badge>
+            <Badge tone="live">Key set</Badge>
           ) : (
-            <Badge tone="zinc">No key</Badge>
+            <Badge tone="neutral">No key</Badge>
           )
         }
       />
@@ -63,7 +63,7 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
                   ) : provider.configured ? (
                     "Key set"
                   ) : (
-                    <span className="text-zinc-400">No key</span>
+                    <span className="text-muted">No key</span>
                   ),
               },
             ]}
@@ -72,7 +72,7 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
         <Card title={provider.configured ? "Replace key" : "Add key"}>
           <ModelKeyForm action={setModelKeyAction.bind(null, provider.id)} providerName={name} />
           {provider.configured ? (
-            <div className="mt-6 border-t border-zinc-100 pt-6">
+            <div className="mt-6 border-t border-line pt-6">
               <ConfirmAction
                 action={removeModelKeyAction.bind(null, provider.id)}
                 label="Remove key"
@@ -85,7 +85,7 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
         <Card title="Usage">
           {provider.chat ? (
             <>
-              <p className="mb-3 text-sm text-zinc-500">
+              <p className="mb-3 text-sm text-muted">
                 Name the model when you start a conversation:
               </p>
               <CodeBlock>{`{"model": "${provider.id}/<model-id>"}`}</CodeBlock>
@@ -93,7 +93,7 @@ export default async function ProviderPage({ params }: { params: Promise<{ provi
           ) : null}
           {provider.decisions ? (
             <>
-              <p className={`${provider.chat ? "mt-6 " : ""}mb-3 text-sm text-zinc-500`}>
+              <p className={`${provider.chat ? "mt-6 " : ""}mb-3 text-sm text-muted`}>
                 Name the model of a decision (
                 <code className="font-mono text-xs">POST /v1/judgments</code>, or a guardrail's{" "}
                 <code className="font-mono text-xs">model</code>):

@@ -20,7 +20,7 @@ export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun
   );
   // Roles made before connection limits existed get theirs now (idempotent).
   for (const tenant of tenants) await deps.cluster.limitRoleConnections(tenant.dbRole);
-  // A tenant role may not create pgvector's `vector` (not a trusted extension, ADR 0019): install it as the admin
+  // A tenant role may not create pgvector's `vector` (not a trusted extension, ADR 0021): install it as the admin
   // first. A database that cannot take it is reported with the failed migrations and not migrated.
   const ready: string[] = [];
   const unprepared: { tenantId: string; error: Error }[] = [];

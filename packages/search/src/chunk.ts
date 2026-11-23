@@ -1,4 +1,4 @@
-// What is indexed (ADR 0019): the text of user and assistant messages, in overlapping pieces small enough to embed and
+// What is indexed (ADR 0021): the text of user and assistant messages, in overlapping pieces small enough to embed and
 // to show as a hit. Tool calls, tool results, reasoning and blobs are not text a person searches for.
 import type { AgentMessage } from "@kerby/agent";
 

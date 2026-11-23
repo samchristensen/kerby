@@ -91,6 +91,7 @@ async function startWorker(config: WorkerConfig): Promise<{
       maxRunningIndexTasks: config.maxRunningIndexTasks,
       maxRunningSearches: config.maxRunningSearches,
       sweepIntervalMs: config.sweepIntervalSeconds * 1000,
+      fullSweepIntervalMs: config.fullSweepIntervalSeconds * 1000,
       enableEchoTool: config.enableEchoTool,
       historyBudgetBytes: config.historyBudgetBytes,
     },

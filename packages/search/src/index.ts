@@ -1,4 +1,4 @@
-// The chat search index (ADR 0019): its tenant tables, how messages become chunks, and the queries that build and
+// The chat search index (ADR 0021): its tenant tables, how messages become chunks, and the queries that build and
 // search it. Embedding is not done here: the caller brings vectors from an `EmbeddingProvider`.
 import { join } from "node:path";
 
