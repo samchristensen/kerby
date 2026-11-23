@@ -9,7 +9,7 @@ import { requireSession } from "../_lib/session.ts";
 
 export const metadata: Metadata = { title: "Overview" };
 
-const planDefault = <span className="text-zinc-400">Plan default</span>;
+const planDefault = <span className="text-muted">Plan default</span>;
 
 function Step({
   n,
@@ -26,7 +26,7 @@ function Step({
     <li className="flex gap-4">
       <span
         className={`flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
-          done ? "bg-emerald-100 text-emerald-700" : "bg-zinc-100 text-zinc-600"
+          done ? "bg-live/10 text-live-text" : "bg-raised text-muted"
         }`}
       >
         {done ? (
@@ -39,12 +39,10 @@ function Step({
         <span className="sr-only">{done ? " (done)" : ""}</span>
       </span>
       <div className="min-w-0 flex-1 pt-0.5">
-        <h3
-          className={`text-sm font-medium ${done ? "text-zinc-500 line-through" : "text-zinc-900"}`}
-        >
+        <h3 className={`text-sm font-medium ${done ? "text-muted line-through" : "text-fg"}`}>
           {title}
         </h3>
-        <div className="mt-1 text-sm text-zinc-500">{children}</div>
+        <div className="mt-1 text-sm text-muted">{children}</div>
       </div>
     </li>
   );
@@ -75,7 +73,7 @@ export default async function OverviewPage() {
                 {
                   term: "Status",
                   value: (
-                    <Badge tone={overview.status === "active" ? "green" : "zinc"}>
+                    <Badge tone={overview.status === "active" ? "live" : "neutral"}>
                       {overview.status}
                     </Badge>
                   ),
@@ -111,7 +109,7 @@ export default async function OverviewPage() {
                 Kerby runs your conversations on your own model keys.{" "}
                 <Link
                   href="/dashboard/providers"
-                  className="font-medium text-indigo-600 hover:text-indigo-500"
+                  className="font-medium text-brand-text hover:text-brand-text/80"
                 >
                   Add a provider key →
                 </Link>
@@ -121,7 +119,7 @@ export default async function OverviewPage() {
                 whose role decides what it may do.{" "}
                 <Link
                   href="/dashboard/integrations"
-                  className="font-medium text-indigo-600 hover:text-indigo-500"
+                  className="font-medium text-brand-text hover:text-brand-text/80"
                 >
                   Create a key →
                 </Link>

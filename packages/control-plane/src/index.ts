@@ -56,6 +56,13 @@ export {
   readModelKey,
 } from "./secrets.ts";
 export {
+  allowEmails,
+  disallowEmail,
+  isSignupAllowed,
+  listAllowedEmails,
+  setConsoleAdmin,
+} from "./signup-allowlist.ts";
+export {
   deleteTenantRow,
   getTenant,
   insertTenant,

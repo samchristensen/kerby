@@ -21,6 +21,7 @@ import {
   type ReissueExportResponse,
   RestoreRequestSchema,
   type RestoreResponse,
+  SetConsoleAdminRequestSchema,
   type Tenant,
 } from "@kerby/contracts";
 import type { ApiKeyRecord, IntegrationRecord, TenantRecord } from "@kerby/control-plane";
@@ -39,7 +40,7 @@ import { exportTenant, reissueExportUrls } from "../service/export.ts";
 import { createOperatorIntegration, listOperatorIntegrations } from "../service/integrations.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
-import { signUp } from "../service/signups.ts";
+import { setAdmin, signUp } from "../service/signups.ts";
 import {
   deleteTenant,
   getTenantRecord,
@@ -48,7 +49,7 @@ import {
   resumeTenant,
   suspendTenant,
 } from "../service/tenants.ts";
-import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
+import { ConflictError, type ControlDeps, ForbiddenError, NotFoundError } from "../types/index.ts";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
 
@@ -93,6 +94,7 @@ function mapErrors(handler: Route[2]): Route[2] {
     } catch (error) {
       if (error instanceof NotFoundError) throw new HttpError(404, "not_found", error.message);
       if (error instanceof ConflictError) throw new HttpError(409, error.code, error.message);
+      if (error instanceof ForbiddenError) throw new HttpError(403, error.code, error.message);
       throw error;
     }
   };
@@ -131,6 +133,16 @@ export function createControlApp(deps: ControlDeps, tokens: ControlTokens): Fetc
           secret: key.secret,
         };
         return json(201, response);
+      }),
+    ],
+    [
+      // Marks a console person an admin, who edits the sign-up allowlist in the console. Audited; the only way to make one.
+      "POST",
+      "/v1/operator/console-admins",
+      authorized(async (request) => {
+        const body = await readJson(request, SetConsoleAdminRequestSchema);
+        await setAdmin(deps, body.email, body.admin);
+        return json(200, body);
       }),
     ],
     [

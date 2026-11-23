@@ -81,6 +81,7 @@ type ConsoleSession = {
   tenantId: string;
   tenantName: string;
   tenantStatus: string;
+  isAdmin: boolean;
   expiresAt: Date;
 };
 
@@ -96,9 +97,10 @@ export async function readConsoleSession(
     tenant_id: string;
     tenant_name: string;
     tenant_status: string;
+    is_admin: boolean;
     expires_at: Date;
   }>(
-    `select s.user_id, u.email, s.tenant_id, t.name as tenant_name, t.status as tenant_status, s.expires_at
+    `select s.user_id, u.email, u.is_admin, s.tenant_id, t.name as tenant_name, t.status as tenant_status, s.expires_at
        from console_sessions s
        join console_users u on u.id = s.user_id
        join tenants t on t.id = s.tenant_id
@@ -113,6 +115,7 @@ export async function readConsoleSession(
         tenantId: row.tenant_id,
         tenantName: row.tenant_name,
         tenantStatus: row.tenant_status,
+        isAdmin: row.is_admin,
         expiresAt: row.expires_at,
       }
     : undefined;

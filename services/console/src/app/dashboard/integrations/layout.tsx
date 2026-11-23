@@ -19,7 +19,7 @@ export default async function IntegrationsLayout({ children }: { children: React
       actions={<ButtonLink href="/dashboard/integrations/new">New integration</ButtonLink>}
     >
       {integrations.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-zinc-500">
+        <p className="px-4 py-8 text-center text-sm text-muted">
           No integrations yet. Create one to hold API keys.
         </p>
       ) : (
@@ -32,14 +32,12 @@ export default async function IntegrationsLayout({ children }: { children: React
                 activeClassName={listItemActiveClass}
               >
                 <span className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-zinc-900">
-                    {integration.name}
-                  </span>
-                  <Badge tone={integration.role === "admin" ? "indigo" : "zinc"}>
+                  <span className="truncate text-sm font-medium text-fg">{integration.name}</span>
+                  <Badge tone={integration.role === "admin" ? "brand" : "neutral"}>
                     {integration.role === "admin" ? "Admin" : "Restricted"}
                   </Badge>
                 </span>
-                <span className="mt-1 block text-xs text-zinc-500">
+                <span className="mt-1 block text-xs text-muted">
                   {integration.liveKeys === 1 ? "1 live key" : `${integration.liveKeys} live keys`}
                 </span>
               </NavLink>

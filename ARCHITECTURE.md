@@ -120,7 +120,8 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
   deleted tenants' copies (ADR 0013).
 - Self-serve sign-up ([ADR 0014](docs/adr/0014-tenant-console.md)): the console hashes the password and calls control's
-  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control provisions as above and stores
+  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control refuses an email that is not on
+  `signup_allowlist` (403 `not_invited`), otherwise provisions as above and stores
   the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
   kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
   `kerby_console`: integrations and their API keys (never the hashes), model keys, people and sessions, appending to the audit log as

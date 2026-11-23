@@ -46,7 +46,7 @@ export function ToolPicker({
 
   if (slugs.length === 0) {
     return (
-      <p className="text-sm text-zinc-500">
+      <p className="text-sm text-muted">
         No tools are enabled yet. Add a server and enable its tools under Tools.
       </p>
     );
@@ -57,8 +57,8 @@ export function ToolPicker({
         const whole = `${slug}/*`;
         const wholeChecked = checked.has(whole);
         return (
-          <fieldset key={slug} className="rounded-lg border border-zinc-200 p-3">
-            <legend className="px-1 font-mono text-sm font-medium text-zinc-900">{slug}</legend>
+          <fieldset key={slug} className="rounded-lg border border-line p-3">
+            <legend className="px-1 font-mono text-sm font-medium text-fg">{slug}</legend>
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="checkbox"
@@ -68,13 +68,13 @@ export function ToolPicker({
                 className="mt-1"
               />
               <span>
-                <span className="font-medium text-zinc-900">Every tool of {slug}</span>
-                <span className="block text-zinc-500">
+                <span className="font-medium text-fg">Every tool of {slug}</span>
+                <span className="block text-muted">
                   Whatever it enables at each turn, tools enabled later included.
                 </span>
               </span>
             </label>
-            <ul className="mt-2 space-y-1.5 border-t border-zinc-100 pt-2">
+            <ul className="mt-2 space-y-1.5 border-t border-line pt-2">
               {choices
                 .filter((tool) => slugOf(tool.pattern) === slug)
                 .map((tool) => (
@@ -91,14 +91,14 @@ export function ToolPicker({
                         className="mt-1"
                       />
                       <span className="min-w-0">
-                        <code className="font-mono text-zinc-900">{tool.pattern}</code>
+                        <code className="font-mono text-fg">{tool.pattern}</code>
                         {offered.has(tool.pattern) ? (
-                          <span className="ml-2 text-xs text-zinc-500">{tool.effect}</span>
+                          <span className="ml-2 text-xs text-muted">{tool.effect}</span>
                         ) : (
-                          <span className="ml-2 text-xs text-amber-700">not enabled now</span>
+                          <span className="ml-2 text-xs text-brand-text">not enabled now</span>
                         )}
                         {tool.title || tool.description ? (
-                          <span className="block truncate text-zinc-500">
+                          <span className="block truncate text-muted">
                             {tool.title ?? tool.description}
                           </span>
                         ) : null}

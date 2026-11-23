@@ -1,36 +1,73 @@
 @import "tailwindcss";
+/* The Operator color scheme (operator-mascot kit): raw palette, semantic --color-* tokens, dark by default and
+   light under data-theme="light". Do not edit it here: update the kit's copy. */
+@import "./tokens.css";
+
+/* Tailwind names for the semantic tokens: bg-page, bg-panel, bg-raised, border-line, text-fg, text-muted, bg-brand,
+   text-brand-text, text-on-brand, bg-live, text-live-text, bg-danger. They point at the tokens, so a theme switch needs no
+   class changes. Opacity steps (bg-brand/10) mix the token with transparent. */
+@theme inline {
+  --color-page: var(--color-bg);
+  --color-panel: var(--color-surface);
+  --color-raised: var(--color-surface-raised);
+  --color-line: var(--color-border);
+  --color-fg: var(--color-text);
+  --color-muted: var(--color-text-muted);
+  --color-brand: var(--color-primary);
+  --color-brand-text: var(--color-primary-text);
+  --color-on-brand: var(--color-on-primary);
+  --color-live: var(--color-accent);
+  --color-live-text: var(--color-accent-text);
+  --color-on-live: var(--color-on-accent);
+  --color-danger: var(--op-danger);
+  --color-on-danger: var(--op-on-danger);
+  --color-ink: var(--op-ink);
+}
+
+/* The kit has no error color. These pair with the semantic tokens: a coral for dark, a red that passes AA on paper. */
+:root {
+  --op-danger: #ff7b72;
+  --op-on-danger: var(--op-ink);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --op-danger: #c62828;
+  --op-on-danger: #ffffff;
+  color-scheme: light;
+}
 
 html {
-  background-color: var(--color-zinc-50);
-  color: var(--color-zinc-900);
+  background-color: var(--color-bg);
+  color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-indigo-500);
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 
-/* The markdown editor (_components/markdown-editor.tsx): Milkdown Crepe in the console's zinc and indigo. */
+/* The markdown editor (_components/markdown-editor.tsx): Milkdown Crepe in the Operator tokens. */
 .kerby-markdown-editor .milkdown {
-  --crepe-color-background: var(--color-white);
-  --crepe-color-on-background: var(--color-zinc-900);
-  --crepe-color-surface: var(--color-white);
-  --crepe-color-surface-low: var(--color-zinc-100);
-  --crepe-color-on-surface: var(--color-zinc-900);
-  --crepe-color-on-surface-variant: var(--color-zinc-600);
-  --crepe-color-outline: var(--color-zinc-300);
-  --crepe-color-primary: var(--color-indigo-600);
-  --crepe-color-secondary: var(--color-indigo-100);
-  --crepe-color-on-secondary: var(--color-indigo-900);
-  --crepe-color-inverse: var(--color-zinc-100);
-  --crepe-color-on-inverse: var(--color-zinc-900);
-  --crepe-color-inline-code: var(--color-zinc-800);
-  --crepe-color-error: var(--color-red-600);
-  --crepe-color-hover: var(--color-zinc-100);
-  --crepe-color-selected: var(--color-indigo-100);
-  --crepe-color-inline-area: var(--color-zinc-200);
+  --crepe-color-background: var(--color-surface);
+  --crepe-color-on-background: var(--color-text);
+  --crepe-color-surface: var(--color-surface);
+  --crepe-color-surface-low: var(--color-bg);
+  --crepe-color-on-surface: var(--color-text);
+  --crepe-color-on-surface-variant: var(--color-text-muted);
+  --crepe-color-outline: var(--color-border);
+  --crepe-color-primary: var(--color-primary-text);
+  --crepe-color-secondary: color-mix(in oklab, var(--color-primary) 22%, var(--color-surface));
+  --crepe-color-on-secondary: var(--color-text);
+  --crepe-color-inverse: var(--color-surface-raised);
+  --crepe-color-on-inverse: var(--color-text);
+  --crepe-color-inline-code: var(--color-text);
+  --crepe-color-error: var(--op-danger);
+  --crepe-color-hover: var(--color-surface-raised);
+  --crepe-color-selected: color-mix(in oklab, var(--color-primary) 22%, var(--color-surface));
+  --crepe-color-inline-area: var(--color-surface-raised);
   --crepe-base-font-size: 15px;
   --crepe-font-title: var(--font-sans);
   --crepe-font-default: var(--font-sans);
@@ -48,7 +85,7 @@ html {
 
 .kerby-markdown-editor .milkdown .ProseMirror :is(h1, h2, h3, h4, h5, h6) {
   font-weight: 600;
-  color: var(--color-zinc-900);
+  color: var(--color-text);
 }
 .kerby-markdown-editor .milkdown .ProseMirror h1 {
   font-size: 1.75em;
@@ -72,8 +109,8 @@ html {
   font-family: var(--font-mono);
   font-size: 0.85em;
   white-space: pre-wrap;
-  color: var(--color-indigo-700);
-  background: var(--color-indigo-50);
+  color: var(--color-primary-text);
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
   border-radius: var(--radius-sm);
   padding: 0 0.25rem;
 }

@@ -300,14 +300,14 @@ describe("integrations", () => {
     );
   });
 
-  it("migration 0007 puts every existing key into an admin `default` integration of its tenant", async () => {
+  it("migration 0008 puts every existing key into an admin `default` integration of its tenant", async () => {
     const database = await createTestDatabase();
     const db = createControlDb(database.url, { max: 1 });
     try {
       const before = readMigrations([controlMigrationsDir]).filter(
-        (m) => m.name < "control-plane/0007",
+        (m) => m.name < "control-plane/0008",
       );
-      expect(before.map((m) => m.name)).toContain("control-plane/0006_app_reads_sessions.sql");
+      expect(before.map((m) => m.name)).toContain("control-plane/0007_signup_allowlist.sql");
       await db.query(
         "create table schema_migrations (name text primary key, applied_at timestamptz not null default now())",
       );
@@ -328,7 +328,7 @@ describe("integrations", () => {
         ids,
       );
       expect(await migrate(db, [controlMigrationsDir])).toContain(
-        "control-plane/0007_integrations.sql",
+        "control-plane/0008_integrations.sql",
       );
       for (const [index, tenantId] of ids.entries()) {
         const integrations = await listIntegrations(db, tenantId);

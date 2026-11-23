@@ -11,7 +11,7 @@ export function RoleFields({
 }) {
   return (
     <fieldset className="space-y-2">
-      <legend className="text-sm font-medium text-zinc-800">Role</legend>
+      <legend className="text-sm font-medium text-fg">Role</legend>
       {ROLES.map((option) => (
         <label key={option.role} className="flex items-start gap-2 text-sm">
           <input
@@ -22,12 +22,12 @@ export function RoleFields({
             className="mt-1"
           />
           <span>
-            <span className="font-medium text-zinc-900">{option.label}</span>
-            <span className="block text-zinc-500">{option.hint}</span>
+            <span className="font-medium text-fg">{option.label}</span>
+            <span className="block text-muted">{option.hint}</span>
           </span>
         </label>
       ))}
-      {error ? <p className="text-sm text-red-600">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
     </fieldset>
   );
 }

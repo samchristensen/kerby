@@ -3,10 +3,10 @@ import type { ToolServerSummary } from "@kerby/contracts";
 import { Badge } from "../../_components/ui.tsx";
 
 export function ServerStatus({ status, kind }: Pick<ToolServerSummary, "status" | "kind">) {
-  if (kind === "builtin") return <Badge tone="indigo">Built in</Badge>;
-  if (status === "ready") return <Badge tone="green">Ready</Badge>;
-  if (status === "error") return <Badge tone="red">Error</Badge>;
-  return <Badge tone="zinc">Listing tools…</Badge>;
+  if (kind === "builtin") return <Badge tone="brand">Built in</Badge>;
+  if (status === "ready") return <Badge tone="live">Ready</Badge>;
+  if (status === "error") return <Badge tone="danger">Error</Badge>;
+  return <Badge tone="neutral">Listing tools…</Badge>;
 }
 
 /** "12 tools · 3 enabled · 1 drifted" */

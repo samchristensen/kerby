@@ -28,12 +28,12 @@ export default async function ToolsLayout({ children }: { children: ReactNode })
               activeClassName={listItemActiveClass}
             >
               <span className="flex items-center justify-between gap-2">
-                <code className="truncate font-mono text-sm font-medium text-zinc-900">
+                <code className="truncate font-mono text-sm font-medium text-fg">
                   {server.slug}
                 </code>
                 <ServerStatus status={server.status} kind={server.kind} />
               </span>
-              <span className="mt-1 block truncate text-xs text-zinc-500">
+              <span className="mt-1 block truncate text-xs text-muted">
                 {server.kind === "builtin"
                   ? "Kerby's own tools"
                   : `${server.url ?? ""} · ${
@@ -46,9 +46,9 @@ export default async function ToolsLayout({ children }: { children: ReactNode })
                           : "no auth"
                     }`}
               </span>
-              <span className="mt-0.5 block text-xs text-zinc-500">{toolCounts(server)}</span>
+              <span className="mt-0.5 block text-xs text-muted">{toolCounts(server)}</span>
               {server.status === "error" && server.lastError ? (
-                <span className="mt-0.5 block truncate text-xs text-red-600">
+                <span className="mt-0.5 block truncate text-xs text-danger">
                   {server.lastError}
                 </span>
               ) : null}

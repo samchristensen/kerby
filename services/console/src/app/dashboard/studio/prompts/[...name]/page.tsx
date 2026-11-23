@@ -40,7 +40,7 @@ function VersionBody({ version }: { version: PromptVersion }) {
     return (
       <div className="space-y-4">
         <DetailList items={items} />
-        <h3 className="text-sm font-semibold text-zinc-900">Questions</h3>
+        <h3 className="text-sm font-semibold text-fg">Questions</h3>
         <CodeBlock>{JSON.stringify(body.questions, null, 2)}</CodeBlock>
       </div>
     );
@@ -62,11 +62,11 @@ function VersionBody({ version }: { version: PromptVersion }) {
           { term: "Guardrails", value: body.guardrails.map((g) => g.name).join(", ") || "none" },
         ]}
       />
-      <h3 className="text-sm font-semibold text-zinc-900">Text</h3>
+      <h3 className="text-sm font-semibold text-fg">Text</h3>
       <CodeBlock>{body.text}</CodeBlock>
       {body.guardrails.length > 0 ? (
         <>
-          <h3 className="text-sm font-semibold text-zinc-900">Guardrails</h3>
+          <h3 className="text-sm font-semibold text-fg">Guardrails</h3>
           <CodeBlock>{JSON.stringify(body.guardrails, null, 2)}</CodeBlock>
         </>
       ) : null}
@@ -86,7 +86,7 @@ function Versions({
   if (prompt.versions.length === 0) {
     return (
       <Card>
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-muted">
           Nothing published yet. Publish the draft to make version 1.
         </p>
       </Card>
@@ -100,7 +100,7 @@ function Versions({
           actions={
             <Link
               href={`${base}?view=versions`}
-              className="text-sm text-indigo-600 hover:underline"
+              className="text-sm text-brand-text hover:underline"
             >
               Close
             </Link>
@@ -117,7 +117,7 @@ function Versions({
         />
       </Card>
       <Card title="Versions">
-        <ul className="divide-y divide-zinc-100">
+        <ul className="divide-y divide-line">
           {prompt.versions.map((v) => (
             <li
               key={v.version}
@@ -126,13 +126,13 @@ function Versions({
               <span className="min-w-0">
                 <Link
                   href={`${base}?view=versions&v=${v.version}`}
-                  className="font-medium text-indigo-600 hover:underline"
+                  className="font-medium text-brand-text hover:underline"
                 >
                   v{v.version}
                 </Link>
-                <span className="ml-2 text-sm text-zinc-700">{v.note ?? ""}</span>
+                <span className="ml-2 text-sm text-fg">{v.note ?? ""}</span>
               </span>
-              <span className="text-xs text-zinc-500">
+              <span className="text-xs text-muted">
                 {formatDateTime(v.publishedAt)} · {actor(v.publishedBy)}
               </span>
             </li>
@@ -202,20 +202,20 @@ export default async function PromptPage({
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <h1 className="font-mono text-lg font-semibold text-zinc-900">{prompt.name}</h1>
-        <Badge tone="zinc">{prompt.kind === "chat" ? "Chat prompt" : "Decision model"}</Badge>
+        <h1 className="font-mono text-lg font-semibold text-fg">{prompt.name}</h1>
+        <Badge tone="neutral">{prompt.kind === "chat" ? "Chat prompt" : "Decision model"}</Badge>
         {prompt.latestVersion === null ? (
-          <Badge tone="zinc">unpublished</Badge>
+          <Badge tone="neutral">unpublished</Badge>
         ) : (
-          <Badge tone="green">latest v{prompt.latestVersion}</Badge>
+          <Badge tone="live">latest v{prompt.latestVersion}</Badge>
         )}
         {Object.entries(prompt.labels).map(([label, version]) => (
-          <Badge key={label} tone="indigo">
+          <Badge key={label} tone="brand">
             {label}·v{version}
           </Badge>
         ))}
       </div>
-      <nav aria-label="Prompt" className="mb-6 flex gap-1 border-b border-zinc-200">
+      <nav aria-label="Prompt" className="mb-6 flex gap-1 border-b border-line">
         {VIEWS.map((item) => (
           <Link
             key={item.view}
@@ -223,8 +223,8 @@ export default async function PromptPage({
             aria-current={view === item.view ? "page" : undefined}
             className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${
               view === item.view
-                ? "border-indigo-600 text-indigo-700"
-                : "border-transparent text-zinc-600 hover:text-zinc-900"
+                ? "border-brand text-brand-text"
+                : "border-transparent text-muted hover:text-fg"
             }`}
           >
             {item.label}

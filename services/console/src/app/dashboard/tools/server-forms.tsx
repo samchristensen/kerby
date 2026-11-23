@@ -41,7 +41,7 @@ function AuthFields({
   const [kind, setKind] = useState<ToolServerAuth["kind"]>(auth?.kind ?? "none");
   return (
     <fieldset className="space-y-3">
-      <legend className="text-sm font-medium text-zinc-800">Authentication</legend>
+      <legend className="text-sm font-medium text-fg">Authentication</legend>
       <div className="flex gap-6 text-sm">
         {(["none", "header", "oauth"] as const).map((option) => (
           <label key={option} className="flex items-center gap-2">
@@ -56,7 +56,7 @@ function AuthFields({
           </label>
         ))}
       </div>
-      {fields?.auth ? <p className="text-sm text-red-600">{fields.auth}</p> : null}
+      {fields?.auth ? <p className="text-sm text-danger">{fields.auth}</p> : null}
       {kind === "header" ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
@@ -142,7 +142,7 @@ export function NewServerForm() {
           hasCredential={false}
           fields={state?.fields}
         />
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-muted">
           Next, a worker lists the server&apos;s tools. Each arrives disabled: enable the ones your
           conversations may call.
         </p>
@@ -226,7 +226,7 @@ export function ConnectButton({
       <SubmitButton variant={connected ? "secondary" : "primary"} pending="Opening the sign-in…">
         {connected ? "Reconnect" : "Connect"}
       </SubmitButton>
-      {state && !state.ok ? <span className="text-sm text-red-600">{state.error}</span> : null}
+      {state && !state.ok ? <span className="text-sm text-danger">{state.error}</span> : null}
     </form>
   );
 }
@@ -244,11 +244,11 @@ export function FinishConnection({ answer }: { answer: Record<string, string> })
     started.current = true;
     void finishToolServerOAuthAction(answer).then(setFailure);
   }, [answer]);
-  if (!failure) return <p className="text-sm text-zinc-500">Finishing the connection…</p>;
+  if (!failure) return <p className="text-sm text-muted">Finishing the connection…</p>;
   return (
     <div className="space-y-4">
       <Alert tone="error">{failure.error ?? "The connection was refused."}</Alert>
-      <Link href="/dashboard/tools" className="text-sm text-indigo-600 hover:underline">
+      <Link href="/dashboard/tools" className="text-sm text-brand-text hover:underline">
         Back to Tools
       </Link>
     </div>
@@ -262,7 +262,7 @@ export function SyncButton({ action }: { action: () => Promise<ToolFormState> })
       <SubmitButton variant="secondary" pending="Asking…">
         List tools again
       </SubmitButton>
-      {state && !state.ok ? <span className="text-sm text-red-600">{state.error}</span> : null}
+      {state && !state.ok ? <span className="text-sm text-danger">{state.error}</span> : null}
     </form>
   );
 }
@@ -322,7 +322,7 @@ export function ToolControls({ slug, tool }: { slug: string; tool: Tool }) {
             onChange={(event) =>
               change({ effect: event.target.value === "read" ? "read" : "write" })
             }
-            className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm"
+            className="rounded-md border border-line bg-page px-2 py-1 text-sm text-fg"
           >
             <option value="read">read: may run again after a crash</option>
             <option value="write">write: never repeated</option>
@@ -339,7 +339,7 @@ export function ToolControls({ slug, tool }: { slug: string; tool: Tool }) {
           </button>
         ) : null}
       </div>
-      {error ? <p className="text-sm text-red-600">{error}</p> : null}
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
     </div>
   );
 }

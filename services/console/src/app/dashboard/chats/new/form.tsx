@@ -10,9 +10,9 @@ import { PromptVariableFields } from "../../studio/_components/variable-fields.t
 import { type CreateChatState, createChatAction } from "../actions.ts";
 
 const textareaClass =
-  "block w-full rounded-lg border bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:outline-2 focus:outline-offset-0";
+  "block w-full rounded-lg border bg-page px-3 py-2 text-sm text-fg shadow-sm placeholder:text-muted/60 focus:outline-2 focus:outline-offset-0";
 
-const selectClass = `${textareaClass} border-zinc-300 focus:outline-indigo-500`;
+const selectClass = `${textareaClass} border-line focus:outline-brand`;
 
 export function NewChatForm({
   providers,
@@ -32,7 +32,7 @@ export function NewChatForm({
     <Card>
       <form action={action} className="space-y-4">
         <div className="space-y-1.5">
-          <label htmlFor="field-promptName" className="block text-sm font-medium text-zinc-800">
+          <label htmlFor="field-promptName" className="block text-sm font-medium text-fg">
             Start from
           </label>
           <select
@@ -53,9 +53,9 @@ export function NewChatForm({
             ))}
           </select>
           {state?.fields?.promptName ? (
-            <p className="text-sm text-red-600">{state.fields.promptName}</p>
+            <p className="text-sm text-danger">{state.fields.promptName}</p>
           ) : prompts.length === 0 ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               Publish a chat prompt in the Studio to start from it.
             </p>
           ) : null}
@@ -64,10 +64,7 @@ export function NewChatForm({
         {prompt ? (
           <>
             <div className="space-y-1.5">
-              <label
-                htmlFor="field-promptVersion"
-                className="block text-sm font-medium text-zinc-800"
-              >
+              <label htmlFor="field-promptVersion" className="block text-sm font-medium text-fg">
                 Version
               </label>
               <select
@@ -84,9 +81,9 @@ export function NewChatForm({
                 ))}
               </select>
               {state?.fields?.promptVersion ? (
-                <p className="text-sm text-red-600">{state.fields.promptVersion}</p>
+                <p className="text-sm text-danger">{state.fields.promptVersion}</p>
               ) : (
-                <p className="text-sm text-zinc-500">
+                <p className="text-sm text-muted">
                   The prompt sets the system prompt, model and guardrails. A label is read once:
                   moving it later does not change this chat.
                 </p>
@@ -116,7 +113,7 @@ export function NewChatForm({
               error={state?.fields?.model}
             />
             <div className="space-y-1.5">
-              <label htmlFor="field-system" className="block text-sm font-medium text-zinc-800">
+              <label htmlFor="field-system" className="block text-sm font-medium text-fg">
                 System prompt
               </label>
               <textarea
@@ -126,15 +123,15 @@ export function NewChatForm({
                 rows={3}
                 maxLength={100_000}
                 placeholder="Optional. Leave blank for the workspace default."
-                className={`${textareaClass} border-zinc-300 focus:outline-indigo-500`}
+                className={`${textareaClass} border-line focus:outline-brand`}
               />
               {state?.fields?.system ? (
-                <p className="text-sm text-red-600">{state.fields.system}</p>
+                <p className="text-sm text-danger">{state.fields.system}</p>
               ) : null}
             </div>
             <fieldset className="space-y-1.5">
-              <legend className="block text-sm font-medium text-zinc-800">Tools</legend>
-              <p className="text-sm text-zinc-500">
+              <legend className="block text-sm font-medium text-fg">Tools</legend>
+              <p className="text-sm text-muted">
                 The tools the assistant may call in this chat. None checked, none offered.
               </p>
               <ToolPicker
@@ -144,13 +141,13 @@ export function NewChatForm({
                   .map((field) => field.slice("tool:".length))}
               />
               {state?.fields?.tools ? (
-                <p className="text-sm text-red-600">{state.fields.tools}</p>
+                <p className="text-sm text-danger">{state.fields.tools}</p>
               ) : null}
             </fieldset>
           </>
         )}
         <div className="space-y-1.5">
-          <label htmlFor="field-message" className="block text-sm font-medium text-zinc-800">
+          <label htmlFor="field-message" className="block text-sm font-medium text-fg">
             First message
           </label>
           <textarea
@@ -160,9 +157,9 @@ export function NewChatForm({
             rows={5}
             required
             aria-invalid={messageError ? true : undefined}
-            className={`${textareaClass} ${messageError ? "border-red-400 focus:outline-red-500" : "border-zinc-300 focus:outline-indigo-500"}`}
+            className={`${textareaClass} ${messageError ? "border-danger/60 focus:outline-danger" : "border-line focus:outline-brand"}`}
           />
-          {messageError ? <p className="text-sm text-red-600">{messageError}</p> : null}
+          {messageError ? <p className="text-sm text-danger">{messageError}</p> : null}
         </div>
         {state?.error ? <Alert tone="error">{state.error}</Alert> : null}
         <div className="flex gap-3">

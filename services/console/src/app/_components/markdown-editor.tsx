@@ -171,14 +171,14 @@ export function MarkdownEditor(props: {
   };
 
   return (
-    <div className="kerby-markdown-editor rounded-lg border border-zinc-300 bg-white shadow-sm focus-within:outline-2 focus-within:outline-indigo-500">
-      <div className="flex items-center justify-between gap-3 rounded-t-lg border-b border-zinc-200 bg-zinc-50 px-3 py-1.5">
-        <p className="text-xs text-zinc-500">
+    <div className="kerby-markdown-editor rounded-lg border border-line bg-panel shadow-sm focus-within:outline-2 focus-within:outline-brand">
+      <div className="flex items-center justify-between gap-3 rounded-t-lg border-b border-line bg-page px-3 py-1.5">
+        <p className="text-xs text-muted">
           {mode === "rich"
             ? "Type / for blocks. Tags like <instructions> show as written; edit them in Markdown."
             : "Markdown source, saved exactly as written."}
         </p>
-        <fieldset className="inline-flex rounded-md border border-zinc-300 bg-white p-0.5">
+        <fieldset className="inline-flex rounded-md border border-line bg-panel p-0.5">
           <legend className="sr-only">Editor mode</legend>
           {(["rich", "source"] as const).map((option) => (
             <button
@@ -188,8 +188,8 @@ export function MarkdownEditor(props: {
               onClick={() => switchTo(option)}
               className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                 mode === option
-                  ? "bg-indigo-600 text-white"
-                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+                  ? "bg-brand text-on-brand"
+                  : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
               {option === "rich" ? "Rich text" : "Markdown"}
@@ -200,9 +200,7 @@ export function MarkdownEditor(props: {
       {mode === "rich" ? (
         <div className="relative">
           {loading ? (
-            <p className="absolute inset-x-0 top-0 px-5 py-4 text-sm text-zinc-400">
-              Loading editor…
-            </p>
+            <p className="absolute inset-x-0 top-0 px-5 py-4 text-sm text-muted">Loading editor…</p>
           ) : null}
           <div ref={hostRef} className="min-h-64" />
         </div>
@@ -211,7 +209,7 @@ export function MarkdownEditor(props: {
           {failed ? (
             <p
               role="alert"
-              className="border-b border-zinc-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800"
+              className="border-b border-line bg-brand/10 px-3 py-1.5 text-xs text-brand-text"
             >
               The rich editor could not load; edit the markdown here, or reload the page to try it
               again.
@@ -224,7 +222,7 @@ export function MarkdownEditor(props: {
             onChange={(event) => update(event.target.value)}
             placeholder={placeholder}
             spellCheck={false}
-            className="block min-h-64 w-full resize-y border-0 bg-white px-4 py-3 font-mono text-sm leading-6 text-zinc-900 placeholder:text-zinc-400 focus:outline-none"
+            className="block min-h-64 w-full resize-y border-0 bg-panel px-4 py-3 font-mono text-sm leading-6 text-fg placeholder:text-muted/60 focus:outline-none"
             rows={16}
           />
         </>

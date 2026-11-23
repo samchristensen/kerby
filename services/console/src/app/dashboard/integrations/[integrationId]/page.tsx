@@ -44,7 +44,7 @@ export default async function IntegrationPage({
         title={integration.name}
         description={`Created ${formatDateTime(integration.createdAt)}`}
         actions={
-          <Badge tone={integration.role === "admin" ? "indigo" : "zinc"}>
+          <Badge tone={integration.role === "admin" ? "brand" : "neutral"}>
             {integration.role === "admin" ? "Admin" : "Restricted"}
           </Badge>
         }
@@ -60,7 +60,7 @@ export default async function IntegrationPage({
         <Card title="Tools">
           {tools ? (
             <>
-              <p className="mb-4 text-sm text-zinc-500">
+              <p className="mb-4 text-sm text-muted">
                 The tools its keys may name on a conversation. A conversation naming any other tool
                 is refused.
               </p>
@@ -72,32 +72,32 @@ export default async function IntegrationPage({
               />
             </>
           ) : (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               An admin integration holds every tool: its keys may name any enabled tool.
             </p>
           )}
         </Card>
         <Card title="API keys">
           {integration.keys.length === 0 ? (
-            <p className="mb-4 text-sm text-zinc-500">No keys yet.</p>
+            <p className="mb-4 text-sm text-muted">No keys yet.</p>
           ) : (
-            <ul className="mb-6 divide-y divide-zinc-100">
+            <ul className="mb-6 divide-y divide-line">
               {integration.keys.map((key) => (
                 <li key={key.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="min-w-0 flex-1">
                     <span
-                      className={`block truncate text-sm font-medium ${key.label ? "text-zinc-900" : "text-zinc-500 italic"}`}
+                      className={`block truncate text-sm font-medium ${key.label ? "text-fg" : "text-muted italic"}`}
                     >
                       {key.label || "Untitled key"}
                     </span>
-                    <span className="block text-xs text-zinc-500">
+                    <span className="block text-xs text-muted">
                       <code className="font-mono">kb_{key.id}_…</code> · created{" "}
                       {formatDateTime(key.createdAt)} · last used{" "}
                       {key.lastUsedAt ? formatDateTime(key.lastUsedAt) : "never"}
                     </span>
                   </span>
                   {key.revokedAt ? (
-                    <Badge tone="zinc">Revoked</Badge>
+                    <Badge tone="neutral">Revoked</Badge>
                   ) : (
                     <ConfirmAction
                       action={revokeApiKeyAction.bind(null, key.id)}
@@ -113,7 +113,7 @@ export default async function IntegrationPage({
           <NewKeyForm action={createApiKeyAction.bind(null, integration.id)} />
         </Card>
         <Card title="Danger zone">
-          <p className="mb-4 text-sm text-zinc-500">
+          <p className="mb-4 text-sm text-muted">
             Archiving revokes every key of this integration at once and for good, and frees its
             name.
           </p>

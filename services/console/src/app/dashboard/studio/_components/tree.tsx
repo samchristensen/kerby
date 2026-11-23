@@ -33,12 +33,12 @@ function PromptBadges({ prompt }: { prompt: PromptSummary }) {
   return (
     <span className="flex shrink-0 flex-wrap justify-end gap-1">
       {prompt.latestVersion === null ? (
-        <Badge tone="zinc">draft</Badge>
+        <Badge tone="neutral">draft</Badge>
       ) : (
-        <Badge tone="green">v{prompt.latestVersion}</Badge>
+        <Badge tone="live">v{prompt.latestVersion}</Badge>
       )}
       {Object.entries(prompt.labels).map(([label, version]) => (
-        <Badge key={label} tone="indigo">
+        <Badge key={label} tone="brand">
           {label}·v{version}
         </Badge>
       ))}
@@ -55,11 +55,11 @@ function Nodes({ nodes, depth }: { nodes: TreeNode[]; depth: number }) {
             <NavLink
               href={`${PROMPTS_PATH}${node.prompt.name}`}
               exact
-              className="flex items-center justify-between gap-2 border-b border-zinc-100 py-2 pr-3 text-sm hover:bg-zinc-50"
+              className="flex items-center justify-between gap-2 border-b border-line py-2 pr-3 text-sm hover:bg-raised"
               activeClassName={listItemActiveClass}
             >
               <span
-                className="truncate font-medium text-zinc-900"
+                className="truncate font-medium text-fg"
                 style={{ paddingLeft: 16 + depth * 14 }}
               >
                 {node.segment}
@@ -68,7 +68,7 @@ function Nodes({ nodes, depth }: { nodes: TreeNode[]; depth: number }) {
             </NavLink>
           ) : (
             <p
-              className="border-b border-zinc-100 py-2 pr-3 text-sm text-zinc-500"
+              className="border-b border-line py-2 pr-3 text-sm text-muted"
               style={{ paddingLeft: 16 + depth * 14 }}
             >
               {node.segment}/
@@ -97,7 +97,7 @@ export function StudioTree({ prompts }: { prompts: PromptSummary[] }) {
   const shown = prompts.filter((p) => p.kind === kind);
   return (
     <>
-      <div role="tablist" className="flex gap-1 border-b border-zinc-200 px-3 py-2">
+      <div role="tablist" className="flex gap-1 border-b border-line px-3 py-2">
         {TABS.map((tab) => (
           <button
             key={tab.kind}
@@ -106,7 +106,7 @@ export function StudioTree({ prompts }: { prompts: PromptSummary[] }) {
             aria-selected={kind === tab.kind}
             onClick={() => setChosen(tab.kind)}
             className={`rounded-md px-2.5 py-1 text-sm font-medium ${
-              kind === tab.kind ? "bg-indigo-50 text-indigo-700" : "text-zinc-600 hover:bg-zinc-100"
+              kind === tab.kind ? "bg-brand/10 text-brand-text" : "text-muted hover:bg-raised"
             }`}
           >
             {tab.label}
@@ -114,7 +114,7 @@ export function StudioTree({ prompts }: { prompts: PromptSummary[] }) {
         ))}
       </div>
       {shown.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-zinc-500">
+        <p className="px-4 py-8 text-center text-sm text-muted">
           {kind === "chat" ? "No prompts yet." : "No decision models yet."} Create one with New.
         </p>
       ) : (

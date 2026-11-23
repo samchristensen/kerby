@@ -30,9 +30,9 @@ export const metadata: Metadata = { title: "Tool server" };
 function Definition({ title, definition }: { title: string; definition: ToolDefinition }) {
   return (
     <div className="min-w-0 space-y-2">
-      <p className="text-xs font-medium text-zinc-500">{title}</p>
+      <p className="text-xs font-medium text-muted">{title}</p>
       {definition.title ? <p className="text-sm font-medium">{definition.title}</p> : null}
-      <p className="text-sm whitespace-pre-wrap text-zinc-700">{definition.description}</p>
+      <p className="text-sm whitespace-pre-wrap text-fg">{definition.description}</p>
       <CodeBlock>{JSON.stringify(definition.inputSchema, null, 2)}</CodeBlock>
     </div>
   );
@@ -43,13 +43,13 @@ function ToolItem({ slug, tool, builtin }: { slug: string; tool: Tool; builtin: 
   return (
     <li className="space-y-3 py-4">
       <div className="flex flex-wrap items-center gap-2">
-        <code className="font-mono text-sm font-medium text-zinc-900">{tool.name}</code>
+        <code className="font-mono text-sm font-medium text-fg">{tool.name}</code>
         {tool.exposedName ? (
-          <span className="text-xs text-zinc-500">
+          <span className="text-xs text-muted">
             the model calls it <code className="font-mono">{tool.exposedName}</code>
           </span>
         ) : (
-          <span className="text-xs text-red-600">
+          <span className="text-xs text-danger">
             cannot be used: providers refuse the name{" "}
             <code className="font-mono">
               {slug}__{tool.name}
@@ -57,33 +57,33 @@ function ToolItem({ slug, tool, builtin }: { slug: string; tool: Tool; builtin: 
             (more than 64 characters, or a character other than A-Z, a-z, 0-9, _ and -)
           </span>
         )}
-        {tool.removed ? <Badge tone="red">Removed</Badge> : null}
-        {tool.drifted ? <Badge tone="red">Drifted</Badge> : null}
+        {tool.removed ? <Badge tone="danger">Removed</Badge> : null}
+        {tool.drifted ? <Badge tone="danger">Drifted</Badge> : null}
         {builtin ? null : tool.enabled ? (
-          <Badge tone="green">Enabled</Badge>
+          <Badge tone="live">Enabled</Badge>
         ) : (
-          <Badge tone="zinc">Disabled</Badge>
+          <Badge tone="neutral">Disabled</Badge>
         )}
       </div>
       {tool.definition.title ? (
-        <p className="text-sm font-medium text-zinc-800">{tool.definition.title}</p>
+        <p className="text-sm font-medium text-fg">{tool.definition.title}</p>
       ) : null}
-      <p className="line-clamp-4 text-sm whitespace-pre-wrap text-zinc-600">
+      <p className="line-clamp-4 text-sm whitespace-pre-wrap text-muted">
         {tool.definition.description}
       </p>
       {tool.removed ? (
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-muted">
           The server no longer lists it, so it is not offered. It comes back if the server lists it
           again.
         </p>
       ) : null}
       {builtin ? (
-        <p className="text-xs text-zinc-500">Effect: {tool.effect}</p>
+        <p className="text-xs text-muted">Effect: {tool.effect}</p>
       ) : (
         <>
           <ToolControls slug={slug} tool={tool} />
           {readOnlyHint !== undefined ? (
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs text-muted">
               The server hints it is {readOnlyHint ? "read-only" : "not read-only"}: a hint only,
               the effect is yours to choose.
             </p>
@@ -91,8 +91,8 @@ function ToolItem({ slug, tool, builtin }: { slug: string; tool: Tool; builtin: 
         </>
       )}
       {tool.drifted && tool.listed ? (
-        <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/50 p-3">
-          <p className="text-sm text-amber-800">
+        <div className="space-y-2 rounded-lg border border-brand/30 bg-brand/10 p-3">
+          <p className="text-sm text-brand-text">
             The server now lists a different definition. The model keeps seeing the pinned one until
             you accept the new one.
           </p>
@@ -142,7 +142,7 @@ export default async function ToolServerPage({
               {connected === "1" && server.hasCredential ? (
                 <Alert tone="success">Connected. Its tools are being listed again.</Alert>
               ) : null}
-              <p className="text-sm text-zinc-600">
+              <p className="text-sm text-muted">
                 {server.hasCredential
                   ? "Connected with OAuth for the whole workspace. Kerby keeps the tokens sealed, refreshes them, and never shows them."
                   : "Not connected: listing and calling its tools fail until you connect it. Connect sends you to the server's sign-in to approve Kerby, once for the whole workspace."}
@@ -171,7 +171,7 @@ export default async function ToolServerPage({
                 ? [
                     {
                       term: "Last error",
-                      value: <span className="text-red-700">{server.lastError}</span>,
+                      value: <span className="text-danger">{server.lastError}</span>,
                     },
                   ]
                 : []),
@@ -186,11 +186,11 @@ export default async function ToolServerPage({
 
         <Card title="Tools">
           {server.tools.length === 0 ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               {server.status === "syncing" ? "None listed yet." : "The server lists no tools."}
             </p>
           ) : (
-            <ul className="divide-y divide-zinc-100">
+            <ul className="divide-y divide-line">
               {server.tools.map((tool) => (
                 <ToolItem key={tool.name} slug={server.slug} tool={tool} builtin={builtin} />
               ))}
@@ -200,16 +200,16 @@ export default async function ToolServerPage({
 
         <Card title="Granted to">
           {server.grantedTo.length === 0 ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               No restricted integration may use it. Admin integrations and this console hold every
               tool; grant tools to a restricted one on its page under{" "}
-              <Link href="/dashboard/integrations" className="text-indigo-600 hover:underline">
+              <Link href="/dashboard/integrations" className="text-brand-text hover:underline">
                 Integrations
               </Link>
               .
             </p>
           ) : (
-            <ul className="divide-y divide-zinc-100">
+            <ul className="divide-y divide-line">
               {server.grantedTo.map((grant) => (
                 <li
                   key={`${grant.integrationId}:${grant.pattern}`}
@@ -217,11 +217,11 @@ export default async function ToolServerPage({
                 >
                   <Link
                     href={`/dashboard/integrations/${grant.integrationId}`}
-                    className="font-medium text-indigo-600 hover:underline"
+                    className="font-medium text-brand-text hover:underline"
                   >
                     {grant.integrationName}
                   </Link>
-                  <code className="font-mono text-zinc-600">{grant.pattern}</code>
+                  <code className="font-mono text-muted">{grant.pattern}</code>
                 </li>
               ))}
             </ul>
@@ -240,7 +240,7 @@ export default async function ToolServerPage({
             </Card>
             {server.auth.kind === "header" ? (
               <Card title="Credential">
-                <p className="mb-4 text-sm text-zinc-500">
+                <p className="mb-4 text-sm text-muted">
                   {server.hasCredential
                     ? `Sent in the ${server.auth.header} header. It is never shown.`
                     : "None stored: listing and calling its tools fail until you set one."}
@@ -249,7 +249,7 @@ export default async function ToolServerPage({
               </Card>
             ) : null}
             <Card title="Danger zone">
-              <p className="mb-4 text-sm text-zinc-500">
+              <p className="mb-4 text-sm text-muted">
                 Deleting removes its tools, its credential, and every grant of it; conversations
                 that named it stop being offered its tools.
               </p>

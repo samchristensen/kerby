@@ -13,10 +13,10 @@ export function ListPane({
   return (
     <section
       aria-label={title}
-      className="flex max-h-72 w-full shrink-0 flex-col border-b border-zinc-200 bg-white md:max-h-none md:w-80 md:border-r md:border-b-0"
+      className="flex max-h-72 w-full shrink-0 flex-col border-b border-line bg-panel md:max-h-none md:w-80 md:border-r md:border-b-0"
     >
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-200 px-4">
-        <h2 className="text-sm font-semibold text-zinc-900">{title}</h2>
+      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line px-4">
+        <h2 className="text-sm font-semibold text-fg">{title}</h2>
         {actions}
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
@@ -38,6 +38,6 @@ export function Workspace({ children }: { children: ReactNode }) {
   return <div className="mx-auto max-w-3xl px-6 py-8">{children}</div>;
 }
 
-export const listItemClass = "block border-b border-zinc-100 px-4 py-3 hover:bg-zinc-50";
+export const listItemClass = "block border-b border-line px-4 py-3 hover:bg-raised";
 export const listItemActiveClass =
-  "bg-indigo-50/70 hover:bg-indigo-50/70 shadow-[inset_3px_0_0_var(--color-indigo-600)]";
+  "bg-brand/10 hover:bg-brand/10 shadow-[inset_3px_0_0_var(--color-primary)]";

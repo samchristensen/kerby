@@ -16,9 +16,9 @@ export function NewKeyForm({
     <div className="space-y-4">
       {state?.ok ? (
         <div className="space-y-3">
-          <p className="text-sm text-zinc-600">
-            <span className="font-medium text-zinc-900">{state.key.label || "Untitled key"}</span>{" "}
-            is ready to use.
+          <p className="text-sm text-muted">
+            <span className="font-medium text-fg">{state.key.label || "Untitled key"}</span> is
+            ready to use.
           </p>
           <SecretReveal secret={state.secret} />
         </div>

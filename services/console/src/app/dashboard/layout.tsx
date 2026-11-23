@@ -43,6 +43,14 @@ const nav = [
   },
 ];
 
+/** Only an admin sees this (the page itself refuses everyone else). */
+const adminNav = {
+  href: "/dashboard/admin",
+  label: "Sign-ups",
+  exact: false,
+  icon: "M10 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 7a6 6 0 0 1 12 0M15.5 5v4M13.5 7h4",
+};
+
 function NavIcon({ d }: { d: string }) {
   return (
     <svg
@@ -72,51 +80,52 @@ function SignOut({ compact }: { compact: boolean }) {
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   const session = await requireSession();
+  const items = session.isAdmin ? [...nav, adminNav] : nav;
   return (
-    <div className="flex h-screen flex-col bg-zinc-50 lg:flex-row">
-      <aside className="hidden w-60 shrink-0 flex-col border-r border-zinc-200 bg-white lg:flex">
+    <div className="flex h-screen flex-col bg-page lg:flex-row">
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-panel lg:flex">
         <div className="px-5 pt-5">
           <Logo href="/dashboard" />
         </div>
-        <div className="mx-3 mt-5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
-          <p className="truncate text-sm font-semibold text-zinc-900">{session.tenantName}</p>
-          <p className="truncate text-xs text-zinc-500">{session.email}</p>
+        <div className="mx-3 mt-5 rounded-lg border border-line bg-page px-3 py-2.5">
+          <p className="truncate text-sm font-semibold text-fg">{session.tenantName}</p>
+          <p className="truncate text-xs text-muted">{session.email}</p>
         </div>
         <nav aria-label="Dashboard" className="mt-5 flex flex-1 flex-col gap-0.5 px-3">
-          {nav.map((item) => (
+          {items.map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
               exact={item.exact}
-              className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
-              activeClassName="bg-indigo-50 text-indigo-700 hover:bg-indigo-50 hover:text-indigo-700"
+              className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-muted hover:bg-raised hover:text-fg"
+              activeClassName="bg-brand/10 text-brand-text hover:bg-brand/10 hover:text-brand-text/80"
             >
               <NavIcon d={item.icon} />
               {item.label}
             </NavLink>
           ))}
         </nav>
-        <div className="border-t border-zinc-200 p-3">
+        <div className="border-t border-line p-3">
           <SignOut compact={false} />
         </div>
       </aside>
 
-      <header className="shrink-0 border-b border-zinc-200 bg-white lg:hidden">
+      <header className="shrink-0 border-b border-line bg-panel lg:hidden">
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <Logo href="/dashboard" />
           <div className="flex min-w-0 items-center gap-3">
-            <p className="truncate text-sm font-medium text-zinc-700">{session.tenantName}</p>
+            <p className="truncate text-sm font-medium text-fg">{session.tenantName}</p>
             <SignOut compact />
           </div>
         </div>
         <nav aria-label="Dashboard" className="flex gap-1 overflow-x-auto px-3 pb-2">
-          {nav.map((item) => (
+          {items.map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
               exact={item.exact}
-              className="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium text-zinc-600 hover:bg-zinc-100"
-              activeClassName="bg-indigo-50 text-indigo-700"
+              className="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium text-muted hover:bg-raised"
+              activeClassName="bg-brand/10 text-brand-text"
             >
               {item.label}
             </NavLink>
