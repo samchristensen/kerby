@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -78,7 +78,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 | Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                          |
 | ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
 | Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                        |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -169,6 +169,8 @@ flowchart LR
    row, then an Absurd step) before the next event is pulled. A tool runs only after the message that requested it is persisted.
    The index insert is **fenced**: it succeeds only while this run is still the task's latest (`last_attempt_run`), under a
    row lock on the task, and `(conversation, seq)` is unique. A worker whose lease lapsed cannot write a divergent message.
+   Alongside it the supervisor records the run's complete events in the trace ([ADR 0018](docs/adr/0018-trace.md)); resume
+   never reads it (see **Trace** below).
 5. **Tools run once.** `AgentRun.executeTool` is an Absurd step keyed by conversation and tool-call id: a retry gets the
    stored result instead of repeating a side effect.
 6. **Retry** is a rerun of step 2 onward. The conversation resumes after its last persisted message.
@@ -188,9 +190,17 @@ flowchart LR
 - **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
   then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
   events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
-  a poll every 5 s is the backstop for a lost notification. All streams on one tenant database in an api process share
+  a poll every 5 s is the backstop for a lost notification. The model's reasoning (`thinking_delta`, `thinking_end`) is
+  among the live events but the api drops it unless the request says `?include=thinking`. All streams on one tenant database in an api process share
   one `LISTEN` connection; a process caps its open streams per tenant (429) and in all (503), to stay inside the
   connection budget in [docs/deploy.md](docs/deploy.md#postgres).
+- **Trace** ([ADR 0018](docs/adr/0018-trace.md)). Every complete event a run reports (`run_start`, `message_start`,
+  `thinking_end`, `tool_start`, `tool_end`, `run_end`, plus a pointer per persisted message and a `run_error` when an attempt
+  fails) is buffered by the worker's `TraceRecorder` and stored a segment at a time: an object under
+  `conversations/<id>/trace/` and a `trace_segments` row. It flushes after each message persists, at `tool_start`, `tool_end`
+  and `run_end`, and a failed flush fails the turn so Absurd retries it. It is not fenced (a run that lost its lease still
+  happened) and never read to resume. Deltas are not stored: only complete blocks. `GET /v1/conversations/:id/trace?after&limit`
+  pages it in recorded order, including reasoning text and tool results.
 - **Judgments** ([ADR 0015](docs/adr/0015-judgment-port.md)). A narrow, typed question about some state, answered by a
   provider behind `packages/judgment` (TypeSafe's Jev first, then OpenCode's decision models: `packages/judgment-systemone`) as typed probabilities, not
   prose. `POST /v1/judgments` enqueues a `run-judgment` task (the same `turns` queue, so it counts against the tenant's

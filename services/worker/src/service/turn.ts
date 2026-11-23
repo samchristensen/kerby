@@ -21,6 +21,7 @@ import type { WorkerDeps } from "../types/index.ts";
 import { checkUserMessage, guardToolCall } from "./guardrails.ts";
 import { judgeTool } from "./judgments.ts";
 import { tenantTools } from "./tools.ts";
+import { TraceRecorder, traceOf } from "./trace.ts";
 
 /** Live events are batched: text deltas arrive many times a second and each notification is a round trip. */
 const DELTA_FLUSH_CHARS = 400;
@@ -31,7 +32,7 @@ class LiveEvents {
   readonly #conversationId: string;
   readonly #runId: string;
   readonly #position: () => number;
-  #pending = "";
+  #pending: { type: "text_delta" | "thinking_delta"; text: string } | undefined;
   #lastFlush = 0;
 
   constructor(ctx: TenantContext, conversationId: string, runId: string, position: () => number) {
@@ -42,10 +43,12 @@ class LiveEvents {
   }
 
   async send(event: AgentEvent): Promise<void> {
-    if (event.type === "text_delta") {
-      this.#pending += event.text;
+    if (event.type === "text_delta" || event.type === "thinking_delta") {
+      // Text and reasoning never share a notification: a change of kind sends what is held first.
+      if (this.#pending && this.#pending.type !== event.type) await this.flush();
+      this.#pending = { type: event.type, text: (this.#pending?.text ?? "") + event.text };
       if (
-        this.#pending.length >= DELTA_FLUSH_CHARS ||
+        this.#pending.text.length >= DELTA_FLUSH_CHARS ||
         Date.now() - this.#lastFlush >= DELTA_FLUSH_MS
       ) {
         await this.flush();
@@ -56,13 +59,13 @@ class LiveEvents {
     await this.#emit(event);
   }
 
-  /** Send any held text now (before a persist, so clients see the text before the message that holds it). */
+  /** Send any held text or reasoning now (before a persist, so clients see it before the message that holds it). */
   async flush(): Promise<void> {
-    if (this.#pending.length === 0) return;
-    const text = this.#pending;
-    this.#pending = "";
+    const held = this.#pending;
+    if (!held || held.text.length === 0) return;
+    this.#pending = undefined;
     this.#lastFlush = Date.now();
-    await this.#emit({ type: "text_delta", text });
+    await this.#emit({ type: held.type, text: held.text });
   }
 
   async #emit(event: AgentEvent): Promise<void> {
@@ -159,6 +162,7 @@ export async function runTurn(
   };
 
   const live = new LiveEvents(ctx, conversationId, run.runId, () => nextSeq);
+  const trace = new TraceRecorder(ctx, deps.blobs, conversationId, run);
   try {
     // Guardrails on the user message come first: nothing is sent to the model, or paid for, until it has passed.
     const verdict = await checkUserMessage(deps, ctx, conversation, params.seq, run);
@@ -188,6 +192,7 @@ export async function runTurn(
         ],
       };
       await live.send({ type: "run_start" });
+      trace.record({ type: "run_start" });
       await run.step(`persist:${seq}`, () =>
         persistMessage(ctx, deps.blobs, {
           conversationId,
@@ -198,6 +203,9 @@ export async function runTurn(
         }),
       );
       await live.send({ type: "run_end", reason: "done" });
+      trace.record({ type: "message_end", seq, role: "assistant" });
+      trace.record({ type: "run_end", reason: "done" });
+      await trace.flush();
       log("info", "message blocked by guardrails", { guardrails: verdict.by.length });
       return;
     }
@@ -211,6 +219,12 @@ export async function runTurn(
         if (safe.type === "run_end" && safe.reason === "refused") {
           await setLastError(ctx.db, conversationId, safe.error ?? "the request was refused");
         }
+        const traced = traceOf(safe);
+        if (traced) trace.record(traced);
+        // Stored where something happened a crash must not erase: a tool started or finished, the run ended. The rest
+        // waits for the next message to be persisted.
+        if (safe.type === "tool_start" || safe.type === "tool_end" || safe.type === "run_end")
+          await trace.flush();
         continue;
       }
       await live.flush();
@@ -222,6 +236,10 @@ export async function runTurn(
       );
       nextSeq = seq + 1;
       persisted++;
+      if (event.message.role !== "user") {
+        trace.record({ type: "message_end", seq, role: event.message.role });
+        await trace.flush();
+      }
       if (event.message.role === "assistant" && event.message.usage) {
         const usage = event.message.usage;
         await recordUsage(deps.control, {
@@ -256,6 +274,14 @@ export async function runTurn(
       log("warn", "a message position was taken by another run; abandoning", errorFields(error));
       return;
     }
+    // An attempt that ends on an error says so in the trace; what it had buffered is stored with it. Best effort: the
+    // error being thrown is the one that matters, and the next attempt's trace shows the retry. Bounded: a provider's
+    // error can be long.
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    trace.record({ type: "run_error", error: scrub(reason) });
+    await trace.flush().catch((flushError: unknown) => {
+      log("warn", "could not record a failed run in the trace", errorFields(flushError));
+    });
     // The last attempt failing for good leaves a trace on the conversation, unless this run is already superseded.
     const finalAttempt = run.maxAttempts !== null && run.attempt >= run.maxAttempts;
     if (finalAttempt && (await holdsRun(ctx.db, run).catch(() => false))) {

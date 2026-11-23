@@ -43,3 +43,4 @@ export {
   recordToolExecution,
   setLastError,
 } from "./repo.ts";
+export { appendTrace, readTrace } from "./trace.ts";

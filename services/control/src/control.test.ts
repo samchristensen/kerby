@@ -949,7 +949,7 @@ describe("migration fan-out", () => {
 
     // Make `behind` look like an older release: its newest migration was never applied.
     const own = createTenantDb(await tenantUrl(behindRow.id));
-    await own.query("drop table tool_executions, messages, conversations");
+    await own.query("drop table trace_segments, tool_executions, messages, conversations");
     await own.query("delete from schema_migrations where name like 'conversations/%'");
     await own.close();
     await control.db.query("update tenants set schema_version = null where id = $1", [

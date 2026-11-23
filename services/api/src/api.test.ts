@@ -5,6 +5,7 @@ import type {
   Conversation,
   EventEnvelope,
   GetConversationResponse,
+  GetTraceResponse,
   Limits,
   PostMessageResponse,
 } from "@kerby/contracts";
@@ -18,7 +19,7 @@ import {
   setTenantStatus,
 } from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
-import { notifyLive } from "@kerby/conversations";
+import { appendTrace, notifyLive } from "@kerby/conversations";
 import { completeTurnWith, createTestTenant, type TestTenant } from "@kerby/conversations/testing";
 import { LISTEN_APPLICATION_NAME, TenantPools } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
@@ -514,6 +515,52 @@ describe("event stream", () => {
     expect(events[0]?.event.event).toMatchObject({ message: { content: [{ text: "two" }] } });
   });
 
+  it("leaves the model's reasoning out of the stream unless the request asks for it", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hello" });
+
+    const open = (query: string) =>
+      h.call(t.secret, "GET", `/v1/conversations/${id}/events${query}`);
+    const [plain, asked] = await Promise.all([open(""), open("?include=thinking")]);
+    const plainEvents = readEvents(plain, 2);
+    const askedEvents = readEvents(asked, 4);
+    await sleep(300);
+    const live = (event: EventEnvelope["event"]) =>
+      notifyLive(t.ctx.db, id, {
+        v: 1,
+        conversationId: id,
+        runId: "r1",
+        seq: 2,
+        at: new Date().toISOString(),
+        event,
+      });
+    await live({ type: "thinking_delta", text: "hm" });
+    await live({ type: "thinking_end", text: "hm" });
+    await live({ type: "run_end", reason: "done" });
+
+    expect((await plainEvents).map((e) => e.event.event.type)).toEqual(["message_end", "run_end"]);
+    expect((await askedEvents).map((e) => e.event.event.type)).toEqual([
+      "message_end",
+      "thinking_delta",
+      "thinking_end",
+      "run_end",
+    ]);
+  });
+
+  it("refuses an include it does not know", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    const response = await h.call(
+      t.secret,
+      "GET",
+      `/v1/conversations/${id}/events?include=secrets`,
+    );
+    expect(response.status).toBe(400);
+  });
+
   it("shares one LISTEN connection among a tenant's streams and releases it when the last client goes away", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
@@ -540,6 +587,58 @@ describe("event stream", () => {
     controllers[0]?.abort();
     for (let i = 0; i < 40 && (await listening()) !== 0; i++) await sleep(50);
     expect(await listening()).toBe(0);
+  });
+});
+
+describe("trace", () => {
+  const entry = (n: number, event: GetTraceResponse["events"][number]["event"]) => ({
+    runId: "run-1",
+    attempt: 1,
+    n,
+    at: "2026-11-23T10:00:00.000Z",
+    event,
+  });
+
+  it("returns what the runs reported, with the reasoning, and pages through it", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    await appendTrace(t.ctx, h.blobs, id, [
+      entry(1, { type: "run_start" }),
+      entry(2, { type: "thinking_end", text: "check the order first" }),
+    ]);
+    await appendTrace(t.ctx, h.blobs, id, [entry(3, { type: "run_end", reason: "done" })]);
+
+    const all = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${id}/trace`)
+    ).json()) as GetTraceResponse;
+    expect(all.nextAfter).toBeNull();
+    expect(all.events.map((e) => e.event.type)).toEqual(["run_start", "thinking_end", "run_end"]);
+    expect(all.events[1]?.event).toEqual({ type: "thinking_end", text: "check the order first" });
+
+    const first = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${id}/trace?limit=1`)
+    ).json()) as GetTraceResponse;
+    expect(first.events).toHaveLength(2);
+    expect(first.nextAfter).not.toBeNull();
+    const rest = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${id}/trace?after=${first.nextAfter}`)
+    ).json()) as GetTraceResponse;
+    expect(rest.events.map((e) => e.n)).toEqual([3]);
+  });
+
+  it("is a 404 for another tenant's conversation, and a 400 for a bad page", async () => {
+    const h = await harness();
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    const { id } = await newConversation(h, a.secret);
+    expect((await h.call(b.secret, "GET", `/v1/conversations/${id}/trace`)).status).toBe(404);
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${id}/trace?limit=0`)).status).toBe(
+      400,
+    );
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${id}/trace?after=-1`)).status).toBe(
+      400,
+    );
   });
 });
 

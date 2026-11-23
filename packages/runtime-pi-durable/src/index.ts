@@ -39,6 +39,7 @@ import { classifyUnanswered } from "./outcome.ts";
 import { AsyncQueue } from "./queue.ts";
 import { seedHistory } from "./seed.ts";
 import { TextForwarder } from "./text.ts";
+import { ThinkingForwarder } from "./thinking.ts";
 
 export { createFakeModels, FAKE_MODEL } from "./fake.ts";
 export { createTenantModels } from "./providers.ts";
@@ -216,6 +217,7 @@ async function* runPi(
     //    next event: that is how "persisted before the tool runs" holds, since a message's tool gates open
     //    only after the pull that follows its `message_end`.
     const text = new TextForwarder();
+    const thinking = new ThinkingForwarder();
     const emitted = new Set(seeded);
     const toKerby = (entry: EntryRecord): AgentMessage | undefined => {
       const pi = entry.model?.[0];
@@ -237,6 +239,11 @@ async function* runPi(
           const message = toKerby(entry);
           if (!message) continue;
           emitted.add(key);
+          const pi = entry.model?.[0];
+          if (pi?.role === "assistant") {
+            thinking.reset();
+            for (const event of thinking.finish(pi.content)) yield event;
+          }
           yield { type: "message_end", message };
         }
         if (item.status === "done") yield { type: "run_end", reason: "done" };
@@ -254,17 +261,21 @@ async function* runPi(
       if (event.type === "message_start") {
         if (event.message.role === "assistant") {
           text.reset();
+          thinking.reset();
           yield { type: "message_start", role: "assistant" };
+          for (const reasoning of thinking.fromBlocks(event.message.content)) yield reasoning;
           for (const delta of text.fromBlocks(event.message.content))
             yield { type: "text_delta", text: delta };
         }
       } else if (event.type === "message_update") {
         for (const change of event.changes) {
+          for (const reasoning of thinking.fromChange(change)) yield reasoning;
           for (const delta of text.fromChange(change)) yield { type: "text_delta", text: delta };
         }
       } else if (event.type === "message_end") {
         const pi = event.entry.model?.[0];
         if (pi?.role === "assistant") {
+          for (const reasoning of thinking.finish(pi.content)) yield reasoning;
           for (const delta of text.fromBlocks(pi.content))
             yield { type: "text_delta", text: delta };
         }

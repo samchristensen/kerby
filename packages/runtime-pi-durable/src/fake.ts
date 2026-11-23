@@ -4,12 +4,15 @@
 //   anything else            "Echo: <text>"
 //   "[slow:<ms>]"            in the user message: wait before answering (a window to kill a worker in)
 //   "[slow-after-tool:<ms>]" the same, but only for the answer that follows a tool result
+//   "[think:<text>]"         in the user message: the answer starts with a reasoning block holding <text>
 import { setTimeout as sleep } from "node:timers/promises";
 import { createModels, type Models } from "@earendil-works/pi-ai";
 import {
   type FauxResponseFactory,
   fauxAssistantMessage,
   fauxProvider,
+  fauxText,
+  fauxThinking,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 
@@ -50,18 +53,19 @@ export function createFakeModels(): Models {
     }
     const text = textOf(last?.content);
     await sleep(delayOf(text, "slow"), undefined, { signal: options?.signal }).catch(() => {});
-    const echo = /^echo (.*)$/s.exec(text.replace(/\[slow:\d+\]/g, "").trim());
+    const thought = /\[think:([^\]]*)\]/.exec(text)?.[1];
+    const thinking = thought === undefined ? [] : [fauxThinking(thought)];
+    const echo = /^echo (.*)$/s.exec(text.replace(/\[slow:\d+\]|\[think:[^\]]*\]/g, "").trim());
     if (echo?.[1] !== undefined) {
       return fauxAssistantMessage(
-        [fauxToolCall("echo", { text: echo[1] }, { id: `call_${messages.length}` })],
+        [...thinking, fauxToolCall("echo", { text: echo[1] }, { id: `call_${messages.length}` })],
         {
           stopReason: "toolUse",
         },
       );
     }
-    return fauxAssistantMessage(
-      `Echo: ${text.replace(/\[slow(?:-after-tool)?:\d+\]/g, "").trim()}`,
-    );
+    const reply = text.replace(/\[slow(?:-after-tool)?:\d+\]|\[think:[^\]]*\]/g, "").trim();
+    return fauxAssistantMessage([...thinking, fauxText(`Echo: ${reply}`)]);
   };
   faux.setResponses([respond]);
   return models;

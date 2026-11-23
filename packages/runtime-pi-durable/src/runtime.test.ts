@@ -2,6 +2,8 @@ import { createModels } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
+  fauxText,
+  fauxThinking,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import type { AgentEvent, AgentMessage, AgentRun, ToolCall, ToolResult } from "@kerby/agent";
@@ -111,6 +113,52 @@ describe("text-only run", () => {
     await collect(runtime.run(makeRun({ model, history: [user("hi")], system: "Only say ok." })));
     expect(seen?.roles).toEqual(["user"]);
     expect(seen?.system).toContain("Only say ok.");
+  });
+});
+
+describe("reasoning", () => {
+  it("reports each reasoning block once, whole, before the message that holds it", async () => {
+    const { faux, runtime, model } = setup();
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxThinking("first thought"),
+        fauxThinking("second"),
+        fauxText("Answer"),
+      ]),
+    ]);
+    const events = await collect(runtime.run(makeRun({ model, history: [user("hi")] })));
+
+    const order = types(events).filter((t) => t !== "text_delta" && t !== "thinking_delta");
+    expect(order).toEqual([
+      "run_start",
+      "message_start",
+      "thinking_end",
+      "thinking_end",
+      "message_end",
+      "run_end",
+    ]);
+    expect(events.filter((e) => e.type === "thinking_end")).toEqual([
+      { type: "thinking_end", text: "first thought" },
+      { type: "thinking_end", text: "second" },
+    ]);
+    // The deltas add up to the blocks: nothing is passed on twice.
+    const streamed = events.flatMap((e) => (e.type === "thinking_delta" ? [e.text] : [])).join("");
+    expect(streamed).toBe("first thoughtsecond");
+  });
+
+  it("keeps the fact that a provider redacted a block, with no text", async () => {
+    const { faux, runtime, model } = setup();
+    const redacted = {
+      type: "thinking",
+      thinking: "",
+      thinkingSignature: "opaque",
+      redacted: true,
+    } as const;
+    faux.setResponses([fauxAssistantMessage([redacted, fauxText("Answer")])]);
+    const events = await collect(runtime.run(makeRun({ model, history: [user("hi")] })));
+    expect(events.filter((e) => e.type === "thinking_end")).toEqual([
+      { type: "thinking_end", text: "", redacted: true },
+    ]);
   });
 });
 

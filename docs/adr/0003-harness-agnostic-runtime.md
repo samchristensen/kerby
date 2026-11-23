@@ -15,8 +15,9 @@ a conversation, so a chat is pinned to a worker and the harness's state is the s
 - A harness is an adapter, `packages/runtime-<harness>`, the only importer of that harness. Only a service's
   `src/index.ts` imports an adapter. Mapping native events to `AgentEvent` is the one harness-specific transformation.
 - **The harness holds no durable state.** First adapter: Pi Durable on `MemoryStorage`. Every event goes to the parent
-  (the run supervisor in an Absurd task), which persists each `message_end` to S3 and the Postgres index. A restart
-  rehydrates a fresh harness from that history and continues. Absurd gives the retry; the event log gives the resume.
+  (the run supervisor in an Absurd task), which persists each `message_end` to S3 and the Postgres index and records the
+  complete events in the conversation's trace ([ADR 0018](0018-trace.md)). A restart rehydrates a fresh harness from the
+  persisted messages and continues. Absurd gives the retry; the message index gives the resume.
 - **Tools run through Kerby.** The harness decides when to call; `AgentRun.executeTool` runs it as an Absurd step keyed by
   tool-call id, scoped to the tenant. A runtime never executes a tool itself.
 - A pull-based `AsyncIterable` gives backpressure: the supervisor persists an event before the runtime continues.

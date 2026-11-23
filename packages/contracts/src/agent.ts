@@ -50,6 +50,12 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run_start") }),
   z.object({ type: z.literal("message_start"), role: z.literal("assistant") }),
   z.object({ type: z.literal("text_delta"), text: z.string() }),
+  z.object({ type: z.literal("thinking_delta"), text: z.string() }),
+  z.object({
+    type: z.literal("thinking_end"),
+    text: z.string(),
+    redacted: z.literal(true).exactOptional(),
+  }),
   z.object({ type: z.literal("tool_start"), call: ToolCallSchema }),
   z.object({ type: z.literal("tool_end"), call: ToolCallSchema, result: ToolResultSchema }),
   z.object({ type: z.literal("message_end"), message: AgentMessageSchema }),

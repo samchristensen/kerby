@@ -4,6 +4,7 @@ import {
   CreateConversationRequestSchema,
   CreatePromptRequestSchema,
   GetConversationQuerySchema,
+  GetTraceQuerySchema,
   ListConversationsQuerySchema,
   ListPromptsQuerySchema,
   ModelProviderSchema,
@@ -17,6 +18,8 @@ import {
   RenderPromptRequestSchema,
   SaveDraftRequestSchema,
   SetPromptLabelRequestSchema,
+  STREAM_INCLUDES,
+  StreamIncludeSchema,
   SubmitJudgmentRequestSchema,
 } from "@kerby/contracts";
 import { ModelKeyLimitError } from "@kerby/control-plane";
@@ -59,6 +62,7 @@ import {
   conversationEvents,
   createConversation,
   getConversation,
+  getTrace,
   listTenantConversations,
   postMessage,
   type StreamItem,
@@ -416,6 +420,15 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const after = header === null ? 0 : Number(header);
         if (!Number.isInteger(after) || after < 0)
           throw new HttpError(400, "invalid_request", "Last-Event-ID must be a sequence number");
+        const include = StreamIncludeSchema.safeParse(
+          new URL(request.url).searchParams.get("include") ?? undefined,
+        );
+        if (!include.success)
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `include is a comma-separated list of: ${STREAM_INCLUDES.join(", ")}`,
+          );
         if (streamsOpen >= deps.settings.maxStreamsPerProcess)
           throw new HttpError(
             503,
@@ -461,6 +474,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
             { tenantId: principal.tenantId, db: lease.db },
             id,
             after,
+            include.data,
             request.signal,
             stillAllowed,
           );
@@ -469,6 +483,23 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           await release();
           throw error;
         }
+      }),
+    ],
+    [
+      "GET",
+      "/v1/conversations/:id/trace",
+      authed("GET /v1/conversations/:id/trace", async (request, params, principal) => {
+        const id = conversationId(params);
+        const query = GetTraceQuerySchema.safeParse(
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        if (!query.success)
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "after must be a cursor (0 or more) and limit 1 to 1000",
+          );
+        return json(200, await inTenant(principal, (ctx) => getTrace(deps, ctx, id, query.data)));
       }),
     ],
     [

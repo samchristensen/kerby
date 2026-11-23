@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { AgentEvent, AgentMessage, AgentRuntime } from "@kerby/agent";
+import type { Blobs } from "@kerby/blobs";
 import { createTestBlobs } from "@kerby/blobs/testing";
 import type { Limits } from "@kerby/contracts";
 import { createApiKey, insertTenant, putModelKey, setTenantStatus } from "@kerby/control-plane";
@@ -12,9 +13,10 @@ import {
   parseNotice,
   postUserMessage,
   readMessages,
+  readTrace,
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
-import { type TenantDb, TenantPools } from "@kerby/db";
+import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
 import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
 import type {
   JudgmentOutcome,
@@ -67,12 +69,15 @@ type Options = {
   settings?: Partial<WorkerDeps["settings"]>;
   modelKeys?: WorkerDeps["modelKeys"];
   judgments?: WorkerDeps["judgments"];
+  /** Wrap the object store the worker and the test share, to make part of it fail. */
+  wrapBlobs?: (blobs: Blobs) => Blobs;
 };
 
 async function harness(options: Options = {}) {
   const control = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
-  const blobs = await createTestBlobs();
+  const realBlobs = await createTestBlobs();
+  const blobs = options.wrapBlobs ? options.wrapBlobs(realBlobs) : realBlobs;
   const urls = new Map<string, string>();
   const pools = new TenantPools({
     resolveUrl: async (id) => urls.get(id) ?? Promise.reject(new Error(`unknown tenant ${id}`)),
@@ -434,6 +439,129 @@ describe("recovery", () => {
       (await t.ctx.db.query<{ last_error: string | null }>("select last_error from conversations"))
         .rows[0]?.last_error,
     ).toBeNull();
+  });
+});
+
+describe("trace", () => {
+  const trace = (blobs: Blobs, t: { ctx: TenantContext }, id: string) =>
+    readTrace(t.ctx, blobs, id, { after: 0, limit: 1000 }).then((page) => page.entries);
+
+  it("records what the run reported, complete and in order, and none of the deltas", async () => {
+    const scripted: AgentRuntime = {
+      name: "scripted",
+      async *run(run) {
+        const call = {
+          type: "tool_call",
+          id: "call-1",
+          name: "echo",
+          input: { text: "ping" },
+        } as const;
+        yield { type: "run_start" };
+        yield { type: "message_start", role: "assistant" };
+        yield { type: "thinking_delta", text: "I should " };
+        yield { type: "thinking_delta", text: "echo." };
+        yield { type: "thinking_end", text: "I should echo." };
+        yield {
+          type: "message_end",
+          message: { role: "assistant", model: run.model, stopReason: "tool_use", content: [call] },
+        };
+        yield { type: "tool_start", call };
+        const result = await run.executeTool(call, run.signal);
+        yield { type: "tool_end", call, result };
+        yield {
+          type: "message_end",
+          message: { role: "tool", toolCallId: call.id, content: result.content, isError: false },
+        };
+        yield { type: "message_start", role: "assistant" };
+        yield { type: "text_delta", text: "done" };
+        yield {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            model: run.model,
+            stopReason: "end",
+            content: [{ type: "text", text: "done" }],
+          },
+        };
+        yield { type: "run_end", reason: "done" };
+      },
+    };
+    const h = await harness({ runtime: scripted });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "go");
+    await h.settled(t, conversation.id, 4);
+
+    const entries = await trace(h.blobs, t, conversation.id);
+    expect(entries.map((e) => e.event.type)).toEqual([
+      "run_start",
+      "message_start",
+      "thinking_end",
+      "message_end",
+      "tool_start",
+      "tool_end",
+      "message_end",
+      "message_start",
+      "message_end",
+      "run_end",
+    ]);
+    expect(entries.map((e) => e.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(entries[2]?.event).toEqual({ type: "thinking_end", text: "I should echo." });
+    // A message is pointed at by its position: the user's is 1, so the run's are 2, 3 and 4.
+    expect(entries.flatMap((e) => (e.event.type === "message_end" ? [e.event] : []))).toEqual([
+      { type: "message_end", seq: 2, role: "assistant" },
+      { type: "message_end", seq: 3, role: "tool" },
+      { type: "message_end", seq: 4, role: "assistant" },
+    ]);
+  });
+
+  it("shows each attempt of a retried turn apart, and why the first one ended", async () => {
+    const h = await harness({ runtime: crashingOnce(createDevelopmentRuntime()) });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "echo ping", false);
+    await retryFast(t);
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await h.settled(t, conversation.id, 4);
+
+    const entries = await trace(h.blobs, t, conversation.id);
+    const runIds = [...new Set(entries.map((e) => e.runId))];
+    expect(runIds).toHaveLength(2);
+    const [first, second] = runIds.map((id) => entries.filter((e) => e.runId === id));
+    expect(first?.every((e) => e.attempt === 1)).toBe(true);
+    expect(second?.every((e) => e.attempt === 2)).toBe(true);
+    // What the first attempt did before it died is kept, and it ends with the reason.
+    expect(first?.some((e) => e.event.type === "tool_end")).toBe(true);
+    expect(first?.at(-1)?.event).toEqual({ type: "run_error", error: "worker died here" });
+    expect(second?.at(-1)?.event).toMatchObject({ type: "run_end", reason: "done" });
+  });
+
+  it("fails the turn when the trace cannot be stored, so it is never silently short", async () => {
+    const logs = captureLogs();
+    const h = await harness({
+      wrapBlobs: (real) => ({
+        ...real,
+        put: (ctx, blob) =>
+          blob.kind === "trace"
+            ? Promise.reject(new Error("bucket unavailable"))
+            : real.put(ctx, blob),
+      }),
+    });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "hello", false);
+    await retryFast(t, 2);
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+
+    const lastError = await eventually("the turn to fail", async () => {
+      const { rows } = await t.ctx.db.query<{ last_error: string | null }>(
+        "select last_error from conversations",
+      );
+      return rows[0]?.last_error;
+    });
+    expect(lastError).toBe("the turn failed after 2 attempts");
+    expect(await isBusy(t.ctx.db, conversation.id)).toBe(false);
+    expect(logs.some((l) => l.alert === "turn failed for good")).toBe(true);
   });
 });
 

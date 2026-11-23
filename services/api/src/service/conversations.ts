@@ -5,10 +5,13 @@ import type {
   EventEnvelope,
   GetConversationQuery,
   GetConversationResponse,
+  GetTraceQuery,
+  GetTraceResponse,
   ListConversationsQuery,
   ListConversationsResponse,
   PostMessageRequest,
   PostMessageResponse,
+  StreamInclude,
 } from "@kerby/contracts";
 import { DEFAULT_JUDGMENT_MODEL, PublicMessageSchema, parseModelId } from "@kerby/contracts";
 import { hasModelKey } from "@kerby/control-plane";
@@ -22,6 +25,7 @@ import {
   parseNotice,
   postUserMessage,
   readMessages,
+  readTrace,
   type StoredMessage,
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
@@ -185,6 +189,19 @@ export async function getConversation(
   };
 }
 
+/** The conversation's trace: everything its runs reported, in the order it was recorded (ADR 0018). */
+export async function getTrace(
+  deps: ApiDeps,
+  ctx: TenantContext,
+  conversationId: string,
+  page: GetTraceQuery,
+): Promise<GetTraceResponse> {
+  if (!(await findConversation(ctx.db, conversationId)))
+    throw new NotFoundError("conversation not found");
+  const { entries, nextAfter } = await readTrace(ctx, deps.blobs, conversationId, page);
+  return { events: entries, nextAfter };
+}
+
 /** One item of a conversation's event stream. `id` is set only for persisted messages, which can be replayed. */
 export type StreamItem = { id?: number; envelope: EventEnvelope } | { keepAlive: true };
 
@@ -197,19 +214,22 @@ const REPLAY_PAGE = 100;
 /**
  * The conversation's events: persisted messages after `afterSeq` (replayed from the index), then live as they
  * happen. LISTEN is established before the replay reads, so nothing falls between them. Ends when `signal` aborts.
- * `db` must stay leased for the whole iteration.
+ * The model's reasoning (`thinking_*`) is live only, and only for a stream that asked for it (`include`): by default
+ * the stream is as it was before a harness exposed any. `db` must stay leased for the whole iteration.
  */
 export async function* conversationEvents(
   deps: ApiDeps,
   ctx: TenantContext,
   conversationId: string,
   afterSeq: number,
+  include: readonly StreamInclude[],
   signal: AbortSignal,
   stillAllowed: () => Promise<boolean>,
 ): AsyncGenerator<StreamItem> {
   if (!(await findConversation(ctx.db, conversationId)))
     throw new NotFoundError("conversation not found");
 
+  const wantsThinking = include.includes("thinking");
   let wake = Promise.withResolvers<void>();
   let dirty = true; // replay first
   const live: EventEnvelope[] = [];
@@ -220,7 +240,11 @@ export async function* conversationEvents(
       const notice = parseNotice(payload);
       if (!notice) return;
       if ("persisted" in notice) dirty = true;
-      else live.push(notice.live);
+      else if (
+        wantsThinking ||
+        (notice.live.event.type !== "thinking_delta" && notice.live.event.type !== "thinking_end")
+      )
+        live.push(notice.live);
       poke();
     },
     {

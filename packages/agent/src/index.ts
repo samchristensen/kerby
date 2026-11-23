@@ -85,14 +85,22 @@ export type AgentRun = {
 };
 
 /**
- * Everything a run reports, in order. The supervisor persists these; only `message_end` is needed to
- * rehydrate, the rest is the full-fidelity transcript and the live view.
+ * Everything a run reports, in order. The supervisor streams all of it live and records the ones that are complete
+ * (everything but the deltas) in the conversation's trace; only `message_end` is needed to resume. A harness emits
+ * what it has: one that exposes no reasoning never emits the thinking events.
  */
 export type AgentEvent =
   | { type: "run_start" }
   | { type: "message_start"; role: "assistant" }
-  /** Ephemeral: streamed to clients, kept in the transcript, never needed to resume. */
+  /** Ephemeral: streamed to clients, never stored, never needed to resume (the block's `message_end` holds it). */
   | { type: "text_delta"; text: string }
+  /** Ephemeral, like `text_delta`: a piece of the model's reasoning. Not stored; `thinking_end` is the record. */
+  | { type: "thinking_delta"; text: string }
+  /**
+   * A reasoning block that is complete, in order with the messages. Recorded in the trace. `redacted`: the provider
+   * withheld the content (`text` is empty), which the trace keeps as the fact that reasoning happened.
+   */
+  | { type: "thinking_end"; text: string; redacted?: true }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   /**
