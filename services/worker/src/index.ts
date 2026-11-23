@@ -27,9 +27,6 @@ export type { WorkerDeps } from "./types/index.ts";
 export const createDevelopmentRuntime = (): AgentRuntime =>
   createPiDurableRuntime({ models: createFakeModels() });
 
-/** One MCP exchange, listing or call, from the first byte sent to the last read (ADR 0019). */
-const TOOL_CALL_TIMEOUT_MS = 60_000;
-
 async function startWorker(config: WorkerConfig): Promise<{
   scheduler: Scheduler;
   deps: WorkerDeps;
@@ -70,7 +67,7 @@ async function startWorker(config: WorkerConfig): Promise<{
       ? (tenantId, serverId) => readToolCredential(control, opener, tenantId, serverId)
       : undefined,
     // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only.
-    toolFetch: createEgressFetch({ timeoutMs: TOOL_CALL_TIMEOUT_MS }),
+    toolFetch: createEgressFetch({ timeoutMs: config.toolCallTimeoutMs }),
     runtime: createPiDurableRuntime({
       models: config.kerbyFakeModel ? createFakeModels() : createTenantModels,
       onReport: (type) => log("debug", "harness report", { type }),
@@ -94,6 +91,7 @@ async function startWorker(config: WorkerConfig): Promise<{
       maxRunningTurns: config.maxRunningTurns,
       sweepIntervalMs: config.sweepIntervalSeconds * 1000,
       enableEchoTool: config.enableEchoTool,
+      toolCallTimeoutMs: config.toolCallTimeoutMs,
       historyBudgetBytes: config.historyBudgetBytes,
     },
   };

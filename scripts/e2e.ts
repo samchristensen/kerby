@@ -49,8 +49,13 @@ async function main(): Promise<void> {
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   };
 
-  const created = await call("POST", "/v1/conversations", {});
-  check(created.status === 201, "created a conversation");
+  // Tools are never implied (ADR 0019): the conversation names the built-in echo the fake model asks for.
+  const created = await call("POST", "/v1/conversations", { tools: ["kerby/echo"] });
+  check(created.status === 201, "created a conversation that names kerby/echo");
+  check(
+    JSON.stringify(created.body.tools) === JSON.stringify(["kerby/echo"]),
+    "the conversation lists its tools",
+  );
   const conversationId = String(created.body.id);
 
   // Stream the conversation's events the whole time, as a client would.

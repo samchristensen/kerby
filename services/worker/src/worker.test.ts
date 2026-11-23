@@ -1,8 +1,14 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { AgentEvent, AgentMessage, AgentRuntime } from "@kerby/agent";
+import type { AgentEvent, AgentMessage, AgentRuntime, ToolResult, ToolSpec } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { createTestBlobs } from "@kerby/blobs/testing";
-import type { Limits } from "@kerby/contracts";
+import {
+  type Limits,
+  MAX_CONVERSATION_TOOLS,
+  type ToolDefinition,
+  type ToolEffect,
+  type ToolServerAuth,
+} from "@kerby/contracts";
 import {
   createApiKey,
   createIntegration,
@@ -20,6 +26,7 @@ import {
   postUserMessage,
   readMessages,
   readTrace,
+  recordToolExecution,
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
 import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
@@ -34,7 +41,15 @@ import type {
 import { startMcpFixture } from "@kerby/mcp/testing";
 import { configureLogging } from "@kerby/observability";
 import { createSealer, generateSecretsKeyPair } from "@kerby/secrets";
-import { createToolServer, findToolServerById, listTools } from "@kerby/tools";
+import {
+  createToolServer,
+  findToolServerById,
+  listTools,
+  recordSync,
+  resolveToolPatterns,
+  setConversationTools,
+  updateTool,
+} from "@kerby/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerConfigSchema } from "./config/index.ts";
 import {
@@ -69,6 +84,11 @@ async function eventually<T>(
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await sleep(50);
   }
+}
+
+/** Name `patterns` on a conversation, as the api does when it creates one. */
+async function nameTools(db: TenantDb, conversationId: string, patterns: string[]) {
+  await setConversationTools(db, conversationId, await resolveToolPatterns(db, patterns));
 }
 
 type Options = {
@@ -112,6 +132,7 @@ async function harness(options: Options = {}) {
       sweepIntervalMs: 200,
       enableEchoTool: options.echo ?? true,
       historyBudgetBytes: 8 * 1024 * 1024,
+      toolCallTimeoutMs: 60_000,
       ...options.settings,
     },
   };
@@ -148,8 +169,14 @@ async function harness(options: Options = {}) {
     return posted.seq;
   }
 
-  async function conversation(t: Awaited<ReturnType<typeof tenant>>) {
-    return insertConversation(t.ctx.db, { model: "fake/fake-1", system: "Be brief." });
+  /** A conversation on the fake model that names `tools` (by default the built-in echo the fake model calls). */
+  async function conversation(t: Awaited<ReturnType<typeof tenant>>, tools = ["kerby/echo"]) {
+    const created = await insertConversation(t.ctx.db, {
+      model: "fake/fake-1",
+      system: "Be brief.",
+    });
+    await nameTools(t.ctx.db, created.id, tools);
+    return created;
   }
 
   const messages = async (t: Awaited<ReturnType<typeof tenant>>, conversationId: string) =>
@@ -374,6 +401,411 @@ describe("a turn", () => {
   });
 });
 
+describe("a turn's tools", () => {
+  type Harness = Awaited<ReturnType<typeof harness>>;
+  type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
+  type Seen = { tools: ToolSpec[][]; results: ToolResult[] };
+
+  const seen = (): Seen => ({ tools: [], results: [] });
+
+  /** Records what each run is offered, and calls `name` with `input` (as `call-1`) when it is offered. */
+  function calling(into: Seen, name: string, input: unknown = {}, refusal?: string): AgentRuntime {
+    return {
+      name: "calling",
+      async *run(run) {
+        into.tools.push(run.tools);
+        yield { type: "run_start" };
+        if (run.tools.some((tool) => tool.name === name)) {
+          const call = { type: "tool_call", id: "call-1", name, input } as const;
+          yield {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              model: run.model,
+              stopReason: "tool_use",
+              content: [call],
+            },
+          };
+          const result = await run.executeTool(call, run.signal);
+          into.results.push(result);
+          yield {
+            type: "message_end",
+            message: {
+              role: "tool",
+              toolCallId: call.id,
+              content: result.content,
+              isError: result.isError,
+            },
+          };
+        }
+        yield refusal === undefined
+          ? { type: "run_end", reason: "done" }
+          : { type: "run_end", reason: "refused", error: refusal };
+      },
+    };
+  }
+
+  const inputSchema = { type: "object", properties: { q: { type: "string" } } };
+
+  type ToolSetup = {
+    name: string;
+    effect?: ToolEffect;
+    enabled?: boolean;
+    title?: string;
+    description?: string;
+  };
+  const definitionOf = (tool: ToolSetup): ToolDefinition => ({
+    ...(tool.title === undefined ? {} : { title: tool.title }),
+    description: tool.description ?? `The ${tool.name} tool.`,
+    inputSchema,
+  });
+
+  /** A server as a worker's listing and an admin leave it: listed, and enabled with an effect unless told otherwise. */
+  async function registered(
+    t: Tenant,
+    options: { slug?: string; url: string; auth?: ToolServerAuth; tools: ToolSetup[] },
+  ) {
+    const server = await createToolServer(t.ctx.db, {
+      slug: options.slug ?? "crm",
+      url: options.url,
+      auth: options.auth ?? { kind: "none" },
+    });
+    await recordSync(t.ctx.db, server.id, {
+      tools: options.tools.map((tool) => ({ name: tool.name, definition: definitionOf(tool) })),
+    });
+    for (const tool of options.tools)
+      if (tool.enabled !== false)
+        await updateTool(t.ctx.db, server.id, tool.name, {
+          enabled: true,
+          effect: tool.effect ?? "read",
+        });
+    return server;
+  }
+
+  const done = (t: Tenant, conversationId: string) =>
+    eventually("the turn to end", async () => !(await isBusy(t.ctx.db, conversationId)));
+
+  const lastError = async (t: Tenant) =>
+    (await t.ctx.db.query<{ last_error: string | null }>("select last_error from conversations"))
+      .rows[0]?.last_error;
+
+  const textsOf = (result: ToolResult | undefined) =>
+    (result?.content ?? []).map((part) => (part.type === "text" ? part.text : `<${part.type}>`));
+
+  it.each(["stateless", "session"] as const)(
+    "calls a named tool once, with the server's credential and the call id (%s)",
+    async (mode) => {
+      const secret = "s3cret-value-0123";
+      await using fixture = await startMcpFixture({
+        mode,
+        requiredHeader: { name: "x-api-key", value: secret },
+        tools: [
+          {
+            name: "search",
+            handler: (args) => ({ content: [{ type: "text", text: `found ${String(args.q)}` }] }),
+          },
+        ],
+      });
+      const into = seen();
+      const credentials = new Map<string, string>();
+      const h = await harness({
+        runtime: calling(into, "crm__search", { q: "ada" }),
+        toolCredentials: async (tenantId, serverId) => credentials.get(`${tenantId}:${serverId}`),
+      });
+      const t = await h.tenant("acme");
+      const server = await registered(t, {
+        url: fixture.url,
+        auth: { kind: "header", header: "X-Api-Key" },
+        tools: [{ name: "search" }],
+      });
+      credentials.set(`${t.id}:${server.id}`, secret);
+      const conversation = await h.conversation(t, ["crm/search"]);
+      await h.post(t, conversation.id, "find ada");
+      const all = await h.settled(t, conversation.id, 3);
+
+      expect(into.results).toEqual([
+        { content: [{ type: "text", text: "found ada" }], isError: false },
+      ]);
+      expect(all[2]).toMatchObject({
+        role: "tool",
+        content: [{ type: "text", text: "found ada" }],
+      });
+      expect(fixture.calls).toEqual([
+        expect.objectContaining({ name: "search", arguments: { q: "ada" }, callId: "call-1" }),
+      ]);
+    },
+  );
+
+  it("offers only the named tools that are enabled and listed, each as an admin approved it", async () => {
+    const into = seen();
+    const h = await harness({ runtime: calling(into, "nothing") });
+    const t = await h.tenant("acme");
+    const crm = await registered(t, {
+      url: "https://crm.example/mcp",
+      tools: [
+        { name: "search", title: "Search", description: "Find a customer." },
+        { name: "draft", enabled: false },
+        { name: "gone" },
+      ],
+    });
+    await registered(t, {
+      slug: "billing",
+      url: "https://billing.example/mcp",
+      tools: [{ name: "refund", effect: "write" }],
+    });
+    // The next listing changes `search` (enabled, so it drifts and keeps what was approved) and no longer has `gone`.
+    await recordSync(t.ctx.db, crm.id, {
+      tools: [
+        {
+          name: "search",
+          definition: { title: "Search", description: "Delete every customer.", inputSchema },
+        },
+        { name: "draft", definition: definitionOf({ name: "draft" }) },
+      ],
+    });
+    expect(
+      (await listTools(t.ctx.db, crm.id)).map((tool) => [
+        tool.name,
+        tool.drifted,
+        tool.removedAt !== null,
+      ]),
+    ).toEqual([
+      ["draft", false, false],
+      ["gone", false, true],
+      ["search", true, false],
+    ]);
+
+    // `crm/*`: not `billing/refund`, not the built-in echo either.
+    const conversation = await h.conversation(t, ["crm/*"]);
+    await h.post(t, conversation.id, "hello");
+    await done(t, conversation.id);
+    expect(into.tools).toEqual([
+      [
+        {
+          name: "crm__search",
+          description: "Search: Find a customer.",
+          inputSchema,
+          readOnly: true,
+        },
+      ],
+    ]);
+
+    const other = await h.conversation(t, ["billing/refund", "kerby/echo"]);
+    await h.post(t, other.id, "hello");
+    await done(t, other.id);
+    expect(into.tools[1]?.map((tool) => [tool.name, tool.readOnly])).toEqual([
+      ["kerby__echo", true],
+      ["billing__refund", false],
+    ]);
+  });
+
+  it.each([
+    ["write", "reports the interruption and does not call it again"],
+    ["read", "calls it again"],
+  ] as const)("a %s tool whose step finds an earlier execution %s", async (effect, _outcome) => {
+    await using fixture = await startMcpFixture({ mode: "stateless", tools: [{ name: "send" }] });
+    const into = seen();
+    const h = await harness({ runtime: calling(into, "crm__send", { q: "hi" }) });
+    const t = await h.tenant("acme");
+    await registered(t, { url: fixture.url, tools: [{ name: "send", effect }] });
+    const conversation = await h.conversation(t, ["crm/send"]);
+    // An earlier attempt began this call and died before its result was stored.
+    await recordToolExecution(t.ctx.db, {
+      conversationId: conversation.id,
+      callId: "call-1",
+      name: "crm__send",
+    });
+    await h.post(t, conversation.id, "send it");
+    await h.settled(t, conversation.id, 3);
+
+    const executions = await t.ctx.db.query("select executions from tool_executions");
+    expect(executions.rows).toEqual([{ executions: 2 }]);
+    if (effect === "write") {
+      expect(into.results).toEqual([
+        {
+          content: [
+            {
+              type: "text",
+              text: "the call to crm__send was interrupted before its result was stored; it may or may not have taken effect: check before calling it again",
+            },
+          ],
+          isError: true,
+        },
+      ]);
+      expect(fixture.calls).toEqual([]);
+    } else {
+      expect(into.results[0]?.isError).toBe(false);
+      expect(fixture.calls).toHaveLength(1);
+    }
+  });
+
+  it("ends a call that hangs after toolCallTimeoutMs with an error result the model reads", async () => {
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      tools: [
+        {
+          name: "send",
+          // Answers only when the client gives up.
+          handler: (_args, context) => {
+            const { promise, resolve } = Promise.withResolvers<{ content: [] }>();
+            context.signal.addEventListener("abort", () => resolve({ content: [] }));
+            return promise;
+          },
+        },
+      ],
+    });
+    const into = seen();
+    const h = await harness({
+      runtime: calling(into, "crm__send", { q: "hi" }),
+      settings: { toolCallTimeoutMs: 300 },
+    });
+    const t = await h.tenant("acme");
+    await registered(t, { url: fixture.url, tools: [{ name: "send", effect: "write" }] });
+    const conversation = await h.conversation(t, ["crm/send"]);
+    await h.post(t, conversation.id, "send it");
+    await h.settled(t, conversation.id, 3);
+
+    expect(into.results).toHaveLength(1);
+    expect(into.results[0]?.isError).toBe(true);
+    expect(textsOf(into.results[0])).toEqual([
+      "calling crm__send failed: the server did not answer in time. The call may have taken effect: check before calling it again.",
+    ]);
+    // A failing tool is the model's to handle: the turn is not retried.
+    expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
+      { attempts: 1 },
+    ]);
+  });
+
+  it("passes text, structured content as JSON and a note for other content, cut at 256 KiB", async () => {
+    const big = "x".repeat(300 * 1024);
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      tools: [
+        {
+          name: "big",
+          handler: () => ({ content: [{ type: "text", text: big }], isError: true }),
+        },
+        {
+          name: "mixed",
+          handler: () => ({
+            content: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+            structuredContent: { total: 3 },
+          }),
+        },
+      ],
+    });
+    const intoBig = seen();
+    const h = await harness({ runtime: calling(intoBig, "crm__big", {}) });
+    const t = await h.tenant("acme");
+    await registered(t, { url: fixture.url, tools: [{ name: "big" }, { name: "mixed" }] });
+    const conversation = await h.conversation(t, ["crm/big"]);
+    await h.post(t, conversation.id, "go");
+    await h.settled(t, conversation.id, 3);
+    const [kept, note] = textsOf(intoBig.results[0]);
+    expect(kept).toBe("x".repeat(256 * 1024));
+    expect(note).toBe(`[the result was cut at 256 KiB: ${44 * 1024} more bytes were left out]`);
+    expect(intoBig.results[0]?.isError).toBe(true);
+
+    const intoMixed = seen();
+    h.deps.runtime = calling(intoMixed, "crm__mixed", {});
+    const mixed = await h.conversation(t, ["crm/mixed"]);
+    await h.post(t, mixed.id, "go");
+    await h.settled(t, mixed.id, 3);
+    expect(intoMixed.results).toEqual([
+      {
+        content: [
+          { type: "text", text: '{"total":3}' },
+          {
+            type: "text",
+            text: "[a image part of the result was left out: Kerby passes text only]",
+          },
+        ],
+        isError: false,
+      },
+    ]);
+  });
+
+  it("never lets the server's credential reach a result, the transcript or last_error", async () => {
+    const secret = "Bearer s3cret-0123456789";
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      requiredHeader: { name: "authorization", value: secret },
+      tools: [
+        {
+          name: "whoami",
+          handler: () => ({ content: [{ type: "text", text: `you sent ${secret}` }] }),
+        },
+      ],
+    });
+    const into = seen();
+    const h = await harness({
+      runtime: calling(into, "crm__whoami", {}, `the provider choked on ${secret}`),
+      toolCredentials: async () => secret,
+    });
+    const t = await h.tenant("acme");
+    await registered(t, {
+      url: fixture.url,
+      auth: { kind: "header", header: "Authorization" },
+      tools: [{ name: "whoami" }],
+    });
+    const conversation = await h.conversation(t, ["crm/whoami"]);
+    await h.post(t, conversation.id, "who am I");
+    const stored = await eventually("last_error", () => lastError(t).then((e) => e ?? false));
+    expect(stored).toBe("the provider choked on [redacted]");
+    expect(fixture.calls).toHaveLength(1);
+    expect(textsOf(into.results[0])).toEqual(["you sent [redacted]"]);
+    const transcript = await h.settled(t, conversation.id, 3);
+    expect(JSON.stringify(transcript)).not.toContain("s3cret");
+  });
+
+  it("says a refused credential, without the credential, and the model reads it", async () => {
+    const wrong = "Bearer wrong-0123456789";
+    await using fixture = await startMcpFixture({
+      mode: "session",
+      requiredHeader: { name: "authorization", value: "Bearer right" },
+      tools: [{ name: "whoami" }],
+    });
+    const into = seen();
+    const h = await harness({
+      runtime: calling(into, "crm__whoami", {}),
+      toolCredentials: async () => wrong,
+    });
+    const t = await h.tenant("acme");
+    await registered(t, {
+      url: fixture.url,
+      auth: { kind: "header", header: "Authorization" },
+      tools: [{ name: "whoami" }],
+    });
+    const conversation = await h.conversation(t, ["crm/whoami"]);
+    await h.post(t, conversation.id, "who am I");
+    await h.settled(t, conversation.id, 3);
+    expect(into.results[0]?.isError).toBe(true);
+    const [text] = textsOf(into.results[0]);
+    expect(text).toContain("calling crm__whoami failed: the server refused the credential");
+    expect(text).not.toContain("wrong-0123456789");
+  });
+
+  it(`ends the turn without a retry when its tools stand for more than ${MAX_CONVERSATION_TOOLS}`, async () => {
+    const into = seen();
+    const h = await harness({ runtime: calling(into, "nothing") });
+    const t = await h.tenant("acme");
+    await registered(t, {
+      url: "https://crm.example/mcp",
+      tools: Array.from({ length: MAX_CONVERSATION_TOOLS + 1 }, (_, i) => ({ name: `t${i}` })),
+    });
+    const conversation = await h.conversation(t, ["crm/*"]);
+    await h.post(t, conversation.id, "hello");
+    const stored = await eventually("last_error", () => lastError(t).then((e) => e ?? false));
+    expect(stored).toContain(`stand for ${MAX_CONVERSATION_TOOLS + 1} tools`);
+    expect(stored).toContain(`more than the ${MAX_CONVERSATION_TOOLS}`);
+    await done(t, conversation.id);
+    expect(into.tools).toEqual([]);
+    expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
+      { attempts: 1 },
+    ]);
+  });
+});
+
 /** A runtime that behaves like the real one but throws once, right after the tool result was persisted. */
 function crashingOnce(inner: AgentRuntime): AgentRuntime {
   let crashed = false;
@@ -413,7 +845,7 @@ describe("history budget", () => {
         const call = {
           type: "tool_call",
           id: `call-${n}`,
-          name: "echo",
+          name: "kerby__echo",
           input: { text: pad },
         } as const;
         yield { type: "run_start" };
@@ -578,7 +1010,7 @@ describe("trace", () => {
         const call = {
           type: "tool_call",
           id: "call-1",
-          name: "echo",
+          name: "kerby__echo",
           input: { text: "ping" },
         } as const;
         yield { type: "run_start" };
@@ -1362,7 +1794,7 @@ describe("judgments", () => {
             const call = {
               type: "tool_call",
               id: `call-${i}`,
-              name: "echo",
+              name: "kerby__echo",
               input: { text },
             } as const;
             yield {
@@ -1403,18 +1835,19 @@ describe("judgments", () => {
         system: "s",
         guardrails: [destructive],
       });
+      await nameTools(t.ctx.db, conversation.id, ["kerby/echo"]);
       await h.post(t, conversation.id, "go");
       await h.settled(t, conversation.id, 5);
 
       expect(results).toEqual([
         {
-          text: 'The tool "echo" was not run: blocked by guardrail "destructive_tool".',
+          text: 'The tool "kerby__echo" was not run: blocked by guardrail "destructive_tool".',
           isError: true,
         },
         { text: "ping", isError: false },
       ]);
       expect(calls[0]?.state).toEqual({
-        tool_call: { name: "echo", input: { text: "destroy everything" } },
+        tool_call: { name: "kerby__echo", input: { text: "destroy everything" } },
       });
       // Only the harmless call ran.
       const ran = await t.ctx.db.query("select call_id from tool_executions");
@@ -1430,8 +1863,8 @@ describe("judgments", () => {
         async *run(run) {
           seen.tools.push(...run.tools.map((tool) => tool.name));
           yield { type: "run_start" };
-          if (run.tools.some((tool) => tool.name === "judge")) {
-            const call = { type: "tool_call", id: "call-1", name: "judge", input } as const;
+          if (run.tools.some((tool) => tool.name === "kerby__judge")) {
+            const call = { type: "tool_call", id: "call-1", name: "kerby__judge", input } as const;
             yield {
               type: "message_end",
               message: {
@@ -1458,7 +1891,7 @@ describe("judgments", () => {
       };
     }
 
-    it("is offered only to a tenant with a key, answers from the provider, and records usage once per call", async () => {
+    it("is offered only when named and the tenant has a key, answers from the provider, and records usage once per call", async () => {
       const calls: JudgmentRun[] = [];
       const seen = { tools: [] as string[], results: [] as string[] };
       const input = { state: "I was charged twice.", questions: request.questions };
@@ -1470,8 +1903,9 @@ describe("judgments", () => {
       });
       const sealer = createSealer(generateSecretsKeyPair().publicKey);
 
+      // Named, but no key for the judgment provider, and echo off on this worker: neither built-in is offered.
       const without = await h.tenant("without");
-      const chat = await h.conversation(without);
+      const chat = await h.conversation(without, ["kerby/judge", "kerby/echo"]);
       await h.post(without, chat.id, "hello");
       await eventually("the first turn", async () => !(await isBusy(without.ctx.db, chat.id)));
       expect(seen.tools).toEqual([]);
@@ -1479,10 +1913,16 @@ describe("judgments", () => {
 
       const keyed = await h.tenant("keyed");
       await putModelKey(h.control.db, sealer, keyed.id, "typesafe", "key-0123456789");
-      const conversation = await h.conversation(keyed);
+      // A key, but the conversation names no tools: none is implied.
+      const unnamed = await h.conversation(keyed, []);
+      await h.post(keyed, unnamed.id, "hello");
+      await eventually("the unnamed turn", async () => !(await isBusy(keyed.ctx.db, unnamed.id)));
+      expect(seen.tools).toEqual([]);
+
+      const conversation = await h.conversation(keyed, ["kerby/judge", "kerby/echo"]);
       await h.post(keyed, conversation.id, "judge this");
       await h.settled(keyed, conversation.id, 3);
-      expect(seen.tools).toEqual(["judge"]);
+      expect(seen.tools).toEqual(["kerby__judge"]);
       // The default model applies, and the model's answers come back as JSON, not prose.
       expect(calls[0]?.model).toBe("typesafe/jev-latest");
       expect(JSON.parse(seen.results[0] ?? "")).toEqual({
@@ -1506,7 +1946,7 @@ describe("judgments", () => {
       const sealer = createSealer(generateSecretsKeyPair().publicKey);
       const t = await h.tenant("acme");
       await putModelKey(h.control.db, sealer, t.id, "typesafe", "key-0123456789");
-      const conversation = await h.conversation(t);
+      const conversation = await h.conversation(t, ["kerby/judge"]);
       await h.post(t, conversation.id, "judge this");
       await h.settled(t, conversation.id, 3);
       expect(seen.results[0]).toMatch(

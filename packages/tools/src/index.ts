@@ -5,7 +5,7 @@ import { join } from "node:path";
 /** The tool tables' migrations; `tenantMigrationDirs` (packages/conversations) applies them last. */
 export const toolsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-export { BUILTIN_TOOLS, builtinTool } from "./builtin.ts";
+export { BUILTIN_TOOLS } from "./builtin.ts";
 export {
   BuiltinToolServerError,
   ToolNotFoundError,

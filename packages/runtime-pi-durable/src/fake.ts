@@ -1,6 +1,7 @@
 // A scripted model for local stacks and end-to-end tests (`KERBY_FAKE_MODEL=1`, never in production): the answer
 // depends on the last message only, so a rehydrated run answers exactly as the original would have.
-//   "echo <text>"            asks for the `echo` tool with <text>, then reports what the tool said
+//   "echo <text>"            asks for the built-in echo tool (`kerby__echo`; the conversation must name `kerby/echo`)
+//                            with <text>, then reports what the tool said
 //   anything else            "Echo: <text>"
 //   "[slow:<ms>]"            in the user message: wait before answering (a window to kill a worker in)
 //   "[slow-after-tool:<ms>]" the same, but only for the answer that follows a tool result
@@ -58,7 +59,10 @@ export function createFakeModels(): Models {
     const echo = /^echo (.*)$/s.exec(text.replace(/\[slow:\d+\]|\[think:[^\]]*\]/g, "").trim());
     if (echo?.[1] !== undefined) {
       return fauxAssistantMessage(
-        [...thinking, fauxToolCall("echo", { text: echo[1] }, { id: `call_${messages.length}` })],
+        [
+          ...thinking,
+          fauxToolCall("kerby__echo", { text: echo[1] }, { id: `call_${messages.length}` }),
+        ],
         {
           stopReason: "toolUse",
         },
