@@ -2,14 +2,16 @@
 import { join } from "node:path";
 import { blobsMigrationsDir } from "@kerby/blobs";
 import { durableMigrationsDir } from "@kerby/durable";
+import { promptsMigrationsDir } from "@kerby/prompts";
 
 const conversationsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-/** Every tenant database's migrations, in apply order: Absurd and queues, the blob index, then conversations. */
+/** Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, then prompts. */
 export const tenantMigrationDirs: readonly string[] = [
   durableMigrationsDir,
   blobsMigrationsDir,
   conversationsMigrationsDir,
+  promptsMigrationsDir,
 ];
 
 export {
@@ -19,7 +21,6 @@ export {
   InvalidCursorError,
   LeaseLostError,
   SeqConflictError,
-  StorageQuotaExceededError,
 } from "./errors.ts";
 export { conversationChannel, notifyLive, parseNotice } from "./events.ts";
 export {

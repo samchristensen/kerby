@@ -16,8 +16,9 @@ export async function createChatAction(
   const form = Object.fromEntries(formData);
   const result = await consoleService().createChat(access, form);
   if (!result.ok) {
+    // Every field, the prompt's `var.<name>` ones too: they are given back to the form as typed.
     const values = Object.fromEntries(
-      ["model", "system", "message"].map((name) => [name, String(form[name] ?? "")]),
+      Object.entries(form).map(([name, value]) => [name, typeof value === "string" ? value : ""]),
     );
     return { ...result, values };
   }

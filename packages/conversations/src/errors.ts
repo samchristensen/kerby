@@ -12,11 +12,6 @@ export class ConversationFullError extends Error {
   override name = "ConversationFullError";
 }
 
-/** The tenant's stored bytes (its blob index), with the new message, would pass its storage quota. */
-export class StorageQuotaExceededError extends Error {
-  override name = "StorageQuotaExceededError";
-}
-
 /** This run is no longer the task's current attempt: another worker owns the turn. Stop, write nothing. */
 export class LeaseLostError extends Error {
   override name = "LeaseLostError";

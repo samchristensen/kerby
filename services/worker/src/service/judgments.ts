@@ -4,7 +4,7 @@
 import { DEFAULT_JUDGMENT_MODEL, parseModelId } from "@kerby/contracts";
 import { hasModelKey, recordUsage } from "@kerby/control-plane";
 import type { TenantContext } from "@kerby/db";
-import type { RunContext } from "@kerby/durable";
+import type { RunContext, TaskParams } from "@kerby/durable";
 import type { JudgmentOutcome, JudgmentRequest } from "@kerby/judgment";
 import { log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
@@ -64,15 +64,21 @@ export async function runJudgment(
 
 /**
  * The `run-judgment` task body. The provider is called inside a step, so a retry after a later failure gets the stored
- * outcome and does not ask (or pay) twice. The outcome is the task's result: `GET /v1/judgments/:id` reads it.
+ * outcome and does not ask (or pay) twice. The outcome is the task's result: `GET /v1/judgments/:id` reads it. The
+ * provider gets the model, state and questions only: which prompt they came from is the api's record, not its business.
  */
 export async function runJudgmentTask(
   deps: WorkerDeps,
   ctx: TenantContext,
-  request: JudgmentRequest,
+  params: TaskParams["run-judgment"],
   run: RunContext,
 ): Promise<JudgmentOutcome> {
   const started = performance.now();
+  const request: JudgmentRequest = {
+    model: params.model,
+    state: params.state,
+    questions: params.questions,
+  };
   const outcome = await run.step("judge", () =>
     runJudgment(deps, ctx.tenantId, `judgment:${run.taskId}`, request, run.signal),
   );

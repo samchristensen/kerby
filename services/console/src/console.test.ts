@@ -432,4 +432,254 @@ describe("chats", () => {
       }),
     ]);
   });
+
+  it("starts a chat from a published prompt by reference, with only the variables typed, and says why it was refused", async () => {
+    let reply = () => json(201, { id: CONVERSATION_ID });
+    const h = await chatHarness((request) =>
+      request.path === "/v1/conversations" ? reply() : json(202, { seq: 1 }),
+    );
+    // The prompt sets the model: a provider without a key in the hidden model field is not this form's concern.
+    expect(
+      await h.service.createChat(h.access, {
+        message: "hi",
+        model: "anthropic/claude-x",
+        system: "ignored",
+        promptName: "support/triage",
+        promptVersion: "production",
+        "var.customer": "Ada",
+        "var.tone": "",
+      }),
+    ).toEqual({ ok: true, id: CONVERSATION_ID });
+    expect(h.calls[0]?.body).toEqual({
+      externalUserId: `console:${h.access.session.userId}`,
+      prompt: { name: "support/triage", version: "production", variables: { customer: "Ada" } },
+    });
+    h.calls.length = 0;
+    await h.service.createChat(h.access, {
+      message: "hi",
+      promptName: "support/triage",
+      promptVersion: "3",
+    });
+    expect(h.calls[0]?.body).toEqual({
+      externalUserId: `console:${h.access.session.userId}`,
+      prompt: { name: "support/triage", version: 3 },
+    });
+
+    reply = () => error(400, "invalid_variables", "variable customer is required: give it a value");
+    expect(
+      await h.service.createChat(h.access, { message: "hi", promptName: "a", promptVersion: "1" }),
+    ).toEqual({ ok: false, error: "variable customer is required: give it a value" });
+    reply = () => error(404, "not_found");
+    expect(
+      await h.service.createChat(h.access, { message: "hi", promptName: "a", promptVersion: "9" }),
+    ).toMatchObject({ ok: false, fields: { promptVersion: expect.stringContaining("no longer") } });
+  });
+});
+
+describe("studio", () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const error = (status: number, code: string, message = code) =>
+    json(status, { error: { code, message } });
+  const CONVERSATION_ID = "5f0f3b8e-6d1f-4a39-9d3e-0c5a6f0b7a11";
+  const JUDGMENT_ID = "0b9f7c1e-2a4d-4e6b-8c1d-3f5a7b9c1d2e";
+  const AT = "2026-11-22T00:00:00.000Z";
+
+  const prompt = (draft: Record<string, unknown>) => ({
+    name: "support/triage",
+    kind: draft.kind,
+    latestVersion: 2,
+    labels: { production: 1 },
+    createdAt: AT,
+    updatedAt: AT,
+    draft,
+    draftRevision: 4,
+    draftUpdatedAt: AT,
+    draftUpdatedBy: "user:x",
+    versions: [],
+  });
+  const chatDraft = {
+    kind: "chat",
+    text: "Help {{customer}} in a {{ tone }} tone. {{undeclared}}",
+    model: "opencode/big",
+    guardrails: [
+      { name: "jailbreak", appliesTo: "user_message", instructions: "Jailbreak?", blockAt: 0.7 },
+    ],
+    variables: [{ name: "customer" }, { name: "tone", default: "calm" }],
+  };
+  const decisionDraft = {
+    kind: "decision",
+    model: "typesafe/jev-latest",
+    questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+  };
+
+  async function studioHarness(answer: (request: Parameters<ApiClient>[0]) => Response) {
+    const calls: Parameters<ApiClient>[0][] = [];
+    const h = await harness({}, async (request) => {
+      calls.push(request);
+      return answer(request);
+    });
+    const user = await h.signUp("acme");
+    return { ...h, calls, access: { session: user.session, token: user.token } };
+  }
+
+  it("runs the chat playground from the draft rendered here, or from a version by reference, as studio:<userId>", async () => {
+    let draft: Record<string, unknown> = chatDraft;
+    const h = await studioHarness((request) =>
+      request.method === "GET" ? json(200, prompt(draft)) : json(201, { id: CONVERSATION_ID }),
+    );
+    await h.service.setModelKey(h.access.session, "opencode", { apiKey: "sk-opencode-123456" });
+    const studioUser = `studio:${h.access.session.userId}`;
+
+    expect(
+      await h.service.startPlaygroundChat(h.access, "support/triage", { source: "draft" }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("customer") });
+    expect(h.calls.map((c) => c.method)).toEqual(["GET"]);
+    expect(h.calls[0]?.path).toBe("/v1/prompts/support%2Ftriage");
+
+    h.calls.length = 0;
+    expect(
+      await h.service.startPlaygroundChat(h.access, "support/triage", {
+        source: "draft",
+        "var.customer": "Ada",
+      }),
+    ).toEqual({ ok: true, id: CONVERSATION_ID });
+    expect(h.calls[1]).toEqual({
+      method: "POST",
+      path: "/v1/conversations",
+      token: h.access.token,
+      body: {
+        externalUserId: studioUser,
+        system: "Help Ada in a calm tone. {{undeclared}}",
+        model: "opencode/big",
+        guardrails: [{ ...chatDraft.guardrails[0] }],
+      },
+    });
+
+    h.calls.length = 0;
+    await h.service.startPlaygroundChat(h.access, "support/triage", {
+      source: "production",
+      "var.customer": "Ada",
+    });
+    expect(h.calls).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        body: {
+          externalUserId: studioUser,
+          prompt: { name: "support/triage", version: "production", variables: { customer: "Ada" } },
+        },
+      }),
+    ]);
+
+    // A draft's model whose provider has no key is caught before the api is asked to start anything.
+    draft = { ...chatDraft, model: "anthropic/claude-x" };
+    h.calls.length = 0;
+    expect(
+      await h.service.startPlaygroundChat(h.access, "support/triage", {
+        source: "draft",
+        "var.customer": "Ada",
+      }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("No anthropic key") });
+    expect(h.calls.map((c) => c.method)).toEqual(["GET"]);
+
+    const conversation = {
+      id: CONVERSATION_ID,
+      externalUserId: studioUser,
+      model: "opencode/big",
+      title: null,
+      createdAt: AT,
+      updatedAt: AT,
+      messageCount: 0,
+      prompt: { name: "support/triage", version: 1 },
+    };
+    const list = await studioHarness(() =>
+      json(200, { conversations: [conversation], nextCursor: null }),
+    );
+    expect((await list.service.chats(list.access)).chats.map((c) => c.origin)).toEqual(["studio"]);
+  });
+
+  it("runs the decision playground on a JSON state, from the draft's questions or a version", async () => {
+    const h = await studioHarness((request) =>
+      request.method === "GET" ? json(200, prompt(decisionDraft)) : json(202, { id: JUDGMENT_ID }),
+    );
+    expect(
+      await h.service.runDecision(h.access, "support/triage", { source: "draft", state: "{nope" }),
+    ).toMatchObject({ ok: false, fields: { state: expect.stringContaining("not valid JSON") } });
+    expect(h.calls).toEqual([]);
+
+    expect(
+      await h.service.runDecision(h.access, "support/triage", {
+        source: "draft",
+        state: '{"message":"help"}',
+      }),
+    ).toEqual({ ok: true, id: JUDGMENT_ID });
+    expect(h.calls[1]).toMatchObject({
+      method: "POST",
+      path: "/v1/judgments",
+      body: {
+        state: { message: "help" },
+        questions: decisionDraft.questions,
+        model: "typesafe/jev-latest",
+      },
+    });
+
+    h.calls.length = 0;
+    await h.service.runDecision(h.access, "support/triage", { source: "2", state: "[1]" });
+    expect(h.calls).toEqual([
+      expect.objectContaining({
+        path: "/v1/judgments",
+        body: { state: [1], prompt: { name: "support/triage", version: 2 } },
+      }),
+    ]);
+  });
+
+  it("says why a save, publish, create or delete was refused, and treats anything else as a fault", async () => {
+    let reply = error(409, "draft_conflict");
+    const h = await studioHarness(() => reply);
+    const save = () => h.service.saveDraft(h.access, "support/triage", 4, decisionDraft);
+    expect(await save()).toMatchObject({
+      ok: false,
+      conflict: true,
+      error: expect.stringContaining("changed elsewhere"),
+    });
+    expect(h.calls[0]).toMatchObject({
+      method: "PUT",
+      path: "/v1/prompts/support%2Ftriage/draft",
+      body: { revision: 4, draft: decisionDraft },
+    });
+
+    const publish = () => h.service.publishPrompt(h.access, "support/triage", 4, { note: " v2 " });
+    reply = error(400, "not_publishable", "the text is empty; variable x is not declared");
+    expect(await publish()).toEqual({
+      ok: false,
+      error: "This draft cannot be published yet. the text is empty; variable x is not declared",
+    });
+    expect(h.calls.at(-1)?.body).toEqual({ revision: 4, note: "v2" });
+    reply = error(409, "unchanged");
+    expect(await publish()).toMatchObject({ error: expect.stringContaining("Nothing to publish") });
+
+    reply = error(409, "name_taken");
+    expect(
+      await h.service.createPrompt(h.access, { name: "support/triage", kind: "chat" }),
+    ).toMatchObject({
+      ok: false,
+      fields: { name: expect.stringContaining("already has this name") },
+    });
+    reply = error(409, "prompt_published");
+    expect(await h.service.deletePrompt(h.access, "support/triage")).toMatchObject({
+      error: expect.stringContaining("cannot be deleted"),
+    });
+    reply = error(500, "internal");
+    await expect(save()).rejects.toThrow(/500 internal/);
+
+    // A name or label that is not one never reaches a path.
+    h.calls.length = 0;
+    expect(await h.service.prompt(h.access, "../v1/model-keys")).toBeUndefined();
+    expect(await h.service.deletePrompt(h.access, "a/../b")).toMatchObject({ ok: false });
+    expect(await h.service.removePromptLabel(h.access, "a", "latest")).toMatchObject({ ok: false });
+    expect(
+      await h.service.setPromptLabel(h.access, "a", { label: "latest", version: "1" }),
+    ).toMatchObject({ ok: false, fields: { label: expect.stringContaining("Latest") } });
+    expect(h.calls).toEqual([]);
+  });
 });

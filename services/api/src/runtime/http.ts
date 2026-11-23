@@ -2,12 +2,22 @@
 // token for a signed-in person) and runs as that credential's tenant.
 import {
   CreateConversationRequestSchema,
+  CreatePromptRequestSchema,
   GetConversationQuerySchema,
-  JudgmentRequestSchema,
   ListConversationsQuerySchema,
+  ListPromptsQuerySchema,
   ModelProviderSchema,
   PostMessageRequestSchema,
+  PromptLabelSchema,
+  PromptNameSchema,
+  PromptVersionParamSchema,
+  PublishPromptRequestSchema,
   PutModelKeyRequestSchema,
+  RenamePromptRequestSchema,
+  RenderPromptRequestSchema,
+  SaveDraftRequestSchema,
+  SetPromptLabelRequestSchema,
+  SubmitJudgmentRequestSchema,
 } from "@kerby/contracts";
 import { ModelKeyLimitError } from "@kerby/control-plane";
 import {
@@ -16,10 +26,22 @@ import {
   findConversation,
   InvalidCursorError,
   isConversationId,
-  StorageQuotaExceededError,
 } from "@kerby/conversations";
 import type { TenantContext, TenantLease } from "@kerby/db";
 import { log, withTenant } from "@kerby/observability";
+import {
+  DraftConflictError,
+  InvalidVariablesError,
+  NotPublishableError,
+  PromptKindError,
+  PromptLimitError,
+  PromptNameTakenError,
+  PromptNotFoundError,
+  PromptPublishedError,
+  PromptUnchangedError,
+  ReservedLabelError,
+  StorageQuotaExceededError,
+} from "@kerby/prompts";
 import {
   bearerToken,
   clientAddress,
@@ -44,6 +66,19 @@ import {
 import { getJudgment, submitJudgment } from "../service/judgments.ts";
 import { listTenantModelKeys, removeModelKey, setModelKey } from "../service/model-keys.ts";
 import { InvalidModelError } from "../service/models.ts";
+import {
+  createTenantPrompt,
+  deleteTenantPrompt,
+  getTenantPrompt,
+  getTenantPromptVersion,
+  listTenantPrompts,
+  publishTenantPrompt,
+  removeTenantPromptLabel,
+  renameTenantPrompt,
+  renderChatPrompt,
+  saveTenantDraft,
+  setTenantPromptLabel,
+} from "../service/prompts.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -177,7 +212,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
             status = response.status;
             return response;
           } catch (error) {
-            if (error instanceof NotFoundError)
+            if (error instanceof NotFoundError || error instanceof PromptNotFoundError)
               throw new HttpError(404, "not_found", error.message);
             if (error instanceof ConversationFullError)
               throw new HttpError(413, "conversation_full", error.message);
@@ -185,12 +220,28 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(413, "storage_quota_exceeded", error.message);
             if (error instanceof ConversationBusyError)
               throw new HttpError(409, "conversation_busy", error.message);
-            if (error instanceof InvalidCursorError)
+            if (error instanceof InvalidCursorError || error instanceof ReservedLabelError)
               throw new HttpError(400, "invalid_request", error.message);
             if (error instanceof ModelKeyLimitError)
               throw new HttpError(409, "model_key_limit", error.message);
             if (error instanceof InvalidModelError)
               throw new HttpError(400, "invalid_model", error.message);
+            if (error instanceof PromptNameTakenError)
+              throw new HttpError(409, "name_taken", error.message);
+            if (error instanceof PromptLimitError)
+              throw new HttpError(409, "prompt_limit", error.message);
+            if (error instanceof PromptPublishedError)
+              throw new HttpError(409, "prompt_published", error.message);
+            if (error instanceof DraftConflictError)
+              throw new HttpError(409, "draft_conflict", error.message);
+            if (error instanceof PromptUnchangedError)
+              throw new HttpError(409, "unchanged", error.message);
+            if (error instanceof PromptKindError)
+              throw new HttpError(400, "wrong_kind", error.message);
+            if (error instanceof NotPublishableError)
+              throw new HttpError(400, "not_publishable", error.message);
+            if (error instanceof InvalidVariablesError)
+              throw new HttpError(400, "invalid_variables", error.message);
             throw error;
           }
         });
@@ -229,6 +280,31 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
   const providerParam = (params: Record<string, string>): string => {
     const parsed = ModelProviderSchema.safeParse(params.provider);
     if (!parsed.success) throw new HttpError(404, "not_found", "model key not found");
+    return parsed.data;
+  };
+
+  /** `:name` is one path segment, its `/` sent as `%2F`; a name that cannot exist is simply not found. */
+  const promptName = (params: Record<string, string>): string => {
+    const parsed = PromptNameSchema.safeParse(params.name);
+    if (!parsed.success) throw new HttpError(404, "not_found", "no prompt by that name");
+    return parsed.data;
+  };
+
+  const promptVersion = (params: Record<string, string>) => {
+    const parsed = PromptVersionParamSchema.safeParse(params.version);
+    if (!parsed.success)
+      throw new HttpError(404, "not_found", "a version is a number from 1 or a label");
+    return parsed.data;
+  };
+
+  const promptLabel = (params: Record<string, string>): string => {
+    const parsed = PromptLabelSchema.safeParse(params.label);
+    if (!parsed.success)
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "a label is a lowercase letter, then lowercase letters, digits or -, up to 32",
+      );
     return parsed.data;
   };
 
@@ -399,7 +475,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       "POST",
       "/v1/judgments",
       authed("POST /v1/judgments", async (request, _params, principal) => {
-        const body = await readJson(request, JudgmentRequestSchema, {
+        const body = await readJson(request, SubmitJudgmentRequestSchema, {
           maxBytes: JUDGMENT_BODY_BYTES,
         });
         return json(202, await inTenant(principal, (ctx) => submitJudgment(deps, ctx, body)));
@@ -412,6 +488,141 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const id = z.uuid().safeParse(params.id);
         if (!id.success) throw new HttpError(404, "not_found", "judgment not found");
         return json(200, await inTenant(principal, (ctx) => getJudgment(ctx, id.data)));
+      }),
+    ],
+    [
+      "GET",
+      "/v1/prompts",
+      authed("GET /v1/prompts", async (request, _params, principal) => {
+        const query = ListPromptsQuerySchema.safeParse(
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        if (!query.success)
+          throw new HttpError(400, "invalid_request", "kind must be chat or decision");
+        return json(200, await inTenant(principal, (ctx) => listTenantPrompts(ctx, query.data)));
+      }),
+    ],
+    [
+      "POST",
+      "/v1/prompts",
+      authed("POST /v1/prompts", async (request, _params, principal) => {
+        const body = await readJson(request, CreatePromptRequestSchema);
+        return json(
+          201,
+          await inTenant(principal, (ctx) => createTenantPrompt(deps, principal, ctx, body)),
+        );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/prompts/:name",
+      authed("GET /v1/prompts/:name", async (_request, params, principal) => {
+        const name = promptName(params);
+        return json(200, await inTenant(principal, (ctx) => getTenantPrompt(ctx, name)));
+      }),
+    ],
+    [
+      "PATCH",
+      "/v1/prompts/:name",
+      authed("PATCH /v1/prompts/:name", async (request, params, principal) => {
+        const name = promptName(params);
+        const body = await readJson(request, RenamePromptRequestSchema);
+        return json(
+          200,
+          await inTenant(principal, (ctx) =>
+            renameTenantPrompt(deps, principal, ctx, name, body.name),
+          ),
+        );
+      }),
+    ],
+    [
+      "DELETE",
+      "/v1/prompts/:name",
+      authed("DELETE /v1/prompts/:name", async (_request, params, principal) => {
+        const name = promptName(params);
+        await inTenant(principal, (ctx) => deleteTenantPrompt(deps, principal, ctx, name));
+        return new Response(null, { status: 204 });
+      }),
+    ],
+    [
+      "PUT",
+      "/v1/prompts/:name/draft",
+      authed("PUT /v1/prompts/:name/draft", async (request, params, principal) => {
+        const name = promptName(params);
+        const body = await readJson(request, SaveDraftRequestSchema);
+        return json(
+          200,
+          await inTenant(principal, (ctx) => saveTenantDraft(deps, principal, ctx, name, body)),
+        );
+      }),
+    ],
+    [
+      "POST",
+      "/v1/prompts/:name/versions",
+      authed("POST /v1/prompts/:name/versions", async (request, params, principal) => {
+        const name = promptName(params);
+        const body = await readJson(request, PublishPromptRequestSchema);
+        return json(
+          201,
+          await inTenant(principal, (ctx) => publishTenantPrompt(deps, principal, ctx, name, body)),
+        );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/prompts/:name/versions/:version",
+      authed("GET /v1/prompts/:name/versions/:version", async (_request, params, principal) => {
+        const name = promptName(params);
+        const version = promptVersion(params);
+        return json(
+          200,
+          await inTenant(principal, (ctx) => getTenantPromptVersion(ctx, name, version)),
+        );
+      }),
+    ],
+    [
+      "POST",
+      "/v1/prompts/:name/versions/:version/render",
+      authed(
+        "POST /v1/prompts/:name/versions/:version/render",
+        async (request, params, principal) => {
+          const name = promptName(params);
+          const version = promptVersion(params);
+          const body = await readJson(request, RenderPromptRequestSchema);
+          return json(
+            200,
+            await inTenant(principal, (ctx) =>
+              renderChatPrompt(ctx, { name, version, variables: body.variables }),
+            ),
+          );
+        },
+      ),
+    ],
+    [
+      "PUT",
+      "/v1/prompts/:name/labels/:label",
+      authed("PUT /v1/prompts/:name/labels/:label", async (request, params, principal) => {
+        const name = promptName(params);
+        const label = promptLabel(params);
+        const body = await readJson(request, SetPromptLabelRequestSchema);
+        return json(
+          200,
+          await inTenant(principal, (ctx) =>
+            setTenantPromptLabel(deps, principal, ctx, name, label, body.version),
+          ),
+        );
+      }),
+    ],
+    [
+      "DELETE",
+      "/v1/prompts/:name/labels/:label",
+      authed("DELETE /v1/prompts/:name/labels/:label", async (_request, params, principal) => {
+        const name = promptName(params);
+        const label = promptLabel(params);
+        await inTenant(principal, (ctx) =>
+          removeTenantPromptLabel(deps, principal, ctx, name, label),
+        );
+        return new Response(null, { status: 204 });
       }),
     ],
   ];

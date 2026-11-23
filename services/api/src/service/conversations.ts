@@ -28,6 +28,7 @@ import type { TenantContext } from "@kerby/db";
 import { errorFields, log } from "@kerby/observability";
 import { type ApiDeps, NotFoundError } from "../types/index.ts";
 import { assertJudgmentModel, InvalidModelError } from "./models.ts";
+import { renderChatPrompt } from "./prompts.ts";
 
 function conversationResource(record: {
   id: string;
@@ -38,6 +39,7 @@ function conversationResource(record: {
   createdAt: Date;
   updatedAt: Date;
   guardrails: Conversation["guardrails"];
+  prompt: Conversation["prompt"];
 }): Conversation {
   return {
     id: record.id,
@@ -48,6 +50,7 @@ function conversationResource(record: {
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
     guardrails: record.guardrails,
+    prompt: record.prompt,
   };
 }
 
@@ -66,17 +69,23 @@ export async function listTenantConversations(
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
       messageCount: record.messageCount,
+      prompt: record.prompt,
     })),
     nextCursor: page.nextCursor,
   };
 }
 
+/**
+ * A conversation with the request's system prompt, model and guardrails, or those of a published chat prompt: its
+ * label is resolved once, here, and the conversation keeps the rendered text and the version it came from (ADR 0017).
+ */
 export async function createConversation(
   deps: ApiDeps,
   ctx: TenantContext,
   request: CreateConversationRequest,
 ): Promise<Conversation> {
-  const model = request.model ?? deps.settings.defaultModel;
+  const fromPrompt = request.prompt && (await renderChatPrompt(ctx, request.prompt));
+  const model = (fromPrompt ? fromPrompt.model : request.model) ?? deps.settings.defaultModel;
   if (!model) throw new InvalidModelError("model is required: <provider>/<modelId>");
   const parsed = parseModelId(model);
   if (!parsed) throw new InvalidModelError(`model "${model}" must look like <provider>/<modelId>`);
@@ -100,14 +109,15 @@ export async function createConversation(
     );
   }
   // Guardrails are judgments: each runs on the tenant's key for its judgment model, and fails closed without it.
-  const guardrails = request.guardrails ?? [];
+  const guardrails = fromPrompt?.guardrails ?? request.guardrails ?? [];
   for (const model of new Set(guardrails.map((g) => g.model ?? DEFAULT_JUDGMENT_MODEL)))
     await assertJudgmentModel(deps, ctx.tenantId, model);
   const record = await insertConversation(ctx.db, {
     externalUserId: request.externalUserId,
     model,
-    system: request.system ?? deps.settings.defaultSystem,
+    system: fromPrompt?.text ?? request.system ?? deps.settings.defaultSystem,
     guardrails,
+    prompt: fromPrompt && { name: fromPrompt.name, version: fromPrompt.version },
   });
   return conversationResource(record);
 }

@@ -2,6 +2,7 @@
 // (`POST /v1/judgments`, `GET /v1/judgments/:id`). `contracts.test.ts` fails to compile if a schema drifts from its type.
 import type { JsonValue } from "@kerby/judgment";
 import { z } from "zod";
+import { PinnedPromptSchema, PromptRefSchema } from "./prompt-ref.ts";
 
 /** The model a judgment gets when the request names none. */
 export const DEFAULT_JUDGMENT_MODEL = "typesafe/jev-latest";
@@ -135,10 +136,18 @@ export const JudgmentOutcomeSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("refused"), error: z.string() }),
 ]);
 
-const Questions = z.record(Label, QuestionSchema).refine((questions) => {
-  const count = Object.keys(questions).length;
-  return count >= 1 && count <= MAX_QUESTIONS;
-}, `a judgment asks 1 to ${MAX_QUESTIONS} questions`);
+/** Named questions, at most `MAX_QUESTIONS`. A judgment asks at least one; a decision prompt's draft may have none yet. */
+export const QuestionSetSchema = z
+  .record(Label, QuestionSchema)
+  .refine(
+    (questions) => Object.keys(questions).length <= MAX_QUESTIONS,
+    `a judgment asks 1 to ${MAX_QUESTIONS} questions`,
+  );
+
+const Questions = QuestionSetSchema.refine(
+  (questions) => Object.keys(questions).length >= 1,
+  `a judgment asks 1 to ${MAX_QUESTIONS} questions`,
+);
 
 /** The port's request, with the model optional (it defaults to `DEFAULT_JUDGMENT_MODEL`). */
 export const JudgmentRequestSchema = z.object({
@@ -146,12 +155,27 @@ export const JudgmentRequestSchema = z.object({
   state: JsonValueSchema,
   questions: Questions,
 });
-export type JudgmentRequestBody = z.infer<typeof JudgmentRequestSchema>;
+
+/**
+ * `POST /v1/judgments`: the questions and model written out, or a published decision prompt that holds them (ADR 0017).
+ * The agent's `judge` tool takes only the first form.
+ */
+export const SubmitJudgmentRequestSchema = z.union([
+  JudgmentRequestSchema.strict(),
+  z.strictObject({ state: JsonValueSchema, prompt: PromptRefSchema }),
+]);
+export type SubmitJudgmentRequest = z.infer<typeof SubmitJudgmentRequestSchema>;
 
 const SubmitJudgmentResponseSchema = z.object({ id: z.uuid() });
 export type SubmitJudgmentResponse = z.infer<typeof SubmitJudgmentResponseSchema>;
 
-const Identity = { id: z.uuid(), model: z.string(), createdAt: z.iso.datetime() };
+const Identity = {
+  id: z.uuid(),
+  model: z.string(),
+  createdAt: z.iso.datetime(),
+  /** The decision prompt version the questions came from; null when the request wrote them out. */
+  prompt: PinnedPromptSchema.nullable(),
+};
 
 /**
  * `GET /v1/judgments/:id`. `pending` and `running` have no answer yet: ask again. `answered` carries one answer per

@@ -18,6 +18,12 @@ const nav = [
     icon: "M3 4.5A1.5 1.5 0 0 1 4.5 3h11A1.5 1.5 0 0 1 17 4.5v8a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 3v-3h-1A1.5 1.5 0 0 1 3 12.5v-8Z",
   },
   {
+    href: "/dashboard/studio",
+    label: "Studio",
+    exact: false,
+    icon: "M4 3.5h8l4 4V16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Zm8 0v4h4M6.5 11h7M6.5 14h4.5",
+  },
+  {
     href: "/dashboard/api-keys",
     label: "API keys",
     exact: false,

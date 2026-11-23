@@ -4,16 +4,16 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage, ContentPart } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { AgentMessageSchema } from "@kerby/contracts";
-import type { TenantContext, TenantQueryable } from "@kerby/db";
+import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, spawnInTx } from "@kerby/durable";
 import { errorFields, log, withTenant } from "@kerby/observability";
+import { StorageQuotaExceededError, storedBytes } from "@kerby/prompts";
 import {
   ConversationBusyError,
   ConversationFullError,
   ConversationNotFoundError,
   LeaseLostError,
   SeqConflictError,
-  StorageQuotaExceededError,
 } from "./errors.ts";
 import { conversationChannel } from "./events.ts";
 import {
@@ -69,15 +69,6 @@ async function discardBlob(ctx: TenantContext, blobs: Blobs, blobId: string): Pr
       log("warn", "could not remove the blob of a refused post", errorFields(error)),
     );
   }
-}
-
-/** Bytes the tenant stores: the sum of its blob index, leaving out `exceptBlobId` (an object just written). */
-async function storedBytes(db: TenantQueryable, exceptBlobId?: string): Promise<number> {
-  const { rows } = await db.query<{ bytes: string }>(
-    "select coalesce(sum(size), 0)::text as bytes from blobs where id is distinct from $1",
-    [exceptBlobId ?? null],
-  );
-  return Number(rows[0]?.bytes ?? 0);
 }
 
 function refuseOverQuota(stored: number, adding: number, quota: number): void {

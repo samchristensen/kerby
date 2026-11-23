@@ -5,9 +5,9 @@ import {
   CreateConversationRequestSchema,
   GetConversationResponseSchema,
   ListConversationsResponseSchema,
-  parseModelId,
+  PromptNameSchema,
+  PromptVersionParamSchema,
 } from "@kerby/contracts";
-import { hasModelKey } from "@kerby/control-plane";
 import { z } from "zod";
 import type {
   ChatAccess,
@@ -19,10 +19,15 @@ import type {
   FormFailure,
   FormInput,
 } from "../types/index.ts";
+import {
+  apiError,
+  apiFault,
+  CONSOLE_USER_PREFIX,
+  missingModelKey,
+  STUDIO_USER_PREFIX,
+  variableValues,
+} from "./api.ts";
 import { parseForm, refuse } from "./forms.ts";
-
-/** A conversation the console starts carries this end-user name, so the list can tell it from the tenant's own code's. */
-const CONSOLE_USER_PREFIX = "console:";
 
 const CHATS_PER_PAGE = 40;
 /** The api's page limit for messages: a conversation is read in as few requests as it allows. */
@@ -30,10 +35,12 @@ const MESSAGES_PER_PAGE = 500;
 /** Past every message a conversation can hold: a read after it returns no messages, only whether a turn is running. */
 const PAST_THE_LAST_MESSAGE = 2_147_483_647;
 
-const ErrorBodySchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
-
 const originOf = (externalUserId: string | null): ChatOrigin =>
-  externalUserId?.startsWith(CONSOLE_USER_PREFIX) ? "console" : "api";
+  externalUserId?.startsWith(CONSOLE_USER_PREFIX)
+    ? "console"
+    : externalUserId?.startsWith(STUDIO_USER_PREFIX)
+      ? "studio"
+      : "api";
 
 const MessageField = z
   .string()
@@ -44,6 +51,9 @@ const CreateChatForm = z.object({
   message: MessageField,
   model: z.string().trim().max(200, "at most 200 characters").default(""),
   system: z.string().max(100_000, "at most 100 000 characters").default(""),
+  /** "Start from" a chat prompt: its name and a version number or label; blank for none. */
+  promptName: z.string().trim().default(""),
+  promptVersion: z.string().trim().default(""),
 });
 
 const SendForm = z.object({ message: MessageField });
@@ -56,8 +66,7 @@ const trimmedMessage = (form: FormInput): FormInput => ({
 
 /** What the person is told when the api refuses a post. A fault on our side (5xx, a bad credential) is thrown instead. */
 async function refusal(response: Response): Promise<FormFailure> {
-  const body = ErrorBodySchema.safeParse(await response.json().catch(() => null));
-  const code = body.data?.error.code;
+  const { code, message } = await apiError(response);
   switch (code) {
     case "conversation_busy":
       return refuse("A reply is still being written. Wait for it to finish.");
@@ -69,17 +78,39 @@ async function refusal(response: Response): Promise<FormFailure> {
       return refuse("Too many requests. Try again in a moment.");
     case "storage_quota_exceeded":
     case "invalid_model":
-      return refuse(body.data?.error.message ?? "The request was refused.");
+      return refuse(message ?? "The request was refused.");
   }
-  throw new Error(
-    `the api refused a chat request: ${response.status} ${code ?? "(no error code)"}`,
-  );
+  throw apiFault("chat", response.status, code);
+}
+
+/** Why the api refused to start a conversation from a chat prompt. */
+async function promptRefusal(response: Response): Promise<FormFailure> {
+  const { code, message } = await apiError(response);
+  switch (code) {
+    case "not_found":
+      return {
+        ok: false,
+        fields: { promptVersion: "This prompt or version no longer exists. Choose another." },
+      };
+    case "wrong_kind":
+      return {
+        ok: false,
+        fields: { promptName: "This is a decision model: choose a chat prompt." },
+      };
+    case "invalid_variables":
+    case "invalid_model":
+    case "storage_quota_exceeded":
+      return refuse(message ?? "The request was refused.");
+    case "rate_limited":
+      return refuse("Too many requests. Try again in a moment.");
+  }
+  throw apiFault("chat", response.status, code);
 }
 
 type ConversationPage = z.output<typeof GetConversationResponseSchema>;
 
 export function createChats(deps: ConsoleDeps) {
-  const { api, control, settings } = deps;
+  const { api } = deps;
 
   /** The api's answer, or undefined for "not found"; anything else that is not success (an expired credential, an outage) throws. */
   async function read(access: ChatAccess, path: string): Promise<Response | undefined> {
@@ -144,6 +175,7 @@ export function createChats(deps: ConsoleDeps) {
         origin: originOf(conversation.externalUserId),
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
+        prompt: conversation.prompt,
         messages,
         busy: page.busy,
         lastError: page.lastError,
@@ -167,30 +199,41 @@ export function createChats(deps: ConsoleDeps) {
     ): Promise<{ ok: true; id: string } | FormFailure> {
       const parsed = parseForm(CreateChatForm, trimmedMessage(form));
       if (!parsed.ok) return parsed;
-      const { message, model, system } = parsed.data;
-      // A provider with no key would fail at the first turn: say so in the form's words, not the API's.
-      const provider = model ? parseModelId(model)?.provider : undefined;
-      if (
-        provider &&
-        settings.modelProviders.includes(provider) &&
-        !(await hasModelKey(control, access.session.tenantId, provider))
-      ) {
-        return {
-          ok: false,
-          fields: { model: `No ${provider} key yet: add one under Model providers.` },
+      const { message, model, system, promptName, promptVersion } = parsed.data;
+      let request: z.input<typeof CreateConversationRequestSchema>;
+      if (promptName) {
+        // The prompt sets the system prompt, model and guardrails: the free fields are ignored.
+        const name = PromptNameSchema.safeParse(promptName);
+        if (!name.success) return { ok: false, fields: { promptName: "Choose a chat prompt." } };
+        const version = PromptVersionParamSchema.safeParse(promptVersion);
+        if (!version.success) return { ok: false, fields: { promptVersion: "Choose a version." } };
+        const variables = variableValues(form);
+        request = {
+          externalUserId: `${CONSOLE_USER_PREFIX}${access.session.userId}`,
+          prompt: {
+            name: name.data,
+            version: version.data,
+            ...(Object.keys(variables).length > 0 ? { variables } : {}),
+          },
+        };
+      } else {
+        // A provider with no key would fail at the first turn: say so in the form's words, not the API's.
+        const noKey = await missingModelKey(deps, access.session.tenantId, model);
+        if (noKey) return { ok: false, fields: { model: noKey } };
+        request = {
+          externalUserId: `${CONSOLE_USER_PREFIX}${access.session.userId}`,
+          ...(model ? { model } : {}),
+          ...(system.trim() ? { system } : {}),
         };
       }
       const created = await api({
         method: "POST",
         path: "/v1/conversations",
         token: access.token,
-        body: CreateConversationRequestSchema.parse({
-          externalUserId: `${CONSOLE_USER_PREFIX}${access.session.userId}`,
-          ...(model ? { model } : {}),
-          ...(system.trim() ? { system } : {}),
-        }),
+        body: CreateConversationRequestSchema.parse(request),
       });
       if (created.status !== 201) {
+        if (promptName) return promptRefusal(created);
         const failure = await refusal(created);
         // The only 400 the api returns for these fields is a model it cannot use.
         return created.status === 400

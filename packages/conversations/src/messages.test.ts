@@ -2,6 +2,7 @@ import type { AgentMessage } from "@kerby/agent";
 import { type Blobs, tenantPrefix } from "@kerby/blobs";
 import { createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import { createTenantExecutor, type RunContext } from "@kerby/durable";
+import { createPrompt, StorageQuotaExceededError } from "@kerby/prompts";
 import { describe, expect, it } from "vitest";
 import {
   blockMessage,
@@ -21,7 +22,6 @@ import {
   readHistory,
   readMessages,
   SeqConflictError,
-  StorageQuotaExceededError,
 } from "./index.ts";
 import { completeTurnWith, createTestTenant, type TestTenant } from "./testing.ts";
 
@@ -129,6 +129,33 @@ describe("postUserMessage", () => {
     expect((await tenant.db.query("select 1 from absurd.t_turns")).rowCount).toBe(1);
     await postUserMessage(tenant, blobs, other.id, [...text("hello")], { storageBytes: 2 * size });
     expect(await objects()).toBe(2);
+  });
+
+  it("counts the tenant's prompt bodies against the same quota", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const conversation = await insertConversation(tenant.db, { model: "m", system: "" });
+    const size = new TextEncoder().encode(
+      JSON.stringify({ role: "user", content: [...text("hello")] }),
+    ).byteLength;
+    await createPrompt(
+      tenant.db,
+      { name: "support/triage", kind: "chat", actor: "key:k" },
+      { storageBytes: 1024 },
+    );
+    const { rows } = await tenant.db.query<{ bytes: number }>(
+      "select draft_bytes::int as bytes from prompts",
+    );
+    const promptBytes = rows[0]?.bytes ?? 0;
+    expect(promptBytes).toBeGreaterThan(0);
+    await expect(
+      postUserMessage(tenant, blobs, conversation.id, [...text("hello")], {
+        storageBytes: promptBytes + size - 1,
+      }),
+    ).rejects.toBeInstanceOf(StorageQuotaExceededError);
+    await postUserMessage(tenant, blobs, conversation.id, [...text("hello")], {
+      storageBytes: promptBytes + size,
+    });
   });
 
   it("leaves neither row nor object when the quota re-check refuses a post that raced another", async () => {

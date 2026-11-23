@@ -1,8 +1,16 @@
 import type {
   ConversationSummary,
   GetConversationResponse,
+  Judgment,
   Limits,
+  PinnedPrompt,
   PostMessageResponse,
+  Prompt,
+  PromptKind,
+  PromptSummary,
+  PromptVariable,
+  PromptVersion,
+  PromptVersionSummary,
 } from "@kerby/contracts";
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
@@ -23,7 +31,7 @@ export type SignupClient = (request: {
  * can only ever reach the tenant the person belongs to. Resolves with the api's response, whatever its status.
  */
 export type ApiClient = (request: {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   token: string;
   body?: unknown;
@@ -111,8 +119,11 @@ export type Overview = {
   apiUrl: string;
 };
 
-/** Where a conversation began: a person in this console, or the tenant's own code calling the API. */
-export type ChatOrigin = "console" | "api";
+/**
+ * Where a conversation began: a person in this console's chat, the Studio's playground, or the tenant's own code calling
+ * the API.
+ */
+export type ChatOrigin = "console" | "studio" | "api";
 
 export type ChatSummaryView = Pick<
   ConversationSummary,
@@ -132,6 +143,8 @@ export type ChatView = ChatStatus & {
   origin: ChatOrigin;
   createdAt: string;
   updatedAt: string;
+  /** The chat prompt version it was started from; null when it was given its own system prompt. */
+  prompt: PinnedPrompt | null;
   /** Every message, oldest first. */
   messages: GetConversationResponse["messages"];
 };
@@ -178,7 +191,10 @@ export type ConsoleService = {
   chat(access: ChatAccess, id: string): Promise<ChatView | undefined>;
   /** Whether a turn is still running and why the last one failed; undefined when there is no such conversation. */
   chatStatus(access: ChatAccess, id: string): Promise<ChatStatus | undefined>;
-  /** Start a conversation with its first message; `model` and `system` are optional (the api's defaults). */
+  /**
+   * Start a conversation with its first message: from `model` and `system` (both optional: the api's defaults), or
+   * from a published chat prompt (`promptName`, `promptVersion` a number or label, `var.<name>` for its variables).
+   */
   createChat(access: ChatAccess, form: FormInput): Promise<{ ok: true; id: string } | FormFailure>;
   /** Post a message to a conversation; its answer arrives on `chatEvents`. */
   sendMessage(
@@ -196,4 +212,82 @@ export type ConsoleService = {
     after: string | null,
     signal: AbortSignal,
   ): Promise<Response>;
+
+  // The Studio (ADR 0017): prompts and decision models, through the api with the person's session token.
+  /** Every prompt of the tenant, by name; of one kind when `kind` is given. */
+  prompts(access: ChatAccess, kind?: PromptKind): Promise<PromptSummary[]>;
+  /** The prompt with its draft and versions, or undefined when there is none by that name. */
+  prompt(access: ChatAccess, name: string): Promise<Prompt | undefined>;
+  /** One published version by number or label (`3`, `production`, `latest`); undefined when there is none. */
+  promptVersion(
+    access: ChatAccess,
+    name: string,
+    version: string,
+  ): Promise<PromptVersion | undefined>;
+  /** The `{{variables}}` a chat prompt's text refers to, in order of first appearance. */
+  templateVariables(text: string): string[];
+  /** A new prompt with an empty draft: form fields `name`, `kind`. */
+  createPrompt(
+    access: ChatAccess,
+    form: FormInput,
+  ): Promise<{ ok: true; name: string } | FormFailure>;
+  /** Rename a prompt that has never been published: form field `name`. */
+  renamePrompt(
+    access: ChatAccess,
+    name: string,
+    form: FormInput,
+  ): Promise<{ ok: true; name: string } | FormFailure>;
+  /** Delete a prompt that has never been published. */
+  deletePrompt(access: ChatAccess, name: string): Promise<{ ok: true } | FormFailure>;
+  /** Replace the draft, if it is still at `revision`. */
+  saveDraft(
+    access: ChatAccess,
+    name: string,
+    revision: number,
+    draft: unknown,
+  ): Promise<{ ok: true; prompt: Prompt } | StudioFailure>;
+  /** Publish the draft at `revision` as the next version: form field `note` (optional). */
+  publishPrompt(
+    access: ChatAccess,
+    name: string,
+    revision: number,
+    form: FormInput,
+  ): Promise<{ ok: true; version: PromptVersionSummary } | StudioFailure>;
+  /** Point a label at a version: form fields `label`, `version`. */
+  setPromptLabel(
+    access: ChatAccess,
+    name: string,
+    form: FormInput,
+  ): Promise<{ ok: true } | FormFailure>;
+  removePromptLabel(
+    access: ChatAccess,
+    name: string,
+    label: string,
+  ): Promise<{ ok: true } | FormFailure>;
+  /** The variables of a chat prompt's draft (`source` `draft`) or of a version (a number or a label). */
+  promptVariables(
+    access: ChatAccess,
+    name: string,
+    source: string,
+  ): Promise<{ ok: true; variables: PromptVariable[] } | FormFailure>;
+  /**
+   * The chat playground: a real conversation as `studio:<userId>`, from the draft (rendered here) or a version (by
+   * reference). Form fields `source` (`draft`, a number or a label) and `var.<name>` for each variable.
+   */
+  startPlaygroundChat(
+    access: ChatAccess,
+    name: string,
+    form: FormInput,
+  ): Promise<{ ok: true; id: string } | FormFailure>;
+  /** The decision playground: a judgment of `state` (JSON text) by the draft or a version. Form fields `source`, `state`. */
+  runDecision(
+    access: ChatAccess,
+    name: string,
+    form: FormInput,
+  ): Promise<{ ok: true; id: string } | FormFailure>;
+  /** A judgment as the api reports it; undefined when there is none by that id. */
+  judgment(access: ChatAccess, id: string): Promise<Judgment | undefined>;
 };
+
+/** A refused Studio save or publish; `conflict` when the draft changed elsewhere since the editor loaded it. */
+export type StudioFailure = FormFailure & { conflict?: true };

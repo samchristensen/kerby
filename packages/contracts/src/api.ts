@@ -2,18 +2,33 @@
 import { z } from "zod";
 import { AgentEventSchema, AgentMessageSchema, ContentPartSchema } from "./agent.ts";
 import { GuardrailsSchema } from "./judgment.ts";
+import { ChatPromptRefSchema, MAX_PROMPT_TEXT, PinnedPromptSchema } from "./prompt-ref.ts";
 
 const Id = z.string().min(1).max(128);
 
-export const CreateConversationRequestSchema = z.object({
-  /** The tenant's own name for the end user. Kerby does not authenticate end users. */
-  externalUserId: Id.optional(),
-  /** A Kerby model id, `<provider>/<modelId>`; the tenant must hold a key for the provider. Defaults to the deployment default. */
-  model: z.string().min(1).max(200).optional(),
-  system: z.string().max(100_000).optional(),
-  /** Guardrails for this conversation; the tenant must hold a key for the default judgment provider. */
-  guardrails: GuardrailsSchema.optional(),
-});
+export const CreateConversationRequestSchema = z
+  .object({
+    /** The tenant's own name for the end user. Kerby does not authenticate end users. */
+    externalUserId: Id.optional(),
+    /** A Kerby model id, `<provider>/<modelId>`; the tenant must hold a key for the provider. Defaults to the deployment default. */
+    model: z.string().min(1).max(200).optional(),
+    system: z.string().max(MAX_PROMPT_TEXT).optional(),
+    /** Guardrails for this conversation; the tenant must hold a key for the default judgment provider. */
+    guardrails: GuardrailsSchema.optional(),
+    /**
+     * A published chat prompt (ADR 0017): it sets the system prompt (its text, variables filled in), the model and the
+     * guardrails, so none of those three may be given with it.
+     */
+    prompt: ChatPromptRefSchema.optional(),
+  })
+  .refine(
+    (request) =>
+      request.prompt === undefined ||
+      (request.system === undefined &&
+        request.model === undefined &&
+        request.guardrails === undefined),
+    { message: "a prompt sets system, model and guardrails: leave them out", path: ["prompt"] },
+  );
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
 
 const ConversationSchema = z.object({
@@ -28,6 +43,8 @@ const ConversationSchema = z.object({
   updatedAt: z.iso.datetime(),
   /** Conditions checked before the assistant acts on a user message or runs a tool (ADR 0016). Empty for none. */
   guardrails: GuardrailsSchema.default([]),
+  /** The chat prompt version it was started from (ADR 0017); null when the request wrote its own system prompt. */
+  prompt: PinnedPromptSchema.nullable().default(null),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
 
