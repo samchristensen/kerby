@@ -40,6 +40,8 @@ async function refusal(response: Response): Promise<FormFailure> {
     case "tool_server_limit":
     case "builtin_tool_server":
     case "tool_not_usable":
+    // The tool's definition changed since the page was rendered: reload and review it.
+    case "definition_changed":
     case "unknown_tool":
     case "invalid_request":
     // Connecting with OAuth: each says what happened and what to do (connect again, set CONSOLE_PUBLIC_URL, ...).
