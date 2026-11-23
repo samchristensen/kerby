@@ -10,6 +10,8 @@ import type {
 } from "@kerby/contracts";
 import {
   createApiKey,
+  createConsoleSession,
+  insertConsoleUser,
   insertTenant,
   readModelKey,
   revokeApiKey,
@@ -105,7 +107,17 @@ async function harness(
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  return { control, blobs, deps, base, tenant, call, keys };
+
+  /** A person of the tenant, signed in on the console: the session token the console would forward. `ttlMs` < 0 is expired. */
+  async function signIn(tenantId: string, ttlMs = 60_000): Promise<string> {
+    const { id } = await insertConsoleUser(control.db, {
+      tenantId,
+      email: `${crypto.randomUUID()}@example.com`,
+      passwordHash: "scrypt$17$8$1$c2FsdA==$aGFzaA==",
+    });
+    return createConsoleSession(control.db, { id, tenantId }, new Date(Date.now() + ttlMs));
+  }
+  return { control, blobs, deps, base, tenant, call, keys, signIn };
 }
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
@@ -157,7 +169,7 @@ describe("authentication", () => {
     const auth = createAuthenticator(h.control.db, 30_000, () => clock);
     await expect(auth.authenticate(t.secret)).resolves.toEqual({
       tenantId: t.id,
-      keyId: t.key.id,
+      actor: `key:${t.key.id}`,
       limits: {},
     });
 
@@ -166,6 +178,39 @@ describe("authentication", () => {
     await expect(auth.authenticate(t.secret)).resolves.toBeDefined(); // still inside the TTL
     clock += 2;
     await expect(auth.authenticate(t.secret)).rejects.toThrow(/suspended/);
+  });
+
+  it("accepts a console session as the signed-in person's tenant, and ends with the session or the tenant", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const other = await h.tenant("other");
+    const token = await h.signIn(t.id);
+    const created = await h.call(token, "POST", "/v1/conversations", {});
+    expect(created.status).toBe(201);
+    // the tenant is the session's: the conversation is in acme's database, not the other's
+    expect((await t.database.db.query("select 1 from conversations")).rowCount).toBe(1);
+    expect((await other.database.db.query("select 1 from conversations")).rowCount).toBe(0);
+
+    const auth = createAuthenticator(h.control.db, 0);
+    await expect(auth.authenticate(token)).resolves.toMatchObject({
+      tenantId: t.id,
+      actor: expect.stringMatching(/^user:[0-9a-f-]{36}$/),
+    });
+    expect(
+      (
+        await h.call(
+          `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`,
+          "GET",
+          "/v1/conversations",
+        )
+      ).status,
+    ).toBe(401);
+    expect((await h.call(await h.signIn(t.id, -1_000), "GET", "/v1/conversations")).status).toBe(
+      401,
+    );
+
+    await setTenantStatus(h.control.db, t.id, "suspended");
+    expect((await h.call(token, "GET", "/v1/conversations")).status).toBe(403);
   });
 });
 
@@ -179,6 +224,7 @@ describe("conversations", () => {
       system: "Be helpful.",
       externalUserId: "user-1",
     });
+    expect(conversation.title).toBeNull();
     const other = await newConversation(h, t.secret, { model: "faux/other", system: "Terse." });
     expect(other).toMatchObject({ model: "faux/other", system: "Terse." });
     const bad = await h.call(t.secret, "POST", "/v1/conversations", { model: "gpt-9000" });
@@ -255,6 +301,100 @@ describe("conversations", () => {
         })
       ).status,
     ).toBe(413);
+  });
+});
+
+describe("browsing conversations", () => {
+  type Listed = {
+    conversations: {
+      id: string;
+      externalUserId: string | null;
+      title: string | null;
+      messageCount: number;
+      updatedAt: string;
+    }[];
+    nextCursor: string | null;
+  };
+  const list = async (h: Harness, credential: string, query = ""): Promise<Listed> => {
+    const response = await h.call(credential, "GET", `/v1/conversations${query}`);
+    expect(response.status).toBe(200);
+    return (await response.json()) as Listed;
+  };
+  const post = async (h: Harness, credential: string, id: string, content: string) =>
+    expect(
+      (await h.call(credential, "POST", `/v1/conversations/${id}/messages`, { content })).status,
+    ).toBe(202);
+
+  it("lists every conversation however it began, most recently active first, titled by its first message", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const person = await h.signIn(t.id);
+    const fromApi = await newConversation(h, t.secret, { externalUserId: "u1" });
+    await post(h, t.secret, fromApi.id, "  hello\n\n   world  ");
+    const fromConsole = await newConversation(h, person, { externalUserId: "console:someone" });
+    await post(h, person, fromConsole.id, "x".repeat(200));
+    const empty = await newConversation(h, t.secret);
+    // the API-made conversation is answered last, so it is the most recently active
+    await completeTurnWith(t.ctx, h.blobs, fromApi.id, [assistant("hi")]);
+
+    for (const credential of [t.secret, person]) {
+      const { conversations, nextCursor } = await list(h, credential);
+      expect(nextCursor).toBeNull();
+      expect(conversations.map((c) => c.id)).toEqual([fromApi.id, empty.id, fromConsole.id]);
+      const byId = new Map(conversations.map((c) => [c.id, c]));
+      expect(byId.get(fromApi.id)).toMatchObject({
+        title: "hello world",
+        messageCount: 2,
+        externalUserId: "u1",
+      });
+      expect(byId.get(fromConsole.id)).toMatchObject({
+        title: `${"x".repeat(80)}…`,
+        messageCount: 1,
+      });
+      expect(byId.get(empty.id)).toMatchObject({ title: null, messageCount: 0 });
+      expect(conversations.every((c) => !("system" in c))).toBe(true);
+    }
+    expect((await list(h, t.secret, "?externalUserId=u1")).conversations.map((c) => c.id)).toEqual([
+      fromApi.id,
+    ]);
+  });
+
+  it("pages by cursor without repeating or skipping, and refuses a cursor it did not make", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const made: string[] = [];
+    for (let i = 0; i < 5; i++) made.push((await newConversation(h, t.secret)).id);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: Listed = await list(
+        h,
+        t.secret,
+        `?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      expect(page.conversations.length).toBeLessThanOrEqual(2);
+      seen.push(...page.conversations.map((c) => c.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+    // newest first: creation order reversed
+    expect(seen).toEqual(made.toReversed());
+
+    for (const query of ["?cursor=nonsense", "?limit=0", "?limit=101"]) {
+      expect((await h.call(t.secret, "GET", `/v1/conversations${query}`)).status, query).toBe(400);
+    }
+  });
+
+  it("shows a tenant only its own conversations", async () => {
+    const h = await harness();
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    const mine = await newConversation(h, a.secret);
+    await newConversation(h, b.secret);
+    expect((await list(h, a.secret)).conversations.map((c) => c.id)).toEqual([mine.id]);
+    expect((await list(h, await h.signIn(b.id))).conversations).toHaveLength(1);
+    expect((await h.call(await h.signIn(b.id), "GET", `/v1/conversations/${mine.id}`)).status).toBe(
+      404,
+    );
   });
 });
 

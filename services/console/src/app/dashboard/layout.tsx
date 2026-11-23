@@ -12,6 +12,12 @@ const nav = [
     icon: "M3 10.5 10 4l7 6.5V17a1 1 0 0 1-1 1h-4v-5H8v5H4a1 1 0 0 1-1-1v-6.5Z",
   },
   {
+    href: "/dashboard/chats",
+    label: "Chats",
+    exact: false,
+    icon: "M3 4.5A1.5 1.5 0 0 1 4.5 3h11A1.5 1.5 0 0 1 17 4.5v8a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 3v-3h-1A1.5 1.5 0 0 1 3 12.5v-8Z",
+  },
+  {
     href: "/dashboard/api-keys",
     label: "API keys",
     exact: false,

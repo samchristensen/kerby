@@ -1,4 +1,9 @@
-import type { Limits } from "@kerby/contracts";
+import type {
+  ConversationSummary,
+  GetConversationResponse,
+  Limits,
+  PostMessageResponse,
+} from "@kerby/contracts";
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
 
@@ -12,6 +17,22 @@ export type SignupClient = (request: {
   | { ok: false; code: "name_taken" | "email_taken" }
 >;
 
+/**
+ * The tenant API on the private network: the console's second call to another service. `token` is the signed-in
+ * person's session token, sent as the bearer credential; the api verifies it and takes the tenant from it, so a chat
+ * can only ever reach the tenant the person belongs to. Resolves with the api's response, whatever its status.
+ */
+export type ApiClient = (request: {
+  method: "GET" | "POST";
+  path: string;
+  token: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+  /** A long-lived event stream: no timeout, only `signal` ends it. */
+  stream?: true;
+  signal?: AbortSignal;
+}) => Promise<Response>;
+
 /** Everything the service layer needs, built once in `src/index.ts`. */
 export type ConsoleDeps = {
   /** As the `kerby_console` role: tenants, keys, model keys, people and sessions; never a key hash. */
@@ -19,6 +40,7 @@ export type ConsoleDeps = {
   /** Seals model keys to the platform public key; it cannot open them (ADR 0008). */
   sealer: Sealer;
   signups: SignupClient;
+  api: ApiClient;
   settings: {
     /** Providers a tenant may store a key for: the harness adapter's list, injected by the composition root. */
     modelProviders: readonly string[];
@@ -83,6 +105,37 @@ export type Overview = {
   apiUrl: string;
 };
 
+/** Where a conversation began: a person in this console, or the tenant's own code calling the API. */
+export type ChatOrigin = "console" | "api";
+
+export type ChatSummaryView = Pick<
+  ConversationSummary,
+  "id" | "title" | "model" | "messageCount" | "updatedAt" | "externalUserId"
+> & { origin: ChatOrigin };
+
+export type ChatListView = { chats: ChatSummaryView[]; nextCursor: string | null };
+
+export type ChatStatus = { busy: boolean; lastError: string | null };
+
+export type ChatView = ChatStatus & {
+  id: string;
+  title: string | null;
+  model: string;
+  system: string;
+  externalUserId: string | null;
+  origin: ChatOrigin;
+  createdAt: string;
+  updatedAt: string;
+  /** Every message, oldest first. */
+  messages: GetConversationResponse["messages"];
+};
+
+/**
+ * The signed-in person and their session token, for the calls that go through the api. Server-side only, like the
+ * cookie the token comes from: never a prop of a client component.
+ */
+export type ChatAccess = { session: Session; token: string };
+
 /**
  * The console's operations, bound to their dependencies in `src/index.ts`. Next.js bundles `src/app`, so pages and
  * actions reach this through `consoleService()` (src/app/_lib/console.ts) and import its types only (ADR 0014). Every
@@ -113,4 +166,28 @@ export type ConsoleService = {
   ): Promise<{ ok: true } | FormFailure>;
   /** False when the tenant had no key for it. */
   removeModelKey(session: Session, provider: string): Promise<boolean>;
+  /** A page of the tenant's conversations, most recently active first: this console's and those made through the API. */
+  chats(access: ChatAccess, cursor?: string): Promise<ChatListView>;
+  /** The whole conversation, or undefined when the tenant has none by that id. */
+  chat(access: ChatAccess, id: string): Promise<ChatView | undefined>;
+  /** Whether a turn is still running and why the last one failed; undefined when there is no such conversation. */
+  chatStatus(access: ChatAccess, id: string): Promise<ChatStatus | undefined>;
+  /** Start a conversation with its first message; `model` and `system` are optional (the api's defaults). */
+  createChat(access: ChatAccess, form: FormInput): Promise<{ ok: true; id: string } | FormFailure>;
+  /** Post a message to a conversation; its answer arrives on `chatEvents`. */
+  sendMessage(
+    access: ChatAccess,
+    id: string,
+    form: FormInput,
+  ): Promise<{ ok: true; seq: PostMessageResponse["seq"] } | FormFailure>;
+  /**
+   * The api's server-sent event stream for a conversation, as the api answers it (any status): messages after `after`,
+   * then live events. Ends when `signal` aborts.
+   */
+  chatEvents(
+    access: ChatAccess,
+    id: string,
+    after: string | null,
+    signal: AbortSignal,
+  ): Promise<Response>;
 };

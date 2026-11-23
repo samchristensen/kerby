@@ -60,6 +60,33 @@ routes in `src/app`, and its checker needs TypeScript's JavaScript API, which Ty
   admin URL (an internet-facing process able to delete any tenant); provisioning from a queue control polls (more
   moving parts for the same result).
 
+## Amendment: chat and browsing in the console (2026-11-22)
+
+A signed-in person can talk to the agent in the browser and open every conversation of the tenant, however it began (API
+call or console). The data is the tenant's, behind the api; the console never opens a tenant database.
+
+- **The api accepts a console session as a credential.** A bearer token that is not a `kb_` key is looked up as a session
+  (`authenticateConsoleSession`, migration `0006_app_reads_sessions.sql`: `kerby_app` may read `console_sessions`, never
+  `console_users`). The tenant is the session's, the audit actor is `user:<id>`, and the 3 s to 30 s auth cache, the
+  per-tenant request limit, the storage quota, the busy check and the stream caps apply unchanged. Sign-out, a lapsed
+  session and a suspended tenant end it within the cache window, as for a revoked key.
+- **The console forwards the person's session token to the api over the private network** (`API_URL`; the api listens on
+  `::` hosted), from server components, server actions and one route handler that relays the event stream
+  (`/dashboard/chats/<id>/events`). The browser holds only the HttpOnly cookie; the token is never a prop, a response body
+  or a log field. `ChatAccess` (session plus token) is the one type that carries it, server-side only.
+- **Browsing is a new api route**, `GET /v1/conversations?limit&cursor&externalUserId`: most recently active first (a
+  conversation's `updated_at` moves with each message, migration `conversations/0003_browsing.sql`), keyset-paged, each with
+  a `title` (the opening of its first user message, set once) and `messageCount`. It is part of the public API, so a
+  tenant's own code can list its conversations too. A conversation the console starts carries the end-user name
+  `console:<userId>`; anything else is shown as API.
+- Rejected: giving the console a tenant-database pool and the blob store (a second copy of posting, quota and streaming
+  logic, and the console would need `TENANT_DB_KEYS`); the console naming a tenant to the api with a shared token (the api
+  would trust a caller's claim, where a session is something it verifies); the browser calling the api directly (CORS
+  and a credential in page script).
+- Consequences: a compromised console can already mint a key for any tenant, so forwarding sessions widens nothing it
+  could not do; a compromised api can read session hashes, which no one can invert. Messages render as plain text (no
+  markdown: a renderer is a dependency and an ADR line). There is no way to delete or rename a conversation.
+
 ## Consequences
 
 - Sign-up is open to anyone who reaches the console. The per-address limit bounds one address, not a botnet: there is no

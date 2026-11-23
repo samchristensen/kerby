@@ -239,6 +239,9 @@ No work until the trigger; the debt line stays and names it.
 - **Console accounts** ("The console (ADR 0014) has open sign-up"). Trigger: the console is advertised, a second console
   process, or the first sign-up abuse. Fix then: an email provider (a dependency and an ADR line) for verification and
   password reset, a CAPTCHA or an edge on sign-up, and the sign-up and sign-in counters shared like the api's.
+- **Chat gaps** ("The console's chat renders plain text"). Trigger: the first tenant asks. Fix then: a markdown renderer (a
+  dependency and an ADR line), `DELETE /v1/conversations/:id` and rename, a title backfill for conversations older than
+  `conversations/0003_browsing.sql`, and the first post of a new chat made atomic with its conversation.
 - **Alert debounce** ("Alert debounce is per process"). Trigger: a second worker replica. Fix then: share the window in a
   control-database row.
 - **CI token scope** ("CI's `RAILWAY_TOKEN`"). Trigger: a second person with write access. Fix then: both secrets behind a

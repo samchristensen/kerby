@@ -8,16 +8,16 @@ deployed and smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 One Railway project, `kerby`. Per environment (`production` is the standing one):
 
-| Service                | What                                                                                                                             | Reachable from                                                                     |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                             | the other services, privately                                                      |
-| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                     | the other services, by endpoint and keys                                           |
-| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                        | `control` only, by its keys; presigned URLs                                        |
-| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                     | `control` only, by its keys                                                        |
-| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                                | `railway ssh --service control`; the console, privately, on its sign-up route only |
-| `api`                  | tenant API (`:8080`), public Railway domain                                                                                      | the internet                                                                       |
-| `worker`               | runs turns, health on `:8082`, no public domain                                                                                  | nothing                                                                            |
-| `console`              | tenant console (`:3000`): sign-up, sign-in, API keys, model keys ([ADR 0014](adr/0014-tenant-console.md)); public Railway domain | the internet                                                                       |
+| Service                | What                                                                                                                           | Reachable from                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                           | the other services, privately                                                      |
+| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                   | the other services, by endpoint and keys                                           |
+| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                      | `control` only, by its keys; presigned URLs                                        |
+| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                   | `control` only, by its keys                                                        |
+| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                              | `railway ssh --service control`; the console, privately, on its sign-up route only |
+| `api`                  | tenant API (`:8080`), public Railway domain; listens on `::` for the private network                                           | the internet; the console, privately, with a person's session token                |
+| `worker`               | runs turns, health on `:8082`, no public domain                                                                                | nothing                                                                            |
+| `console`              | tenant console (`:3000`): sign-up, sign-in, API keys, model keys, chat ([ADR 0014](adr/0014-tenant-console.md)); public domain | the internet                                                                       |
 
 `control`, `api`, `worker` and `console` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
 (`ghcr.io/samchristensen/kerby-<name>`); Railway builds nothing. Each environment runs the tag named after it

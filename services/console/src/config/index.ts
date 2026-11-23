@@ -12,6 +12,8 @@ const consoleConfigSchema = z.object({
   consoleToken: z.string().min(16),
   /** Public key model keys are sealed to (base64): the api's `SECRETS_PUBLIC_KEY`. The console cannot open them. */
   secretsPublicKey: z.string().min(1),
+  /** The tenant API's address on the private network, where the browser's chat goes: `http://api:8080` locally. */
+  apiUrl: z.url({ protocol: /^https?$/ }),
   /** The tenant API's public address, shown in the quickstart. */
   apiPublicUrl: z.url({ protocol: /^https?$/ }),
   /** Mark the session cookie `Secure`. Off only where the console is served over plain HTTP (the local stack). */

@@ -35,8 +35,8 @@ export type ApiDeps = {
   };
 };
 
-/** Who is calling: established from a verified API key, never from a request body. */
-export type Principal = { tenantId: string; keyId: string; limits: Limits };
+/** Who is calling: established from a verified API key or console session, never from a request body. `actor` is `key:<id>` or `user:<id>`. */
+export type Principal = { tenantId: string; actor: string; limits: Limits };
 
 /** No valid key. */
 export class UnauthorizedError extends Error {

@@ -8,6 +8,7 @@ export const controlMigrationsDir = join(import.meta.dirname, "..", "migrations"
 
 export { audit } from "./audit.ts";
 export {
+  authenticateConsoleSession,
   createConsoleSession,
   deleteConsoleSession,
   EmailTakenError,

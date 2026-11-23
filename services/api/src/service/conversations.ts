@@ -5,6 +5,8 @@ import type {
   EventEnvelope,
   GetConversationQuery,
   GetConversationResponse,
+  ListConversationsQuery,
+  ListConversationsResponse,
   PostMessageRequest,
   PostMessageResponse,
 } from "@kerby/contracts";
@@ -16,6 +18,7 @@ import {
   findConversation,
   insertConversation,
   isBusy,
+  listConversations,
   parseNotice,
   postUserMessage,
   readMessages,
@@ -34,14 +37,38 @@ function conversationResource(record: {
   externalUserId: string | null;
   model: string;
   system: string;
+  title: string | null;
   createdAt: Date;
+  updatedAt: Date;
 }): Conversation {
   return {
     id: record.id,
     externalUserId: record.externalUserId,
     model: record.model,
     system: record.system,
+    title: record.title,
     createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  };
+}
+
+/** The tenant's conversations, however they began, most recently active first. */
+export async function listTenantConversations(
+  ctx: TenantContext,
+  query: ListConversationsQuery,
+): Promise<ListConversationsResponse> {
+  const page = await listConversations(ctx.db, query);
+  return {
+    conversations: page.conversations.map((record) => ({
+      id: record.id,
+      externalUserId: record.externalUserId,
+      model: record.model,
+      title: record.title,
+      createdAt: record.createdAt.toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
+      messageCount: record.messageCount,
+    })),
+    nextCursor: page.nextCursor,
   };
 }
 

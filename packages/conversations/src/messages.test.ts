@@ -8,9 +8,11 @@ import {
   ConversationFullError,
   ConversationNotFoundError,
   conversationChannel,
+  InvalidCursorError,
   insertConversation,
   isBusy,
   LeaseLostError,
+  listConversations,
   MAX_CONVERSATION_BYTES,
   parseNotice,
   persistMessage,
@@ -20,7 +22,7 @@ import {
   SeqConflictError,
   StorageQuotaExceededError,
 } from "./index.ts";
-import { createTestTenant, type TestTenant } from "./testing.ts";
+import { completeTurnWith, createTestTenant, type TestTenant } from "./testing.ts";
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
 const assistant = (value: string): AgentMessage => ({
@@ -449,5 +451,80 @@ describe("readHistory", () => {
     const newest = await history(1);
     expect(newest.seqs).toEqual([9]);
     expect(newest).toMatchObject({ lastSeq: 9, dropped: { messages: 8, bytes: size(1, 8) } });
+  });
+});
+
+describe("listing conversations", () => {
+  const page = async (tenant: TestTenant, query: Parameters<typeof listConversations>[1]) =>
+    listConversations(tenant.db, query);
+
+  it("titles a conversation by its first message only, and survives text Postgres would refuse", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    await postUserMessage(
+      tenant,
+      blobs,
+      conversation.id,
+      [...text(`  one\u0000\n\ttwo\u0007 ${"y".repeat(100)}`)],
+      QUOTA,
+    );
+    await completeTurnWith(tenant, blobs, conversation.id, [assistant("answer")]);
+    await postUserMessage(
+      tenant,
+      blobs,
+      conversation.id,
+      [...text("a different second message")],
+      QUOTA,
+    );
+
+    const { conversations } = await page(tenant, { limit: 10 });
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.title).toBe(`one two ${"y".repeat(72)}…`);
+    expect(conversations[0]?.messageCount).toBe(3);
+  });
+
+  it("orders by the latest message, not by creation, and a persisted answer counts", async () => {
+    await using tenant = await createTestTenant();
+    const blobs = await createTestBlobs();
+    const older = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const newer = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    expect((await page(tenant, { limit: 10 })).conversations.map((c) => c.id)).toEqual([
+      newer.id,
+      older.id,
+    ]);
+    await postUserMessage(tenant, blobs, older.id, [...text("hi")], QUOTA);
+    const posted = await page(tenant, { limit: 10 });
+    expect(posted.conversations.map((c) => c.id)).toEqual([older.id, newer.id]);
+
+    // the answer lands later than the post: `updated_at` moves with it
+    const before = posted.conversations[0]?.updatedAt;
+    await completeTurnWith(tenant, blobs, older.id, [assistant("hello")]);
+    const after = (await page(tenant, { limit: 10 })).conversations[0]?.updatedAt;
+    expect(after && before && after > before).toBe(true);
+  });
+
+  it("pages without repeating or skipping when conversations share a timestamp, and refuses a foreign cursor", async () => {
+    await using tenant = await createTestTenant();
+    // the same instant for all five: only the id breaks the tie
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const { rows } = await tenant.db.query<{ id: string }>(
+        "insert into conversations (model, created_at, updated_at) values ('m', '2026-01-01T00:00:00.123456Z', '2026-01-01T00:00:00.123456Z') returning id",
+      );
+      ids.push(rows[0]?.id ?? "");
+    }
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const next = await page(tenant, { limit: 2, cursor });
+      seen.push(...next.conversations.map((c) => c.id));
+      if (next.nextCursor === null) break;
+      cursor = next.nextCursor;
+    }
+    expect(seen).toEqual(ids.toSorted().toReversed());
+    await expect(page(tenant, { limit: 2, cursor: "2026-01-01_x" })).rejects.toBeInstanceOf(
+      InvalidCursorError,
+    );
   });
 });

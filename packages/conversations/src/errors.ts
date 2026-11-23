@@ -26,3 +26,8 @@ export class LeaseLostError extends Error {
 export class SeqConflictError extends Error {
   override name = "SeqConflictError";
 }
+
+/** A list cursor this module did not make. */
+export class InvalidCursorError extends Error {
+  override name = "InvalidCursorError";
+}

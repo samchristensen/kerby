@@ -3,7 +3,7 @@
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
-import type { Session } from "../../types/index.ts";
+import type { ChatAccess, Session } from "../../types/index.ts";
 import { CLIENT_ADDRESS_HEADER, consoleService, secureCookies } from "./console.ts";
 
 const COOKIE = "kerby_session";
@@ -22,6 +22,23 @@ export async function requireSession(): Promise<Session> {
   const session = await getSession();
   if (!session) redirect("/login");
   return session;
+}
+
+/**
+ * The session with its token, for calls that go through the api (chat). The token is the cookie's value and stays on
+ * the server: it is never put in a prop of a client component or in a response body.
+ */
+export async function getChatAccess(): Promise<ChatAccess | undefined> {
+  const session = await getSession();
+  const token = (await cookies()).get(COOKIE)?.value;
+  return session && token ? { session, token } : undefined;
+}
+
+/** `getChatAccess`, or a redirect to the sign-in page: for pages and actions. */
+export async function requireChatAccess(): Promise<ChatAccess> {
+  const access = await getChatAccess();
+  if (!access) redirect("/login");
+  return access;
 }
 
 export async function startSession(token: string, expiresAt: string): Promise<void> {

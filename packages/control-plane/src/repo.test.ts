@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   audit,
   authenticateApiKey,
+  authenticateConsoleSession,
   createApiKey,
   createConsoleSession,
   deleteConsoleSession,
@@ -367,6 +368,39 @@ describe("console people and sessions", () => {
 
     await deleteConsoleSession(control.db, live);
     expect(await readConsoleSession(control.db, live)).toBeUndefined();
+  });
+
+  it("lets the api resolve a session to its tenant as kerby_app, never the person, and nothing else of sessions", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    const { id } = await insertConsoleUser(control.db, {
+      tenantId: tenant.id,
+      email: "ada@example.com",
+      passwordHash: hash,
+    });
+    const user = { id, tenantId: tenant.id };
+    const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
+    const app = await asRole(control.url, "kerby_app");
+    try {
+      const found = await authenticateConsoleSession(app, live);
+      expect(found?.userId).toBe(id);
+      expect(found?.tenant.id).toBe(tenant.id);
+      expect(await authenticateConsoleSession(app, expired)).toBeUndefined();
+      expect(await authenticateConsoleSession(app, "not a token")).toBeUndefined();
+      const altered = `${live.slice(0, -1)}${live.endsWith("A") ? "B" : "A"}`;
+      expect(await authenticateConsoleSession(app, altered)).toBeUndefined();
+      for (const sql of [
+        "select * from console_users",
+        "delete from console_sessions",
+        "update console_sessions set expires_at = now() + interval '1 year'",
+        "insert into console_sessions (token_hash, tenant_id, user_id, expires_at) values ('\\x00', gen_random_uuid(), gen_random_uuid(), now())",
+      ]) {
+        await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await app.close();
+    }
   });
 });
 

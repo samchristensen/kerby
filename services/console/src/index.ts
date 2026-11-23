@@ -7,6 +7,7 @@ import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
 import { createSealer } from "@kerby/secrets";
 import { installConsole } from "./app/_lib/console.ts";
 import { type ConsoleConfig, loadConsoleConfig } from "./config/index.ts";
+import { createApiClient } from "./runtime/api-client.ts";
 import { createSignupClient } from "./runtime/control-client.ts";
 import { startServer } from "./runtime/server.ts";
 import { createConsoleService } from "./service/index.ts";
@@ -21,6 +22,7 @@ async function startConsole(config: ConsoleConfig) {
       control,
       sealer: createSealer(config.secretsPublicKey),
       signups: createSignupClient(config.controlUrl, config.consoleToken),
+      api: createApiClient(config.apiUrl),
       settings: {
         // The harness adapter owns the provider list (ADR 0008); its `providers` subpath loads no harness code.
         modelProviders: SUPPORTED_PROVIDERS,

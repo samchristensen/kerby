@@ -16,6 +16,7 @@ export {
   ConversationBusyError,
   ConversationFullError,
   ConversationNotFoundError,
+  InvalidCursorError,
   LeaseLostError,
   SeqConflictError,
   StorageQuotaExceededError,
@@ -35,6 +36,7 @@ export {
   insertConversation,
   isBusy,
   isConversationId,
+  listConversations,
   recordToolExecution,
   setLastError,
 } from "./repo.ts";

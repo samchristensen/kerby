@@ -12,7 +12,7 @@ export async function setModelKey(
   await putModelKey(deps.control, deps.sealer, principal.tenantId, provider, apiKey);
   await audit(deps.control, {
     tenantId: principal.tenantId,
-    actor: `key:${principal.keyId}`,
+    actor: principal.actor,
     action: "model_key.set",
     detail: { provider },
   });
@@ -27,7 +27,7 @@ export async function removeModelKey(
   if (removed) {
     await audit(deps.control, {
       tenantId: principal.tenantId,
-      actor: `key:${principal.keyId}`,
+      actor: principal.actor,
       action: "model_key.delete",
       detail: { provider },
     });

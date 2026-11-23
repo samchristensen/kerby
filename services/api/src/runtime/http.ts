@@ -1,7 +1,9 @@
-// The tenant-facing API. Every route but /healthz authenticates a bearer API key and runs as that key's tenant.
+// The tenant-facing API. Every route but /healthz authenticates a bearer credential (an API key, or the console's session
+// token for a signed-in person) and runs as that credential's tenant.
 import {
   CreateConversationRequestSchema,
   GetConversationQuerySchema,
+  ListConversationsQuerySchema,
   ModelProviderSchema,
   PostMessageRequestSchema,
   PutModelKeyRequestSchema,
@@ -11,6 +13,7 @@ import {
   ConversationBusyError,
   ConversationFullError,
   findConversation,
+  InvalidCursorError,
   isConversationId,
   StorageQuotaExceededError,
 } from "@kerby/conversations";
@@ -33,6 +36,7 @@ import {
   createConversation,
   getConversation,
   InvalidModelError,
+  listTenantConversations,
   postMessage,
   type StreamItem,
 } from "../service/conversations.ts";
@@ -175,6 +179,8 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(413, "storage_quota_exceeded", error.message);
             if (error instanceof ConversationBusyError)
               throw new HttpError(409, "conversation_busy", error.message);
+            if (error instanceof InvalidCursorError)
+              throw new HttpError(400, "invalid_request", error.message);
             if (error instanceof ModelKeyLimitError)
               throw new HttpError(409, "model_key_limit", error.message);
             if (error instanceof InvalidModelError)
@@ -261,6 +267,25 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       authed("POST /v1/conversations", async (request, _params, principal) => {
         const body = await readJson(request, CreateConversationRequestSchema);
         return json(201, await inTenant(principal, (ctx) => createConversation(deps, ctx, body)));
+      }),
+    ],
+    [
+      "GET",
+      "/v1/conversations",
+      authed("GET /v1/conversations", async (request, _params, principal) => {
+        const query = ListConversationsQuerySchema.safeParse(
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        if (!query.success)
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "limit must be 1 to 100, cursor a previous nextCursor, externalUserId at most 128 characters",
+          );
+        return json(
+          200,
+          await inTenant(principal, (ctx) => listTenantConversations(ctx, query.data)),
+        );
       }),
     ],
     [

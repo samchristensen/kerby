@@ -4,6 +4,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ControlQueryable } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
+import { TENANT_COLUMNS, type TenantRecord, type TenantRow, tenantFromRow } from "./tenants.ts";
 
 export class EmailTakenError extends Error {
   override name = "EmailTakenError";
@@ -120,4 +121,28 @@ export async function readConsoleSession(
 export async function deleteConsoleSession(db: ControlQueryable, token: string): Promise<void> {
   if (!TOKEN.test(token)) return;
   await db.query("delete from console_sessions where token_hash = $1", [tokenHash(token)]);
+}
+
+export type ConsoleAuthenticated = { tenant: TenantRecord; userId: string };
+
+/**
+ * Resolve a console session token to its tenant and person, or undefined when it is malformed, unknown or expired. This
+ * is what the api does with a session the console forwards (ADR 0014): it reads only the session and its tenant, never
+ * the person's email or password hash. Like `authenticateApiKey`, it leaves the tenant's status to the caller.
+ */
+export async function authenticateConsoleSession(
+  db: ControlQueryable,
+  token: string,
+): Promise<ConsoleAuthenticated | undefined> {
+  if (!TOKEN.test(token)) return undefined;
+  const { rows } = await db.query<TenantRow & { user_id: string }>(
+    `select s.user_id, ${TENANT_COLUMNS.split(", ")
+      .map((c) => `t.${c}`)
+      .join(", ")}
+       from console_sessions s join tenants t on t.id = s.tenant_id
+      where s.token_hash = $1 and s.expires_at > now()`,
+    [tokenHash(token)],
+  );
+  const row = rows[0];
+  return row ? { tenant: tenantFromRow(row), userId: row.user_id } : undefined;
 }

@@ -1,12 +1,15 @@
 import type { TenantQueryable } from "@kerby/db";
+import { InvalidCursorError } from "./errors.ts";
 
 export type ConversationRecord = {
   id: string;
   externalUserId: string | null;
   model: string;
   system: string;
+  title: string | null;
   lastError: string | null;
   createdAt: Date;
+  updatedAt: Date;
 };
 
 type ConversationRow = {
@@ -14,20 +17,89 @@ type ConversationRow = {
   external_user_id: string | null;
   model: string;
   system: string;
+  title: string | null;
   last_error: string | null;
   created_at: Date;
+  updated_at: Date;
 };
 
-const COLUMNS = "id, external_user_id, model, system, last_error, created_at";
+const COLUMNS = "id, external_user_id, model, system, title, last_error, created_at, updated_at";
 
 const fromRow = (row: ConversationRow): ConversationRecord => ({
   id: row.id,
   externalUserId: row.external_user_id,
   model: row.model,
   system: row.system,
+  title: row.title,
   lastError: row.last_error,
   createdAt: row.created_at,
+  updatedAt: row.updated_at,
 });
+
+/** A conversation in a list: no system prompt (it may be 100 000 characters), with how many messages it holds. */
+export type ConversationSummaryRecord = Omit<ConversationRecord, "system" | "lastError"> & {
+  messageCount: number;
+};
+
+/** How many characters a title keeps: the opening of the first message, enough to recognise the conversation by. */
+const TITLE_CHARACTERS = 80;
+
+/** A title from a message's text: whitespace and control characters (Postgres refuses NUL) collapsed, cut at 80. */
+export function titleFrom(text: string): string | null {
+  const flat = text.replace(/[\s\p{Cc}]+/gu, " ").trim();
+  if (flat === "") return null;
+  const characters = Array.from(flat);
+  return characters.length <= TITLE_CHARACTERS
+    ? flat
+    : `${characters.slice(0, TITLE_CHARACTERS).join("").trimEnd()}…`;
+}
+
+const CURSOR =
+  /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * One page of a tenant's conversations, most recently active first, however each began (API call or console). A
+ * page's `nextCursor` goes back in as `cursor` for the page after it; null on the last page. `externalUserId` keeps
+ * one end user's conversations. A cursor holds the last row's `updated_at` to the microsecond, so a conversation that
+ * moves while paging is seen at most once more, never skipped.
+ */
+export async function listConversations(
+  db: TenantQueryable,
+  page: { limit: number; cursor?: string | undefined; externalUserId?: string | undefined },
+): Promise<{ conversations: ConversationSummaryRecord[]; nextCursor: string | null }> {
+  let after: RegExpExecArray | null = null;
+  if (page.cursor !== undefined) {
+    after = CURSOR.exec(page.cursor);
+    if (!after) throw new InvalidCursorError("cursor is not one this API returned");
+  }
+  const { rows } = await db.query<
+    Omit<ConversationRow, "system" | "last_error"> & { cursor_at: string; message_count: number }
+  >(
+    `select c.id, c.external_user_id, c.model, c.title, c.created_at, c.updated_at,
+            to_char(c.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at,
+            (select count(*)::int from messages m where m.conversation_id = c.id) as message_count
+       from conversations c
+      where ($1::text is null or c.external_user_id = $1)
+        and ($2::timestamptz is null or (c.updated_at, c.id) < ($2::timestamptz, $3::uuid))
+      order by c.updated_at desc, c.id desc
+      limit $4`,
+    [page.externalUserId ?? null, after?.[1] ?? null, after?.[2] ?? null, page.limit + 1],
+  );
+  const rowsOfPage = rows.slice(0, page.limit);
+  const last = rowsOfPage.at(-1);
+  return {
+    conversations: rowsOfPage.map((row) => ({
+      id: row.id,
+      externalUserId: row.external_user_id,
+      model: row.model,
+      title: row.title,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      messageCount: row.message_count,
+    })),
+    nextCursor: rows.length > page.limit && last ? `${last.cursor_at}_${last.id}` : null,
+  };
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A conversation id from a URL is only ever looked up as a uuid; anything else is simply not found. */

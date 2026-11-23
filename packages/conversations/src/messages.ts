@@ -21,6 +21,7 @@ import {
   listMessageRows,
   listMessageRowsNewestFirst,
   type MessageRowRecord,
+  titleFrom,
 } from "./repo.ts";
 
 /**
@@ -155,9 +156,12 @@ export async function postUserMessage(
         if (seq !== predicted) return undefined; // another writer got in between: retry with the new position
         // Again under the lock, with what other conversations stored meanwhile; the object just written is left out.
         refuseOverQuota(await storedBytes(tx, blobId), body.byteLength, limits.storageBytes);
-        await tx.query("update conversations set last_error = null where id = $1", [
-          conversationId,
-        ]);
+        // The title is the opening of the conversation's first message; later messages leave it alone.
+        const opening = content.find((part) => part.type === "text");
+        await tx.query(
+          "update conversations set last_error = null, updated_at = now(), title = coalesce(title, $2) where id = $1",
+          [conversationId, opening ? titleFrom(opening.text) : null],
+        );
         await tx.query(
           "insert into messages (conversation_id, seq, role, blob_id) values ($1, $2, 'user', $3)",
           [conversationId, seq, blobId],
@@ -221,6 +225,7 @@ export async function persistMessage(
       [conversationId, seq, message.role, blobId, run.runId],
     );
     if (inserted.rowCount === 1) {
+      await tx.query("update conversations set updated_at = now() where id = $1", [conversationId]);
       await tx.query("select pg_notify($1, $2)", [
         conversationChannel(conversationId),
         JSON.stringify({ persisted: seq }),

@@ -10,7 +10,7 @@ storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
 services/   deployables: api (tenants' code calls it), worker (runs turns), control (operators run it), console (tenants'
-           people sign up and manage keys in it); they own no tables
+           people sign up, manage keys and chat in it); they own no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -81,8 +81,8 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
 - `packages/db` exports `ControlDb` and `TenantDb` as distinct types. Repo functions take one, never a pool or DSN. A
   `TenantDb` comes only from a verified API key resolved in the control plane.
-- A tenant id reaches code only through a verified API key (api) or a verified console session (console), never through
-  a request body or a URL. _review_
+- A tenant id reaches code only through a verified API key (api), a verified console session (console, and the api when the
+  console forwards one for the browser's chat), never through a request body or a URL. _review_
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
@@ -176,6 +176,10 @@ flowchart LR
 - **Paged reads.** `GET /v1/conversations/:id?after=<seq>&limit=<n>` returns one page (default 100, at most 500) and
   `nextAfter`, null on the last page. A conversation still holds at most 2000 messages and 64 MiB: those bound storage,
   not memory.
+- **Browsing.** `GET /v1/conversations?limit=<n>&cursor=<c>&externalUserId=<id>` lists the tenant's conversations, most
+  recently active first (`updated_at`, written by both message writers), with title and message count; `nextCursor` holds the
+  last row's `updated_at` to the microsecond and its id. The console's chat uses it and the rest of this API with the person's
+  session token ([ADR 0014](docs/adr/0014-tenant-console.md#amendment-chat-and-browsing-in-the-console-2026-11-22)).
 - **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
   then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
   events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
@@ -233,7 +237,7 @@ Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make rai
 ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker` and `console` running the images CI builds from
 the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
 [ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` and `console` are public; services reach
-Postgres and each other over Railway's private network (the console reaches control's sign-up route there), and the bucket through
+Postgres and each other over Railway's private network (the console reaches control's sign-up route and the api there), and the bucket through
 its S3 endpoint and keys. The secrets private key is a variable on `worker` only; the api and the console get the public half.
 
 ## Dependencies

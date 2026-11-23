@@ -18,9 +18,37 @@ const ConversationSchema = z.object({
   externalUserId: z.string().nullable(),
   model: z.string(),
   system: z.string(),
+  /** The opening of the first user message; null before one is posted, and for conversations older than titles. */
+  title: z.string().nullable(),
   createdAt: z.iso.datetime(),
+  /** When a message was last added (creation time until then): the order of `GET /v1/conversations`. */
+  updatedAt: z.iso.datetime(),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
+
+/** A conversation in a list: everything but the system prompt, with how many messages it holds. */
+const ConversationSummarySchema = ConversationSchema.omit({ system: true }).extend({
+  messageCount: z.number().int().nonnegative(),
+});
+export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
+
+/**
+ * `GET /v1/conversations?limit=<n>&cursor=<c>&externalUserId=<id>`: the tenant's conversations, most recently active
+ * first, whoever started them. `cursor` is a previous page's `nextCursor`; `limit` is 1 to 100, default 30.
+ */
+export const ListConversationsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+  cursor: z.string().min(1).max(100).optional(),
+  externalUserId: Id.optional(),
+});
+export type ListConversationsQuery = z.infer<typeof ListConversationsQuerySchema>;
+
+export const ListConversationsResponseSchema = z.object({
+  conversations: z.array(ConversationSummarySchema),
+  /** Pass as `cursor` for the next page; null on the last page. */
+  nextCursor: z.string().nullable(),
+});
+export type ListConversationsResponse = z.infer<typeof ListConversationsResponseSchema>;
 
 /** A persisted message as clients see it: the harness's `native` payload stays inside Kerby. */
 export const PublicMessageSchema = z.discriminatedUnion("role", [
@@ -28,6 +56,7 @@ export const PublicMessageSchema = z.discriminatedUnion("role", [
   AgentMessageSchema.options[1].omit({ native: true }),
   AgentMessageSchema.options[2].omit({ native: true }),
 ]);
+export type PublicMessage = z.infer<typeof PublicMessageSchema>;
 
 const MessageSchema = z.object({
   /** Position in the conversation, from 1, assigned once. Also the SSE event id basis. */

@@ -105,6 +105,8 @@ export default defineRailway((ctx) => {
     source: source("api"),
     healthcheck: "/healthz",
     env: {
+      // Every address: the console reaches the api over the private network, which may be IPv6.
+      HOST: "::",
       PORT: "8080",
       ...s3,
       CONTROL_DATABASE_URL: limitedUrl,
@@ -131,8 +133,8 @@ export default defineRailway((ctx) => {
     },
   });
 
-  // The console (ADR 0014): sign-up, sign-in, API keys and model keys. Public, like the api. It seals model keys to the
-  // api's public key and reaches control only on its sign-up route.
+  // The console (ADR 0014): sign-up, sign-in, API keys, model keys and chat. Public, like the api. It seals model keys to
+  // the api's public key, reaches control only on its sign-up route and the api with the signed-in person's session.
   const consoleService = service("console", {
     source: source("console"),
     healthcheck: "/healthz",
@@ -140,6 +142,8 @@ export default defineRailway((ctx) => {
       PORT: "3000",
       CONTROL_DATABASE_URL: consoleUrl,
       CONTROL_URL: `http://${variable("control", "RAILWAY_PRIVATE_DOMAIN")}:8081`,
+      // The browser's chat reaches the tenant API over the private network, with the person's session token.
+      API_URL: `http://${variable("api", "RAILWAY_PRIVATE_DOMAIN")}:8080`,
       CONSOLE_TOKEN: control.env.CONSOLE_TOKEN,
       SECRETS_PUBLIC_KEY: api.env.SECRETS_PUBLIC_KEY,
       API_PUBLIC_URL: `https://${variable("api", "RAILWAY_PUBLIC_DOMAIN")}`,
