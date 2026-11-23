@@ -6,7 +6,8 @@
 //    and strand every stored model key. They are `preserve()`: `scripts/railway.ts secrets` creates each once and never
 //    replaces it. ALERT_WEBHOOK_URL is `preserve()` too: an operator sets it per environment with `railway variable set`
 //    (docs/deploy.md#alerts), and unset it is simply absent.
-//  - The api's generated domain (the IaC does not manage generated domains): `scripts/railway.ts setup` adds it.
+//  - The api's and the console's generated domains (the IaC does not manage generated domains): `scripts/railway.ts
+//    domains` adds them.
 //  - Code. Railway builds nothing: CI builds each service's image and pushes it to GHCR as `sha-<commit>`, then
 //    `scripts/railway.ts deploy` points the environment's tag (`kerby-<service>:<environment>`) at it and redeploys.
 //  - Registry credentials for GHCR: a token cannot live in this file; `scripts/railway.ts registry` sets them.
@@ -53,8 +54,11 @@ export default defineRailway((ctx) => {
   const host = variable("Postgres", "RAILWAY_PRIVATE_DOMAIN");
   const port = variable("Postgres", "PGPORT");
   const adminUrl = `postgresql://${variable("Postgres", "PGUSER")}:${variable("Postgres", "POSTGRES_PASSWORD")}@${host}:${port}/postgres`;
-  // The limited role api and worker connect as; control creates it and sets its password at startup.
-  const limitedUrl = `postgresql://kerby_app:${variable("control", "APP_DATABASE_PASSWORD")}@${host}:${port}/${variable("Postgres", "PGDATABASE")}`;
+  // The limited roles: api and worker connect as `kerby_app`, the console as `kerby_console`. Control creates both and
+  // sets their passwords at startup.
+  const database = variable("Postgres", "PGDATABASE");
+  const limitedUrl = `postgresql://kerby_app:${variable("control", "APP_DATABASE_PASSWORD")}@${host}:${port}/${database}`;
+  const consoleUrl = `postgresql://kerby_console:${variable("control", "CONSOLE_DATABASE_PASSWORD")}@${host}:${port}/${database}`;
 
   // A bucket's five variables, under `<prefix>S3_*`.
   const s3Of = (resource: typeof storage, prefix: string) => ({
@@ -69,12 +73,15 @@ export default defineRailway((ctx) => {
   // Where every service posts its alerts (Slack, Discord or JSON); the operator's channel, never generated.
   const alerts = { ALERT_WEBHOOK_URL: preserve() };
 
-  // Control holds the administrative credentials: it makes the limited role and every tenant database. Its secrets are the
-  // source; api and worker reference TENANT_DB_KEYS (which opens tenant database passwords, ADR 0009) so there is one copy.
+  // Control holds the administrative credentials: it makes the limited roles and every tenant database. Its secrets are
+  // the source; api and worker reference TENANT_DB_KEYS (which opens tenant database passwords, ADR 0009) and the console
+  // CONSOLE_TOKEN, so there is one copy of each.
   const control = service("control", {
     source: source("control"),
     healthcheck: "/healthz",
     env: {
+      // Every address: the console reaches control over the private network, which may be IPv6.
+      HOST: "::",
       PORT: "8081",
       ...s3,
       ...s3Of(exportsBucket, "EXPORT_"),
@@ -86,6 +93,9 @@ export default defineRailway((ctx) => {
       OPERATOR_TOKEN: preserve(),
       TENANT_DB_KEYS: preserve(),
       APP_DATABASE_PASSWORD: preserve(),
+      // Opens self-serve sign-up (`POST /v1/console/signups`) and nothing else (ADR 0014).
+      CONSOLE_TOKEN: preserve(),
+      CONSOLE_DATABASE_PASSWORD: preserve(),
       ...alerts,
     },
   });
@@ -121,7 +131,34 @@ export default defineRailway((ctx) => {
     },
   });
 
+  // The console (ADR 0014): sign-up, sign-in, API keys and model keys. Public, like the api. It seals model keys to the
+  // api's public key and reaches control only on its sign-up route.
+  const consoleService = service("console", {
+    source: source("console"),
+    healthcheck: "/healthz",
+    env: {
+      PORT: "3000",
+      CONTROL_DATABASE_URL: consoleUrl,
+      CONTROL_URL: `http://${variable("control", "RAILWAY_PRIVATE_DOMAIN")}:8081`,
+      CONSOLE_TOKEN: control.env.CONSOLE_TOKEN,
+      SECRETS_PUBLIC_KEY: api.env.SECRETS_PUBLIC_KEY,
+      API_PUBLIC_URL: `https://${variable("api", "RAILWAY_PUBLIC_DOMAIN")}`,
+      // Railway's edge writes X-Forwarded-For with the client first: the sign-up and sign-in limits count that address.
+      TRUST_PROXY: "true",
+    },
+  });
+
   return project("kerby", {
-    resources: [control, api, worker, db, dbVolume, storage, exportsBucket, backupBucket],
+    resources: [
+      control,
+      api,
+      worker,
+      consoleService,
+      db,
+      dbVolume,
+      storage,
+      exportsBucket,
+      backupBucket,
+    ],
   });
 });

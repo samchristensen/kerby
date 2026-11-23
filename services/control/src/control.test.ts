@@ -4,6 +4,7 @@ import { tenantPrefix } from "@kerby/blobs";
 import { createEmptyTestBucket, createTestBlobs, createTestBucket } from "@kerby/blobs/testing";
 import type {
   BackupResponse,
+  ConsoleSignupResponse,
   CreateKeyResponse,
   CreateTenantResponse,
   ExportResponse,
@@ -13,8 +14,12 @@ import type {
 } from "@kerby/contracts";
 import {
   authenticateApiKey,
+  createConsoleSession,
+  findConsoleUser,
   getTenant,
+  insertConsoleUser,
   insertTenant,
+  readConsoleSession,
   readTenantDbPassword,
   resolveTenantDbUrl,
 } from "@kerby/control-plane";
@@ -43,10 +48,12 @@ import { startNightly, untilNext } from "./runtime/nightly.ts";
 import { BACKUP_LOCK_KEY, backupBuckets, checkBackupFreshness } from "./service/backup.ts";
 import { ensureTenantDbPasswords } from "./service/db-credentials.ts";
 import { deleteExpiredExports } from "./service/export.ts";
+import { signUp } from "./service/signups.ts";
 import { ensureTemplate, restrictClusterDatabases } from "./service/template.ts";
 import type { ControlDeps } from "./types/index.ts";
 
 const TOKEN = "operator-token-for-tests";
+const CONSOLE_TOKEN = "console-token-for-tests";
 /** TENANT_DB_KEYS for every test: one box, as one deployment has. */
 const tenantDbBox = createSecretBox([generateBoxKey()]);
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
@@ -123,7 +130,10 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   await ensureTemplate(deps);
   await restrictClusterDatabases(deps);
   cleanups.push(() => realCluster.dropDatabase(templateDatabase));
-  const server = await serve(createControlApp(deps, TOKEN), { host: "127.0.0.1", port: 0 });
+  const server = await serve(createControlApp(deps, { operator: TOKEN, console: CONSOLE_TOKEN }), {
+    host: "127.0.0.1",
+    port: 0,
+  });
   cleanups.push(() => server.close());
   const base = `http://127.0.0.1:${server.port}`;
 
@@ -363,6 +373,125 @@ describe("lifecycle", () => {
       { action: "tenant.create", actor: "operator" },
       { action: "tenant.suspend", actor: "operator" },
     ]);
+  });
+});
+
+describe("console sign-up", () => {
+  const passwordHash = "scrypt$17$8$1$c2FsdHNhbHRzYWx0c2FsdA==$aGFzaGhhc2hoYXNoaGFzaA==";
+  const signup = (body: unknown, token: string | null = CONSOLE_TOKEN) =>
+    start().then(({ call }) => call("POST", "/v1/console/signups", body, token));
+
+  it("provisions a tenant with its first person and key, audited as the console", async () => {
+    const h = await start();
+    const response = await h.call(
+      "POST",
+      "/v1/console/signups",
+      { name: "acme", email: " Ada@Example.com ", passwordHash },
+      CONSOLE_TOKEN,
+    );
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as ConsoleSignupResponse;
+    const tenant = (await getTenant(h.control.db, created.tenantId)) ?? expect.fail("no tenant");
+    expect(tenant).toMatchObject({ name: "acme", status: "active" });
+    expect(await h.cluster.databaseExists(tenant.dbName)).toBe(true);
+    expect((await authenticateApiKey(h.control.db, created.secret))?.tenant.id).toBe(tenant.id);
+    expect(await findConsoleUser(h.control.db, "ada@example.com")).toMatchObject({
+      id: created.userId,
+      tenantId: tenant.id,
+      passwordHash,
+    });
+    const { rows } = await h.control.db.query<{ action: string; actor: string }>(
+      "select action, actor from audit_log order by id",
+    );
+    expect(rows).toEqual([
+      { action: "tenant.create", actor: "console" },
+      { action: "console.signup", actor: "console" },
+    ]);
+  });
+
+  it("opens with the console's token only, and that token opens nothing else", async () => {
+    const body = { name: "acme", email: "ada@example.com", passwordHash };
+    expect((await signup(body, null)).status).toBe(401);
+    expect((await signup(body, TOKEN)).status).toBe(401);
+    const { call } = await start();
+    expect((await call("GET", "/v1/operator/tenants", undefined, CONSOLE_TOKEN)).status).toBe(401);
+    expect((await call("POST", "/v1/operator/tenants", { name: "x" }, CONSOLE_TOKEN)).status).toBe(
+      401,
+    );
+  });
+
+  it("refuses a taken email or workspace name, and a body that is not a sign-up", async () => {
+    const h = await start();
+    const post = (body: unknown) => h.call("POST", "/v1/console/signups", body, CONSOLE_TOKEN);
+    expect((await post({ name: "acme", email: "ada@example.com", passwordHash })).status).toBe(201);
+    const tenants = async () => (await h.control.db.query("select 1 from tenants")).rowCount;
+
+    const sameEmail = await post({ name: "globex", email: "ADA@example.com", passwordHash });
+    expect(sameEmail.status).toBe(409);
+    expect(await sameEmail.json()).toMatchObject({ error: { code: "email_taken" } });
+    const sameName = await post({ name: "acme", email: "bob@example.com", passwordHash });
+    expect(sameName.status).toBe(409);
+    expect(await sameName.json()).toMatchObject({ error: { code: "name_taken" } });
+    expect(await tenants()).toBe(1);
+
+    for (const bad of [
+      { name: "Acme Inc", email: "c@example.com", passwordHash },
+      { name: "c", email: "not-an-email", passwordHash },
+      { name: "c", email: "c@example.com", passwordHash: "hunter2" },
+      { name: "c", email: "c@example.com" },
+    ]) {
+      expect((await post(bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    expect(await tenants()).toBe(1);
+  });
+
+  it("leaves no tenant behind when another sign-up takes the email first", async () => {
+    const h = await start();
+    // The other sign-up lands between the check and this one's insert.
+    const control = {
+      ...h.deps.control,
+      async query(text: string, params?: readonly unknown[]) {
+        if (text.startsWith("insert into console_users")) {
+          const other = await insertTenant(h.control.db, { name: "other", dbHost: "h", dbPort: 1 });
+          await insertConsoleUser(h.control.db, {
+            tenantId: other.id,
+            email: "ada@example.com",
+            passwordHash,
+          });
+        }
+        return h.deps.control.query(text, params);
+      },
+    } as typeof h.deps.control;
+    await expect(
+      signUp({ ...h.deps, control }, { name: "acme", email: "ada@example.com", passwordHash }),
+    ).rejects.toMatchObject({ code: "email_taken" });
+    const acme = await h.control.db.query<{ status: string; db_name: string }>(
+      "select status, db_name from tenants where name = 'acme'",
+    );
+    expect(acme.rows[0]?.status).toBe("deleted");
+    expect(await h.cluster.databaseExists(acme.rows[0]?.db_name ?? "")).toBe(false);
+    expect((await h.control.db.query("select 1 from api_keys")).rowCount).toBe(0);
+  });
+
+  it("deleting the tenant removes its people and sessions and frees the email", async () => {
+    const h = await start();
+    const post = (name: string) =>
+      h.call(
+        "POST",
+        "/v1/console/signups",
+        { name, email: "ada@example.com", passwordHash },
+        CONSOLE_TOKEN,
+      );
+    const created = (await (await post("acme")).json()) as ConsoleSignupResponse;
+    const token = await createConsoleSession(
+      h.control.db,
+      { id: created.userId, tenantId: created.tenantId },
+      new Date(Date.now() + 60_000),
+    );
+    expect((await h.call("DELETE", `/v1/operator/tenants/${created.tenantId}`)).status).toBe(204);
+    expect(await readConsoleSession(h.control.db, token)).toBeUndefined();
+    expect(await findConsoleUser(h.control.db, "ada@example.com")).toBeUndefined();
+    expect((await post("acme")).status).toBe(201);
   });
 });
 

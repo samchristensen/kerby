@@ -105,9 +105,6 @@ export function loadConfig<S extends z.ZodObject>(
  * The environment to hand a child process: this process's, plus `extra`. Reading the environment is this
  * package's job (rule `config`), so code that spawns tools such as `pg_dump` goes through here.
  */
-export function childProcessEnv(extra: Record<string, string> = {}): Record<string, string> {
-  const inherited: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env))
-    if (value !== undefined) inherited[key] = value;
-  return { ...inherited, ...extra };
+export function childProcessEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...process.env, ...extra };
 }

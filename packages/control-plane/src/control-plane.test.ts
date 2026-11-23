@@ -9,6 +9,8 @@ it("the control migrations create the control tables, and keys belong to a tenan
   expect(rows.map((r) => r.table_name)).toEqual([
     "api_keys",
     "audit_log",
+    "console_sessions",
+    "console_users",
     "schema_migrations",
     "tenant_db_credentials",
     "tenant_secrets",

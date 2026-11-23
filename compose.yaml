@@ -59,6 +59,8 @@ services:
     environment:
       <<: *tenant-env
       OPERATOR_TOKEN: ${KERBY_OPERATOR_TOKEN:-local-dev-operator-token-0123456789}
+      # Opens self-serve sign-up (POST /v1/console/signups) and nothing else; the console holds the same value.
+      CONSOLE_TOKEN: ${KERBY_CONSOLE_TOKEN:-local-dev-console-token-0123456789}
       CLUSTER_ADMIN_URL: postgres://postgres:dev@postgres:5432/postgres
       CLUSTER_HOST: postgres
       CLUSTER_PORT: "5432"
@@ -118,6 +120,30 @@ services:
       # Short, so a killed worker's turn moves to another worker in seconds (the default is two minutes).
       CLAIM_TIMEOUT_SECONDS: "10"
       SECRETS_PRIVATE_KEYS: "oLJooOTi5uJQL4lbxdJoXNIFChaniiOI87/7rlz341o="
+    depends_on:
+      control: { condition: service_healthy }
+
+  # The tenant console (ADR 0014): sign-up, sign-in, API keys and model keys. Locally it connects to the control database
+  # as the admin, like api and worker; hosted it is the limited `kerby_console` role.
+  console:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: services/console/Dockerfile
+      target: ${KERBY_IMAGE_TARGET:-prod}
+    environment:
+      CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
+      CONTROL_URL: http://control:8081
+      CONSOLE_TOKEN: ${KERBY_CONSOLE_TOKEN:-local-dev-console-token-0123456789}
+      # The api's development public key (above): model keys stored here are sealed to it.
+      SECRETS_PUBLIC_KEY: "y4c7+AJM8aN76nrweWjLR0gShtooDI7uI0ay8mTDHR0="
+      API_PUBLIC_URL: http://127.0.0.1:${KERBY_API_PORT:-8080}
+      # Served over plain HTTP here, so the session cookie cannot be Secure; hosted it is.
+      SECURE_COOKIES: "false"
+      TRUST_PROXY: "false"
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${KERBY_CONSOLE_PORT:-3000}:3000"
     depends_on:
       control: { condition: service_healthy }
 

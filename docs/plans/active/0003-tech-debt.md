@@ -233,9 +233,12 @@ No work until the trigger; the debt line stays and names it.
 - **Body cache** (the rest of "A conversation read fetches every message body"). Trigger: after F1, a profile shows S3
   gets dominating a read or a rehydrate. Fix then: a per-process LRU of bodies bounded in bytes and keyed by object key;
   keys carry a content hash, so nothing is ever invalidated.
-- **Re-seal** (the rest of the model-keys line). Trigger: the first secrets key rotation. Fix then: a script run where
+- **Re-seal** (the model-keys line). Trigger: the first secrets key rotation. Fix then: a script run where
   the private keys are (`worker`) that opens each `tenant_secrets` row whose embedded key id is not the current key's,
-  re-seals it, and audits it. The console is plan 0001 M9, not debt.
+  re-seals it, and audits it.
+- **Console accounts** ("The console (ADR 0014) has open sign-up"). Trigger: the console is advertised, a second console
+  process, or the first sign-up abuse. Fix then: an email provider (a dependency and an ADR line) for verification and
+  password reset, a CAPTCHA or an edge on sign-up, and the sign-up and sign-in counters shared like the api's.
 - **Alert debounce** ("Alert debounce is per process"). Trigger: a second worker replica. Fix then: share the window in a
   control-database row.
 - **CI token scope** ("CI's `RAILWAY_TOKEN`"). Trigger: a second person with write access. Fix then: both secrets behind a
@@ -250,7 +253,7 @@ No work until the trigger; the debt line stays and names it.
   modular-safe-wx5G -e production`), or Railway support offering to delete it. It has no instance, so it holds no data;
   `railway api` lists it in the project (id `d69d20f7-679d-4f10-90cd-d35aec412921`) and the dashboard does not.
 - **Handed to plan 0001**, no work here: stored bytes reported to `usage` (the other half of G2, M8); an operator endpoint
-  for tenant limits (M9); a console for model keys (M9).
+  for tenant limits (M9).
 
 ## Log
 

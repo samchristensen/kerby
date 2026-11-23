@@ -4,12 +4,13 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
-services/   deployables: api (tenants call it), worker (runs turns), control (operators run it); they own no tables
+services/   deployables: api (tenants' code calls it), worker (runs turns), control (operators run it), console (tenants'
+           people sign up and manage keys in it); they own no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -26,7 +27,8 @@ with the reason.
 - `scripts` and `services` import packages. Packages import packages. **A service is never imported**:
   services meet over HTTP, with the schemas in `packages/contracts`.
 - A relative import never leaves its workspace.
-- No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`).
+- No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`). The one
+  exception is the console's pages, which `next build` compiles when its image is built (ADR 0014).
 
 ## Layers
 
@@ -45,6 +47,11 @@ types -> config -> repo -> service -> runtime
 | `runtime` | HTTP routes and Absurd task handlers. Authenticates, builds the tenant context, wires layers together. |
 
 `src/index.ts` is the composition root: it builds the real adapters and hands them down. Tests may import any layer.
+
+A service built on Next.js (the console) keeps its pages and server actions in `src/app`, where Next.js looks for them:
+that is its `runtime` layer. Next.js bundles `src/app`, so it imports Kerby packages and the rest of `src/` with
+`import type` only, and reaches values through what `src/index.ts` installed (`consoleService()`); otherwise the bundle
+would hold second copies of packages the composition root already built (enforced, rule `layers`; ADR 0014).
 
 ## Providers
 
@@ -65,24 +72,25 @@ An agent harness is replaceable by construction: `packages/agent` defines `Agent
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                      | Migrations                                                  |
-| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit | `packages/control-plane/migrations/control/`                |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                                                 | `packages/{durable,blobs,conversations}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                  |
+| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                                                                                                       | `packages/{durable,blobs,conversations}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
 - `packages/db` exports `ControlDb` and `TenantDb` as distinct types. Repo functions take one, never a pool or DSN. A
   `TenantDb` comes only from a verified API key resolved in the control plane.
-- A tenant id reaches code only through that verified key, never through a request body. _review_
+- A tenant id reaches code only through a verified API key (api) or a verified console session (console), never through
+  a request body or a URL. _review_
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
   nightly backup copy ([ADR 0013](docs/adr/0013-exports-and-bucket-backup.md)).
 - Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)); Kerby holds no provider key. A key is
-  sealed by `packages/secrets` to a public key the api holds, stored in the control plane's `tenant_secrets`, and opened only by a
-  worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the tenant id,
-  never message content or secrets; the worker scrubs the key from provider errors. _review_
+  sealed by `packages/secrets` to a public key the api and the console hold, stored in the control plane's `tenant_secrets`, and
+  opened only by a worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the
+  tenant id, never message content or secrets; the worker scrubs the key from provider errors. _review_
 - No tenant code runs in Kerby's processes. Tools are remote MCP servers. Every call to a URL a tenant supplied goes
   through `createEgressFetch` from `packages/egress` ([ADR 0010](docs/adr/0010-egress-guard.md)): public addresses
   only, connected to the address it checked, redirects re-checked, time and size limits. _review_
@@ -94,9 +102,17 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   again at every login, so a rotation needs no restart. At startup control gives a password to every tenant lacking one, re-seals those under an older key,
   and closes the maintenance databases (`postgres`, `template1`) and the template to everyone but its admin role, as it
   does the control database: a tenant role can open its own database and nothing else.
-  Deleting drops the database and role, deletes the object prefix and purges keys; the row stays with status `deleted`.
-  Exporting uploads a `pg_dump` and the object listing to the export bucket and returns presigned URLs; exports are kept
-  30 days. Nightly, control copies new objects to the backup bucket and drops deleted tenants' copies (ADR 0013).
+  Deleting drops the database and role, deletes the object prefix and purges keys and the console's people and sessions;
+  the row stays with status `deleted`. Exporting uploads a `pg_dump` and the object listing to the export bucket and
+  returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
+  deleted tenants' copies (ADR 0013).
+- Self-serve sign-up ([ADR 0014](docs/adr/0014-tenant-console.md)): the console hashes the password and calls control's
+  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control provisions as above and stores
+  the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
+  kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
+  `kerby_console`: API keys (never their hashes), model keys, people and sessions, appending to the audit log as
+  `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
+  account (failed sign-ins an hour), per process like the api's limits.
 - Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
@@ -180,12 +196,13 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 
 ## Local stack
 
-`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, built from each service's
+`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, `console`, built from each service's
 `Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
 then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
 
-- One published port: the API on `127.0.0.1:${KERBY_API_PORT:-8080}`. Control and worker are reached only inside the
-  network (`make up` provisions through `docker compose exec`).
+- Two published ports: the API on `127.0.0.1:${KERBY_API_PORT:-8080}` and the console on
+  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control and worker are reached only
+  inside the network (`make up` provisions through `docker compose exec`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
 - The worker runs the scripted fake model and the `echo` tool (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`); the
@@ -213,11 +230,11 @@ then provisions a `default` tenant through the operator API and prints its key. 
 ## Hosting
 
 Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api` and `worker` running the images CI builds from
+ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker` and `console` running the images CI builds from
 the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
-[ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` is public; services reach
-Postgres and each other over Railway's private network, and the bucket through its S3 endpoint and keys. The secrets private key is
-a variable on `worker` only; the api gets the public half.
+[ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` and `console` are public; services reach
+Postgres and each other over Railway's private network (the console reaches control's sign-up route there), and the bucket through
+its S3 endpoint and keys. The secrets private key is a variable on `worker` only; the api and the console get the public half.
 
 ## Dependencies
 

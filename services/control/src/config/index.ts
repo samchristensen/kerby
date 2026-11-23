@@ -22,6 +22,13 @@ const controlConfigSchema = z.object({
   clusterPort: z.coerce.number().int().positive(),
   /** Password for the limited `kerby_app` role api and worker use on the control database. Omit locally. */
   appDatabasePassword: z.string().min(16).optional(),
+  /** Password for the limited `kerby_console` role the console uses on the control database. Omit locally. */
+  consoleDatabasePassword: z.string().min(16).optional(),
+  /**
+   * The console's bearer token: it opens `POST /v1/console/signups` (self-serve sign-up) and nothing else. Unset, that
+   * route refuses everyone.
+   */
+  consoleToken: z.string().min(16).optional(),
   /** The database tenant databases are copied from; created and migrated at startup. */
   templateDatabase: z
     .string()

@@ -33,6 +33,13 @@ export class NotFoundError extends Error {
   override name = "NotFoundError";
 }
 
+/** A request that conflicts with the state of things; `code` is the error code the response carries. */
 export class ConflictError extends Error {
   override name = "ConflictError";
+  readonly code: string;
+
+  constructor(message: string, code = "conflict") {
+    super(message);
+    this.code = code;
+  }
 }

@@ -8,17 +8,18 @@ deployed and smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 One Railway project, `kerby`. Per environment (`production` is the standing one):
 
-| Service                | What                                                                                                 | Reachable from                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database | the other services, privately               |
-| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                         | the other services, by endpoint and keys    |
-| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                            | `control` only, by its keys; presigned URLs |
-| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))         | `control` only, by its keys                 |
-| `control`              | operator API (`:8081`), no public domain                                                             | `railway ssh --service control`             |
-| `api`                  | tenant API (`:8080`), public Railway domain                                                          | the internet                                |
-| `worker`               | runs turns, health on `:8082`, no public domain                                                      | nothing                                     |
+| Service                | What                                                                                                                             | Reachable from                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                             | the other services, privately                                                      |
+| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                     | the other services, by endpoint and keys                                           |
+| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                        | `control` only, by its keys; presigned URLs                                        |
+| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                     | `control` only, by its keys                                                        |
+| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                                | `railway ssh --service control`; the console, privately, on its sign-up route only |
+| `api`                  | tenant API (`:8080`), public Railway domain                                                                                      | the internet                                                                       |
+| `worker`               | runs turns, health on `:8082`, no public domain                                                                                  | nothing                                                                            |
+| `console`              | tenant console (`:3000`): sign-up, sign-in, API keys, model keys ([ADR 0014](adr/0014-tenant-console.md)); public Railway domain | the internet                                                                       |
 
-`control`, `api` and `worker` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
+`control`, `api`, `worker` and `console` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
 (`ghcr.io/samchristensen/kerby-<name>`); Railway builds nothing. Each environment runs the tag named after it
 (`kerby-api:production`); a release moves that tag. Services are health-checked on `/healthz`. Postgres is reached at
 `postgres.railway.internal` on the private network, without TLS.
@@ -31,9 +32,9 @@ Docker logged in to GHCR with a token that can push (`gh auth token | docker log
 ```sh
 railway init --name kerby                  # creates the project and links this checkout to it
 make railway-plan                          # preview: what .railway/railway.ts would change
-make railway-setup                         # apply it, add api's domain, create the secrets once
+make railway-setup                         # apply it, add the api's and console's domains, create the secrets once
 GHCR_PULL_TOKEN=... make railway-registry  # let the services pull the private images (classic token, read:packages)
-make deploy TAG=sha-<commit>               # a commit CI built: control first, then api and worker; waits for SUCCESS
+make deploy TAG=sha-<commit>               # a commit CI built: control first, then the rest; waits for SUCCESS
 ```
 
 After that, merging to `main` releases (see Releasing); `make deploy` is for rollbacks and other environments.
@@ -50,8 +51,10 @@ login keychain item `kerby SECRETS_PRIVATE_KEYS` (account `kerby-production`); k
 Check a copy is the live key: `publicKeyOf(copy)` from `@kerby/secrets` must equal `api`'s `SECRETS_PUBLIC_KEY`. After
 a key rotation (ADR 0008), update the copy.
 
-The api's address is in `railway service list --json` (`url`). A custom domain: add `domains: ["api.example.com"]` to the
-`api` service in `.railway/railway.ts` and apply, then add the DNS records Railway prints.
+The api's and the console's addresses are in `railway service list --json` (`url`). A custom domain: add
+`domains: ["api.example.com"]` to the service in `.railway/railway.ts` and apply, then add the DNS records Railway prints.
+The console shows the api's address in its quickstart (`API_PUBLIC_URL`, the api's generated domain): point it at a
+custom api domain too.
 
 ## Provision a tenant
 
@@ -72,6 +75,17 @@ process, `storageBytes` 1 GiB; ARCHITECTURE.md#tenancy). The response holds the 
 `curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. After a release that adds tenant
 migrations, fan them out with `POST /v1/operator/migrate` the same way: code must tolerate schema versions n and n-1
 while it runs.
+
+## The console
+
+People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)): each sign-up provisions a tenant exactly
+as `POST /v1/operator/tenants` does (audited with actor `console`, default limits) and stores its first person, who sees
+the tenant's first API key once. An operator can still provision by hand; such a tenant has no person and cannot be
+signed in to. Suspending or deleting a tenant ends its console sessions at once (deleting also removes its people).
+Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-ins per address and per account
+(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. There is no email
+verification, password reset or second person per tenant yet (tech debt). To see who signed up:
+`select email, tenant_id, created_at, last_login_at from console_users order by created_at` (psql below).
 
 ## Export a tenant
 
@@ -128,16 +142,19 @@ may have lost since. Objects written after the last nightly run are not in the b
 `make railway-setup ENV=pr-123` creates `pr-123` as a copy of `production` (Railway gives the copy its own Postgres volume
 and bucket), applies `.railway/railway.ts` to it, and replaces the secrets it inherited with ones of its own. Then
 `GHCR_PULL_TOKEN=... make railway-registry ENV=pr-123` and `make deploy ENV=pr-123 TAG=sha-<commit>` (any commit CI built
-on `main`); its api has its own Railway domain. `make env-down ENV=pr-123` deletes it with its data. `production` is never
+on `main`); its api and console have their own Railway domains. `make env-down ENV=pr-123` deletes it with its data. `production` is never
 deleted by `make`. CI does not make these: its token is scoped to `production` and cannot create environments (ADR 0011).
 
 ## Releasing
 
-A merge to `main` is a release. CI (`.github/workflows/ci.yml`) runs `check` and `test`, builds the three images and pushes
+A merge to `main` is a release. CI (`.github/workflows/ci.yml`) runs `check` and `test`, builds the four images and pushes
 them as `sha-<commit>`, then the `release` job: `railway config apply --yes` on production (a deletion fails here: review
-it with `make railway-plan` and run `railway config apply` yourself), `scripts/railway.ts registry`, and
+it with `make railway-plan` and run `railway config apply` yourself), `scripts/railway.ts secrets` and `domains` (a secret
+or public service the IaC file just added is created once, never replaced), `scripts/railway.ts registry`, and
 `scripts/railway.ts deploy production sha-<commit>`, which moves each service's `production` tag and redeploys control,
-then api and worker, waiting for each. Pull requests show the IaC plan in the `railway-plan` check. If a deployment fails,
+then api, worker and console, waiting for each. When the IaC file adds a service, `config apply` creates it pointing at
+an image tag that does not exist yet, so its first deployment fails (and the project webhook reports it) until `deploy`
+moves the tag a minute later. Pull requests show the IaC plan in the `railway-plan` check. If a deployment fails,
 read why with `railway logs --service <name>`; roll back with `make deploy TAG=sha-<previous commit>`.
 
 CI needs two repository secrets, made once by a person:
@@ -178,7 +195,10 @@ on purpose: a generated value there would be made again on every apply.
 - **Lost `TENANT_DB_KEYS`**: nothing is stranded. Set a new key, delete every row of `tenant_db_credentials` (psql below,
   database `railway`), and redeploy: control gives every tenant a new password before api and worker start.
 - Only `control` holds the administrative database URL. `api` and `worker` connect to the control database as the limited
-  `kerby_app` role, which control creates (migration 0002) and gives its password at start: deploy control first.
+  `kerby_app` role (migration 0002), the console as `kerby_console` (migration 0005); control creates both and gives them
+  their passwords (`APP_DATABASE_PASSWORD`, `CONSOLE_DATABASE_PASSWORD`) at start: deploy control first.
+- `CONSOLE_TOKEN` lives on `control`, and `console` references it: it opens control's sign-up route and nothing else. To
+  rotate it, or `CONSOLE_DATABASE_PASSWORD`, set a new value on `control` and redeploy control, then console.
 - The buckets' keys are references (`${{kerby.ACCESS_KEY_ID}}`), so resetting them needs no change here; redeploy the services.
   Only `control` references the keys of `kerby-exports` and `kerby-backup` (`EXPORT_S3_*`, `BACKUP_S3_*`).
 
@@ -204,10 +224,11 @@ on purpose: a generated value there would be made again on every apply.
   | api     | `2 × max(maxPools, D + R) + D + 10`     | `maxPools` 50 tenant pools of 2; `D` tenants with an open event stream here (at most `MAX_STREAMS_PER_PROCESS`, 60), each also holding one shared `LISTEN` connection; `R` tenants with a request in flight; a control pool of 10                   |
   | worker  | `2 × max(maxPools, min(C, W)) + 10 + 1` | `C` turns at once across all tenants (`MAX_RUNNING_TURNS`, default 50); `W` tenants with a turn running or being claimed here, each holding its pool for as long as it does, so at most `C`; the control pool; one `LISTEN` on the control database |
   | control | `2 × maxPools + 10 + 2 + 1`             | tenant pools (migration fan-out, exports); the control pool; the cluster admin's pool; one connection while provisioning                                                                                                                            |
+  | console | `5`                                     | the control pool, as `kerby_console`; the console opens no tenant database                                                                                                                                                                          |
 
   The sum over all processes, plus `superuser_reserved_connections` (3) and room for operators' `psql` (say 17), must
-  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 111 + control 113 + 20 = 454
-  of 500. Each extra worker adds 111 and each extra api 210: raise `max_connections` by as much first (and
+  stay under `max_connections`. Today's shape (one of each, `R` up to 10): api 210 + worker 111 + control 113 + console 5 +
+  20 = 459 of 500. Each extra worker adds 111 and each extra api 210: raise `max_connections` by as much first (and
   `TENANT_ROLE_CONNECTION_LIMIT`, below), or lower `MAX_STREAMS_PER_PROCESS` on the api. The worker's 111 holds at
   `MAX_RUNNING_TURNS` 50 however many tenants run at once: past the cap a worker claims nothing more and queues the
   tenants that ask, longest-waiting first. Raising it to `C` above 50 costs 2 connections per extra tenant, up to
@@ -239,7 +260,7 @@ on purpose: a generated value there would be made again on every apply.
 ## Cost
 
 Railway bills by use: CPU and memory of running containers, volume size, bucket storage and network egress. Nothing sleeps
-(ADR 0007), so the floor is Postgres plus three small services running all month; see the project's usage page for the
+(ADR 0007), so the floor is Postgres plus four small services running all month; see the project's usage page for the
 real figure rather than an estimate here.
 
 ## Observing
@@ -247,10 +268,12 @@ real figure rather than an estimate here.
 `railway logs --service <name>` (add `--lines N`), `railway metrics --service <name> --since 1h`. Logs are JSON with
 `tenantId` and never message content: a `request` line per API request (status 429 for a tenant over its request
 rate), `turn completed`, `turn failed for good`, `history cut to its budget` (a turn started without its oldest turns).
-`api` runs with `TRUST_PROXY=true`: Railway's edge sets `X-Forwarded-For` with the client first, and the failed-auth
-limit counts that address; without it every client would share the proxy's.
+`api` and `console` run with `TRUST_PROXY=true`: Railway's edge sets `X-Forwarded-For` with the client first, and the
+failed-auth limit (api) and the sign-up and sign-in limits (console) count that address; without it every client would
+share the proxy's. The console logs `console sign-up` (tenant id and person id, never the email) and `request failed`;
+Next.js prints a few plain-text lines at start.
 `make logs-query ENV=production` reads them and keeps the lines that match `TENANT=<id>`, `LEVEL=warn` (that level and
-worse), `MSG=<substring>`, `SERVICE=<control|api|worker>`, `SINCE=`/`UNTIL=` (`30m`, `2h`, `1d` back from now, or ISO
+worse), `MSG=<substring>`, `SERVICE=<control|api|worker|console>`, `SINCE=`/`UNTIL=` (`30m`, `2h`, `1d` back from now, or ISO
 8601; Railway's default here is the last hour), one JSON line each, oldest first. Run it from a checkout linked with
 `railway link`; Railway serves the current deployment's logs this way, older ones are in the dashboard. Without `ENV`
 it reads the local stack. An alert's `msg` is its kind (below), so `MSG='turn failed'` finds those too.
@@ -298,7 +321,7 @@ Production (2026-11-22): a Slack app with an incoming webhook into the alerts ch
 ## Do not do
 
 - Do not replace `TENANT_DB_KEYS` in one step on a live system: add the new key first (Secrets, above).
-- Do not give `control` a public domain.
+- Do not give `control` a public domain, or the console the operator token or the administrative database URL.
 - Do not delete `production` or its Postgres volume: backups belong to the volume.
 
 ## Known gaps

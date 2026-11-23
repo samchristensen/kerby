@@ -1,8 +1,11 @@
-// The operator API: tenant lifecycle and keys, behind one bearer token. Never exposed to tenants.
+// The operator API: tenant lifecycle and keys, behind one bearer token. Never exposed to tenants. One more route,
+// self-serve sign-up, takes the console's token instead, which opens nothing else (ADR 0014).
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   type ApiKey,
   type BackupResponse,
+  ConsoleSignupRequestSchema,
+  type ConsoleSignupResponse,
   CreateKeyRequestSchema,
   type CreateKeyResponse,
   CreateTenantRequestSchema,
@@ -31,6 +34,7 @@ import { rotateTenantDbPassword } from "../service/db-credentials.ts";
 import { exportTenant, reissueExportUrls } from "../service/export.ts";
 import { createKey, listKeys, revokeKey, rotateKey } from "../service/keys.ts";
 import { migrateAllTenants } from "../service/migrate.ts";
+import { signUp } from "../service/signups.ts";
 import {
   deleteTenant,
   getTenantRecord,
@@ -73,27 +77,47 @@ function mapErrors(handler: Route[2]): Route[2] {
       return await handler(request, params, client);
     } catch (error) {
       if (error instanceof NotFoundError) throw new HttpError(404, "not_found", error.message);
-      if (error instanceof ConflictError) throw new HttpError(409, "conflict", error.message);
+      if (error instanceof ConflictError) throw new HttpError(409, error.code, error.message);
       throw error;
     }
   };
 }
 
-export function createControlApp(deps: ControlDeps, operatorToken: string): FetchHandler {
-  const expected = digest(operatorToken);
-  const authorized = (handler: Route[2]): Route[2] =>
-    mapErrors(async (request, params, client) => {
-      const presented = bearerToken(request);
-      // Compare digests so length and content do not leak through timing.
-      if (!presented || !timingSafeEqual(digest(presented), expected)) {
-        throw new HttpError(401, "unauthorized", "a valid operator token is required");
-      }
-      return handler(request, params, client);
-    });
+/** Bearer tokens: the operator's opens every operator route; the console's, when set, opens sign-up only. */
+export type ControlTokens = { operator: string; console?: string | undefined };
+
+export function createControlApp(deps: ControlDeps, tokens: ControlTokens): FetchHandler {
+  const bearer =
+    (expected: Buffer | undefined, what: string) =>
+    (handler: Route[2]): Route[2] =>
+      mapErrors(async (request, params, client) => {
+        const presented = bearerToken(request);
+        // Compare digests so length and content do not leak through timing.
+        if (!expected || !presented || !timingSafeEqual(digest(presented), expected)) {
+          throw new HttpError(401, "unauthorized", `a valid ${what} token is required`);
+        }
+        return handler(request, params, client);
+      });
+  const authorized = bearer(digest(tokens.operator), "operator");
+  const fromConsole = bearer(tokens.console ? digest(tokens.console) : undefined, "console");
 
   const id = (params: Record<string, string>) => params.id ?? "";
   const routes: Route[] = [
     ["GET", "/healthz", () => json(200, { ok: true })],
+    [
+      "POST",
+      "/v1/console/signups",
+      fromConsole(async (request) => {
+        const body = await readJson(request, ConsoleSignupRequestSchema);
+        const { tenant, key, userId } = await signUp(deps, body);
+        const response: ConsoleSignupResponse = {
+          tenantId: tenant.id,
+          userId,
+          secret: key.secret,
+        };
+        return json(201, response);
+      }),
+    ],
     [
       "POST",
       "/v1/operator/tenants",

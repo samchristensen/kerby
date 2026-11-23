@@ -11,10 +11,16 @@
       "ignoreDependencies": ["@biomejs/biome"]
     },
     // Each workspace's other entries come from its package.json `exports`: `src/index.ts` (a service's too), and the
-    // `./testing` and `./providers` subpaths.
+    // `./testing` and `./providers` subpaths. The console's pages and `next.config.ts` come from knip's Next.js plugin.
     "services/*": {
       "entry": ["src/**/*.test.ts"],
-      "project": ["src/**/*.ts"]
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "services/console": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.{ts,tsx}"],
+      // Imported from CSS (`@import "tailwindcss"` in src/app/globals.css), which knip does not read.
+      "ignoreDependencies": ["tailwindcss"]
     },
     "packages/*": {
       "entry": ["src/**/*.test.ts"],

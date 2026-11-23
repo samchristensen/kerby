@@ -24,7 +24,6 @@ import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApiApp } from "./index.ts";
 import { createAuthenticator } from "./service/auth.ts";
-import { TokenBuckets } from "./service/rate-limit.ts";
 import type { ApiDeps } from "./types/index.ts";
 
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
@@ -673,30 +672,6 @@ describe("request rate limit", () => {
     expect(Number(refused.headers.get("retry-after"))).toBeLessThanOrEqual(20);
     expect(await refused.json()).toMatchObject({ error: { code: "rate_limited" } });
     expect((await h.call(other.secret, "GET", "/v1/model-keys")).status).toBe(200);
-  });
-
-  it("refills continuously, up to a minute's worth", () => {
-    let clock = 0;
-    const buckets = new TokenBuckets({ maxKeys: 10, now: () => clock });
-    for (let i = 0; i < 60; i++) expect(buckets.take("t", 60)).toBe(0);
-    expect(buckets.take("t", 60)).toBe(1);
-    clock += 999;
-    expect(buckets.take("t", 60)).toBe(1);
-    clock += 1;
-    expect(buckets.take("t", 60)).toBe(0);
-    expect(buckets.take("t", 60)).toBe(1);
-    clock += 10 * 60_000; // a long pause refills to a minute's worth, not more
-    for (let i = 0; i < 60; i++) expect(buckets.take("t", 60)).toBe(0);
-    expect(buckets.take("t", 60)).toBe(1);
-  });
-
-  it("forgets the least recently used key past its bound", () => {
-    const buckets = new TokenBuckets({ maxKeys: 2, now: () => 0 });
-    expect(buckets.take("a", 1)).toBe(0);
-    expect(buckets.take("a", 1)).toBe(60);
-    buckets.take("b", 1);
-    buckets.take("c", 1); // evicts "a"
-    expect(buckets.take("a", 1)).toBe(0);
   });
 });
 

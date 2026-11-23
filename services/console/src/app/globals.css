@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+html {
+  background-color: var(--color-zinc-50);
+  color: var(--color-zinc-900);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-indigo-500);
+  outline-offset: 2px;
+}
