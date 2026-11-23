@@ -1813,7 +1813,7 @@ describe("tools (ADR 0019)", () => {
         detail: {
           serverId: record?.id,
           slug: "docs",
-          url: "https://docs.example.com/mcp",
+          url: "https://docs.example.com",
           auth: "header",
           header: "Authorization",
         },
@@ -1839,6 +1839,22 @@ describe("tools (ADR 0019)", () => {
       credential: CREDENTIAL,
     });
     expect(plain.status).toBe(400);
+
+    // One transaction: when the listing cannot be enqueued, the server is not made either.
+    await t.database.db.query(`
+      create function refuse_sync() returns trigger language plpgsql as $$
+        begin raise exception 'the task queue is down'; end $$;
+      create trigger refuse_sync before insert on absurd.t_turns
+        for each row execute function refuse_sync();
+    `);
+    const failed = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "lost",
+      url: "https://lost.example.com/mcp",
+    });
+    expect(failed.status).toBe(500);
+    expect(await findToolServer(t.ctx.db, "lost")).toBeUndefined();
+    await t.database.db.query("drop trigger refuse_sync on absurd.t_turns");
+    expect(await syncTasks(t)).toEqual([record?.id]);
   });
 
   it("refuses more than MAX_TOOL_SERVERS servers", async () => {
@@ -1884,7 +1900,7 @@ describe("tools (ADR 0019)", () => {
     });
     // header auth with a stored credential: a new URL keeps it
     const moved = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs", {
-      url: "https://moved.example.com/mcp",
+      url: "https://moved.example.com/mcp/s3cret-path-token",
     });
     expect(moved.status).toBe(202);
     expect(ToolServerSchema.parse(await moved.json()).hasCredential).toBe(true);
@@ -1918,6 +1934,15 @@ describe("tools (ADR 0019)", () => {
       "tool_server.sync",
       "tool_server.update",
     ]);
+    // A hosted server may keep a secret in its path: the audit log has the origin only.
+    const urls = await h.control.db.query<{ url: string }>(
+      "select detail->>'url' as url from audit_log where action = 'tool_server.update' order by id",
+    );
+    expect(urls.rows.map((row) => row.url)).toEqual([
+      "https://docs.example.com",
+      "https://moved.example.com",
+      "https://moved.example.com",
+    ]);
     expect(
       (
         await h.call(t.secret, "PATCH", "/v1/tool-servers/missing", {
@@ -1946,6 +1971,7 @@ describe("tools (ADR 0019)", () => {
       effect: "read",
       drifted: false,
       listed: null,
+      listedHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     const unusable = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/a.b", {
       enabled: true,
@@ -1996,6 +2022,59 @@ describe("tools (ADR 0019)", () => {
         }),
       },
     ]);
+  });
+
+  it("refuses enabling or accepting a definition other than the one the caller was shown", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search"]);
+    const shownTool = async () =>
+      ToolServerSchema.parse(await (await h.call(t.secret, "GET", "/v1/tool-servers/docs")).json())
+        .tools[0];
+    const shown = (await shownTool())?.listedHash;
+    // The server changes the tool's description before the admin clicks.
+    const record = await findToolServer(t.ctx.db, "docs");
+    await recordSync(t.ctx.db, record?.id ?? "", {
+      tools: [{ name: "search", definition: { description: "now it deletes", inputSchema: {} } }],
+    });
+    const stale = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/search", {
+      enabled: true,
+      expectedDefinition: shown,
+    });
+    expect(stale.status).toBe(409);
+    expect(await errorOf(stale)).toEqual({
+      code: "definition_changed",
+      message: "the server lists a different definition now: reload and review it",
+    });
+    expect((await shownTool())?.enabled).toBe(false);
+    const current = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/search", {
+      enabled: true,
+      expectedDefinition: (await shownTool())?.listedHash,
+    });
+    expect(current.status).toBe(200);
+    expect(ToolSchema.parse(await current.json())).toMatchObject({
+      enabled: true,
+      definition: { description: "now it deletes" },
+    });
+  });
+
+  it("serves a tenant whose tool tables are not there yet (schema n-1), as long as no tools are named", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { secret } = await restrictedKey(h, t);
+    await t.database.db.query(
+      "drop table tool_oauth_flows, conversation_tools, integration_tools, tools, tool_servers",
+    );
+    const conversation = await newConversation(h, t.secret);
+    expect(conversation.tools).toEqual([]);
+    const read = await h.call(t.secret, "GET", `/v1/conversations/${conversation.id}`);
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as GetConversationResponse).conversation.tools).toEqual([]);
+    const posted = await h.call(secret, "POST", `/v1/conversations/${conversation.id}/messages`, {
+      content: "hello",
+    });
+    expect(posted.status).toBe(202);
   });
 
   it("grants tools to an integration of the tenant, and only of the tenant", async () => {

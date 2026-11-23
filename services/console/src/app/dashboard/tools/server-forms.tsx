@@ -281,7 +281,10 @@ export function RefreshWhileSyncing({ slug }: { slug: string }) {
   return null;
 }
 
-/** A tool's enabled switch, its effect, and "accept the new definition" when it drifted. */
+/**
+ * A tool's enabled switch, its effect, and "accept the new definition" when it drifted. Enabling and accepting send
+ * the hash of the definition this page shows, so the api refuses them when the server lists another one since.
+ */
 export function ToolControls({ slug, tool }: { slug: string; tool: Tool }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -301,7 +304,13 @@ export function ToolControls({ slug, tool }: { slug: string; tool: Tool }) {
             type="checkbox"
             checked={tool.enabled}
             disabled={pending || (cannot && !tool.enabled)}
-            onChange={(event) => change({ enabled: event.target.checked })}
+            onChange={(event) =>
+              change(
+                event.target.checked
+                  ? { enabled: true, expectedDefinition: tool.listedHash }
+                  : { enabled: false },
+              )
+            }
           />
           Enabled
         </label>
@@ -324,7 +333,7 @@ export function ToolControls({ slug, tool }: { slug: string; tool: Tool }) {
             type="button"
             disabled={pending}
             className={buttonStyles.secondary}
-            onClick={() => change({ acceptDefinition: true })}
+            onClick={() => change({ acceptDefinition: true, expectedDefinition: tool.listedHash })}
           >
             Accept the new definition
           </button>
