@@ -272,6 +272,9 @@ on purpose: a generated value there would be made again on every apply.
   railway ssh --service control -- sh -c 'psql "$CLUSTER_ADMIN_URL" -tAc "show max_connections"'   # 550
   ```
 
+  `railway restart` may not return even though Postgres restarted: check `select pg_postmaster_start_time()` through the
+  same `railway ssh` instead of waiting on it.
+
   `ALTER SYSTEM` writes `postgresql.auto.conf` on the volume, so the value survives restarts and redeploys. Neither the
   template nor `railway postgres` (only `pitr`, `ha`, `pgbouncer`) has a setting for it, and a custom start command
   (`-c max_connections=...`) would make the database ours to manage instead of Railway's. A new environment
