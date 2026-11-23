@@ -2,7 +2,7 @@
 // Choosing tools by pattern (ADR 0019), grouped by server: a whole server (`<server>/*`, every tool it enables, as it is
 // at each turn) or single tools (`<server>/<tool>`). In a form each checked pattern is a field `tool:<pattern>`.
 import type { AvailableTool } from "@kerby/contracts";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Choice = Pick<AvailableTool, "pattern" | "title" | "description" | "effect">;
 
@@ -23,6 +23,10 @@ export function ToolPicker({
   onChange?: (patterns: string[]) => void;
 }) {
   const [checked, setChecked] = useState(() => new Set(selected));
+  // React resets a form after its action runs, which unchecks these controlled boxes in the page while `checked` still
+  // holds them: the next submit would drop them. On a reset, remount the boxes from `checked`.
+  const [generation, setGeneration] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
   const offered = new Set(available.map((tool) => tool.pattern));
   const extra: Choice[] = selected
     .filter((pattern) => !pattern.endsWith("/*") && !offered.has(pattern))
@@ -35,6 +39,14 @@ export function ToolPicker({
       ...selected.map(slugOf),
     ]),
   ];
+  const listed = slugs.length > 0;
+  useEffect(() => {
+    const form = listed ? root.current?.closest("form") : null;
+    if (!form) return;
+    const remount = () => setGeneration((n) => n + 1);
+    form.addEventListener("reset", remount);
+    return () => form.removeEventListener("reset", remount);
+  }, [listed]);
 
   const toggle = (pattern: string, on: boolean) => {
     const next = new Set(checked);
@@ -52,12 +64,12 @@ export function ToolPicker({
     );
   }
   return (
-    <div className="space-y-4">
+    <div ref={root} className="space-y-4">
       {slugs.map((slug) => {
         const whole = `${slug}/*`;
         const wholeChecked = checked.has(whole);
         return (
-          <fieldset key={slug} className="rounded-lg border border-line p-3">
+          <fieldset key={`${generation}:${slug}`} className="rounded-lg border border-line p-3">
             <legend className="px-1 font-mono text-sm font-medium text-fg">{slug}</legend>
             <label className="flex items-start gap-2 text-sm">
               <input
