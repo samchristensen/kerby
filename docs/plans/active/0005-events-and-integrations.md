@@ -44,7 +44,7 @@ compatibility shims.
 - [x] Real stack: a signed webhook received and verified at a local receiver; polling and long-poll; a rotated secret
   signs twice; a dead endpoint retried and its attempts listed
 - [x] `make multitenant`: cross-tenant and cross-integration attempts on events and subscriptions refused
-- [ ] Production: `DELIVERY_SECRETS_*` created by `make railway-setup`, the dispatcher deployed (needs the owner's go)
+- [x] Production: `DELIVERY_SECRETS_*` created by `make railway-setup`, the dispatcher deployed (needs the owner's go)
 
 ## Not in this plan
 
@@ -80,3 +80,12 @@ tenant-wide SSE stream, a CLI that forwards events to localhost, an API for inte
   serializes commits cluster-wide. Integration and subscription lookups compare uuids with `isUuid` guards (rule
   `queries`). Keys keep the 50-per-tenant cap (the console's integration page explains the refusal). The integration
   pages use the Operator tokens. `make check` and `make test` green (514 tests).
+- 2026-11-23 Production (owner's go): `max_connections` 500 → 550 and Postgres restarted (services reconnected within
+  seconds); PR #22 merged and released (`0009_integrations.sql` applied by control's pre-deploy migrate, one `default`
+  integration per tenant; `dispatcher` up with `allowLocalDestinations=false`); `DELIVERY_SECRETS_PRIVATE_KEYS` copied to
+  the keychain and `publicKeyOf(copy)` equals the api's public key. A throwaway tenant: `GET /v1/events` and a 2 s
+  long-poll answered; a plain-http destination refused (400 `invalid_destination`); a test ping to
+  `https://example.com/kerby-hook` went out through egress and came back 405, logged `failed`, retry queued, with the
+  dispatcher's log naming the subscription and never the URL; the tenant was deleted. Found there: a deleted tenant's key
+  gets 500 ("no stored database password") for up to `AUTH_CACHE_SECONDS` (30), then 401. The auth cache predates this
+  plan, so this is a tech-debt candidate, not a blocker.
