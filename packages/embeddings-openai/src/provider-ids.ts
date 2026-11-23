@@ -9,6 +9,8 @@
 // - mistral: https://docs.mistral.ai/api/endpoint/embeddings (POST https://api.mistral.ai/v1/embeddings)
 // - fireworks: https://docs.fireworks.ai/guides/querying-embeddings-models (base https://api.fireworks.ai/inference/v1)
 // - openrouter: https://openrouter.ai/docs/api/api-reference/embeddings/create-embeddings (POST https://openrouter.ai/api/v1/embeddings)
+// - opencode: https://opencode.ai/docs/console/models/#embedding-models (POST https://opencode.ai/inference/openai/v1/embeddings
+//   with a Console key; the docs say OpenCode Go and the free tier do not include embedding models)
 // Left out: together, whose embeddings run only on dedicated endpoints (https://docs.together.ai/reference/embeddings),
 // so no model id works with a plain chat key.
 export const EMBEDDING_PROVIDERS = [
@@ -17,6 +19,7 @@ export const EMBEDDING_PROVIDERS = [
   "mistral",
   "fireworks",
   "openrouter",
+  "opencode",
 ] as const;
 
 export type EmbeddingProviderId = (typeof EMBEDDING_PROVIDERS)[number];
@@ -28,4 +31,5 @@ export const SUGGESTED_EMBEDDING_MODELS: Record<EmbeddingProviderId, string> = {
   mistral: "mistral/mistral-embed",
   fireworks: "fireworks/nomic-ai/nomic-embed-text-v1.5",
   openrouter: "openrouter/openai/text-embedding-3-small",
+  opencode: "opencode/text-embedding-3-small",
 };

@@ -135,8 +135,9 @@ in the conversation's `lastError`. There is no alert; judgments `failed` after f
 the worker after each turn on the Absurd queue `index` and queried with `POST /v1/search` (scope `conversations`; a key
 without `tenant` finds only its integration's chats) or the console's chat list. Keyword search needs nothing. Semantic
 search needs an embedding model (`PUT /v1/search/settings`, scope `admin`, or the console's Search page) and the
-tenant's key for its provider (`openai`, `google`, `mistral`, `fireworks`, `openrouter`: the same key as for chat), so
-the worker needs outbound HTTPS to those providers too. Setting a model starts a backfill that re-embeds every chat;
+tenant's key for its provider (`openai`, `google`, `mistral`, `fireworks`, `openrouter`, `opencode`: the same key as for
+chat; OpenCode's is the Console key, since Go and the free tier do not include embedding models), so the worker needs
+outbound HTTPS to those providers too (`opencode.ai` it already needs for decisions). Setting a model starts a backfill that re-embeds every chat;
 `GET /v1/search/settings` shows `chunks`, `embedded` and the last refusal (`lastError`, e.g. a key that was removed).
 The worker runs indexing and searches in their own lanes (`MAX_RUNNING_INDEX_TASKS`, default 2, one per tenant;
 `MAX_RUNNING_SEARCHES`, default 4, four per tenant), never in a turn's slot. Usage lands in `usage` as the embedding model
