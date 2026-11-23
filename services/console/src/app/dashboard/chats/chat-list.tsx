@@ -28,6 +28,8 @@ function ChatItem({ chat }: { chat: ChatSummaryView }) {
           </span>
           {chat.origin === "console" ? (
             <Badge tone="indigo">Console</Badge>
+          ) : chat.origin === "studio" ? (
+            <Badge tone="green">Studio</Badge>
           ) : (
             <Badge tone="zinc">API</Badge>
           )}

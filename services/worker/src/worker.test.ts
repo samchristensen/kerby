@@ -15,7 +15,7 @@ import {
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
 import { type TenantDb, TenantPools } from "@kerby/db";
-import { readTask, spawnInTx } from "@kerby/durable";
+import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
 import type {
   JudgmentOutcome,
   JudgmentProvider,
@@ -776,7 +776,12 @@ describe("judgments", () => {
   type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
 
   /** Enqueue a judgment the way the api does. */
-  async function submit(h: Harness, t: Tenant, body: JudgmentRequest = request, notify = true) {
+  async function submit(
+    h: Harness,
+    t: Tenant,
+    body: TaskParams["run-judgment"] = request,
+    notify = true,
+  ) {
     const { taskId } = await t.ctx.db.transaction((tx) =>
       spawnInTx(tx, "run-judgment", body, { idempotencyKey: `judgment:${crypto.randomUUID()}` }),
     );
@@ -819,6 +824,17 @@ describe("judgments", () => {
         output_tokens: 3,
       },
     ]);
+  });
+
+  it("asks the provider without the prompt a judgment's questions came from", async () => {
+    const calls: JudgmentRun[] = [];
+    const h = await harness({ judgments: [provider(calls)], modelKeys: async () => "key-0123" });
+    const t = await h.tenant("acme");
+    const id = await submit(h, t, { ...request, prompt: { name: "support/triage", version: 3 } });
+    expect((await finished(t, id)).result).toMatchObject({ type: "answered" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty("prompt");
+    expect(calls[0]).toMatchObject({ ...request, apiKey: "key-0123" });
   });
 
   it("refuses a judgment when the tenant has no key, without calling the provider or retrying", async () => {

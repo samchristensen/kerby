@@ -25,6 +25,7 @@ import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { createApiApp } from "./index.ts";
 import { createAuthenticator } from "./service/auth.ts";
 import type { ApiDeps } from "./types/index.ts";
@@ -949,6 +950,7 @@ describe("judgments", () => {
       status: "pending",
       model: "typesafe/jev-latest",
       createdAt: expect.any(String),
+      prompt: null,
     });
 
     await work(t, async () => answered);
@@ -957,6 +959,7 @@ describe("judgments", () => {
       status: "answered",
       model: "typesafe/jev-latest",
       createdAt: expect.any(String),
+      prompt: null,
       servedModel: "jev-2026-01",
       answers: answered.answers,
       usage: answered.usage,
@@ -1138,5 +1141,372 @@ describe("judgments", () => {
       }
       expect((await t.ctx.db.query("select 1 from conversations")).rowCount).toBe(0);
     });
+  });
+});
+
+describe("prompts", () => {
+  const KEY = "ts-key-0123456789abcdef";
+  const NAME = "support/triage";
+  /** The name as one path segment. */
+  const path = `/v1/prompts/${encodeURIComponent(NAME)}`;
+  const chatDraft = {
+    kind: "chat",
+    text: "You help {{customer}} in a {{ tone }} voice.",
+    variables: [{ name: "customer" }, { name: "tone", default: "warm" }],
+  };
+
+  /** Create a chat prompt and publish `texts` as its versions 1, 2, ... */
+  async function publishedChat(h: Harness, t: Tenant, texts: string[], name = NAME) {
+    const segment = `/v1/prompts/${encodeURIComponent(name)}`;
+    expect((await h.call(t.secret, "POST", "/v1/prompts", { name, kind: "chat" })).status).toBe(
+      201,
+    );
+    for (const [i, text] of texts.entries()) {
+      const saved = await h.call(t.secret, "PUT", `${segment}/draft`, {
+        revision: i,
+        draft: { ...chatDraft, text },
+      });
+      expect(saved.status).toBe(200);
+      const published = await h.call(t.secret, "POST", `${segment}/versions`, {
+        revision: i + 1,
+      });
+      expect(published.status).toBe(201);
+    }
+  }
+
+  const ErrorBody = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
+  const errorOf = async (response: Response) => ErrorBody.parse(await response.json()).error;
+
+  it("creates, saves, publishes and labels a prompt named by one path segment, and audits it by id", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const created = await h.call(t.secret, "POST", "/v1/prompts", { name: NAME, kind: "chat" });
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ name: NAME, draftRevision: 0, versions: [] });
+    expect(
+      await errorOf(await h.call(t.secret, "POST", "/v1/prompts", { name: NAME, kind: "chat" })),
+    ).toMatchObject({ code: "name_taken" });
+
+    const saved = await h.call(t.secret, "PUT", `${path}/draft`, { revision: 0, draft: chatDraft });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ draftRevision: 1, draft: chatDraft });
+    const stale = await h.call(t.secret, "PUT", `${path}/draft`, { revision: 0, draft: chatDraft });
+    expect(stale.status).toBe(409);
+    expect(await errorOf(stale)).toMatchObject({ code: "draft_conflict" });
+    const wrongKind = await h.call(t.secret, "PUT", `${path}/draft`, {
+      revision: 1,
+      draft: { kind: "decision", questions: {} },
+    });
+    expect(wrongKind.status).toBe(400);
+    expect(await errorOf(wrongKind)).toMatchObject({ code: "wrong_kind" });
+
+    // A chat model must be one the harness runs; every problem is named.
+    await h.call(t.secret, "PUT", `${path}/draft`, {
+      revision: 1,
+      draft: { ...chatDraft, text: "Hi {{customer}}", model: "typesafe/jev-latest" },
+    });
+    const refused = await h.call(t.secret, "POST", `${path}/versions`, { revision: 2 });
+    expect(refused.status).toBe(400);
+    expect(await errorOf(refused)).toMatchObject({
+      code: "not_publishable",
+      message: expect.stringMatching(/tone is declared.*"typesafe" does not run conversations/),
+    });
+
+    await h.call(t.secret, "PUT", `${path}/draft`, { revision: 2, draft: chatDraft });
+    const published = await h.call(t.secret, "POST", `${path}/versions`, {
+      revision: 3,
+      note: "first",
+    });
+    expect(published.status).toBe(201);
+    expect(await published.json()).toMatchObject({
+      version: 1,
+      note: "first",
+      publishedBy: `key:${t.key.id}`,
+    });
+    const again = await h.call(t.secret, "POST", `${path}/versions`, { revision: 3 });
+    expect(again.status).toBe(409);
+    expect(await errorOf(again)).toMatchObject({ code: "unchanged" });
+
+    const labelled = await h.call(t.secret, "PUT", `${path}/labels/production`, { version: 1 });
+    expect(labelled.status).toBe(200);
+    expect(await labelled.json()).toMatchObject({ labels: { production: 1 }, latestVersion: 1 });
+    for (const version of ["1", "production", "latest"]) {
+      const read = await h.call(t.secret, "GET", `${path}/versions/${version}`);
+      expect(read.status).toBe(200);
+      expect(await read.json()).toMatchObject({ name: NAME, version: 1, body: chatDraft });
+    }
+    expect((await h.call(t.secret, "GET", `${path}/versions/2`)).status).toBe(404);
+    expect((await h.call(t.secret, "GET", `${path}/versions/staging`)).status).toBe(404);
+    const latest = await h.call(t.secret, "PUT", `${path}/labels/latest`, { version: 1 });
+    expect(latest.status).toBe(400);
+    expect(await errorOf(latest)).toMatchObject({ code: "invalid_request" });
+    expect((await h.call(t.secret, "PUT", `${path}/labels/staging`, { version: 7 })).status).toBe(
+      404,
+    );
+
+    const rendered = await h.call(t.secret, "POST", `${path}/versions/production/render`, {
+      variables: { customer: "Ada" },
+    });
+    expect(await rendered.json()).toEqual({
+      name: NAME,
+      version: 1,
+      text: "You help Ada in a warm voice.",
+      model: null,
+      guardrails: [],
+    });
+    const missing = await h.call(t.secret, "POST", `${path}/versions/1/render`, {});
+    expect(missing.status).toBe(400);
+    expect(await errorOf(missing)).toMatchObject({
+      code: "invalid_variables",
+      message: expect.stringContaining("customer"),
+    });
+
+    // Clients may now depend on the name: it stays.
+    const rename = await h.call(t.secret, "PATCH", path, { name: "support/other" });
+    expect(await errorOf(rename)).toMatchObject({ code: "prompt_published" });
+    expect(await errorOf(await h.call(t.secret, "DELETE", path))).toMatchObject({
+      code: "prompt_published",
+    });
+    expect((await h.call(t.secret, "DELETE", `${path}/labels/production`)).status).toBe(204);
+    expect((await h.call(t.secret, "DELETE", `${path}/labels/production`)).status).toBe(404);
+
+    // An unpublished prompt can be renamed and deleted.
+    await h.call(t.secret, "POST", "/v1/prompts", { name: "scratch", kind: "decision" });
+    const renamed = await h.call(t.secret, "PATCH", "/v1/prompts/scratch", { name: "tmp/scratch" });
+    expect(await renamed.json()).toMatchObject({ name: "tmp/scratch", kind: "decision" });
+    expect((await h.call(t.secret, "DELETE", "/v1/prompts/tmp%2Fscratch")).status).toBe(204);
+    const list = await h.call(t.secret, "GET", "/v1/prompts?kind=chat");
+    expect(await list.json()).toMatchObject({ prompts: [{ name: NAME, latestVersion: 1 }] });
+    expect((await h.call(t.secret, "GET", "/v1/prompts?kind=other")).status).toBe(400);
+    expect((await h.call(t.secret, "GET", "/v1/prompts/Not%20A%20Name")).status).toBe(404);
+
+    const audit = await h.control.db.query<{ actor: string; action: string; detail: object }>(
+      "select actor, action, detail from audit_log where tenant_id = $1 and action like 'prompt.%' order by id",
+      [t.id],
+    );
+    expect(audit.rows.map((row) => row.action)).toEqual([
+      "prompt.create",
+      "prompt.publish",
+      "prompt.label",
+      "prompt.label",
+      "prompt.create",
+      "prompt.rename",
+      "prompt.delete",
+    ]);
+    expect(audit.rows[1]).toMatchObject({
+      actor: `key:${t.key.id}`,
+      detail: { promptId: expect.any(String), version: 1 },
+    });
+    expect(JSON.stringify(audit.rows)).not.toContain("triage");
+    expect(JSON.stringify(audit.rows)).not.toContain("scratch");
+  });
+
+  it("records the person who publishes from the console", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const session = await h.signIn(t.id);
+    await h.call(session, "POST", "/v1/prompts", { name: NAME, kind: "chat", draft: chatDraft });
+    const published = await h.call(session, "POST", `${path}/versions`, { revision: 0 });
+    expect(await published.json()).toMatchObject({ publishedBy: expect.stringMatching(/^user:/) });
+  });
+
+  it("keeps one tenant's prompts invisible to another", async () => {
+    const h = await harness();
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    await publishedChat(h, a, ["A's words {{customer}} {{tone}}"]);
+    expect((await h.call(b.secret, "GET", path)).status).toBe(404);
+    expect((await h.call(b.secret, "GET", `${path}/versions/latest`)).status).toBe(404);
+    expect(
+      (
+        await h.call(b.secret, "POST", "/v1/conversations", {
+          prompt: { name: NAME, version: 1, variables: { customer: "x" } },
+        })
+      ).status,
+    ).toBe(404);
+    expect(await (await h.call(b.secret, "GET", "/v1/prompts")).json()).toEqual({ prompts: [] });
+    // The name is free in b's database.
+    expect(
+      (await h.call(b.secret, "POST", "/v1/prompts", { name: NAME, kind: "chat" })).status,
+    ).toBe(201);
+    expect((await h.call(null, "GET", "/v1/prompts")).status).toBe(401);
+  });
+
+  it("refuses a prompt past the tenant's limits and storage quota", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme", { storageBytes: 300 });
+    await t.ctx.db.query(
+      `insert into prompts (name, kind, draft, draft_bytes, draft_updated_by)
+       select 'p' || n, 'decision', '{"kind":"decision","questions":{}}', 0, 'key:k' from generate_series(1, 1000) n`,
+    );
+    const full = await h.call(t.secret, "POST", "/v1/prompts", { name: "more", kind: "chat" });
+    expect(full.status).toBe(409);
+    expect(await errorOf(full)).toMatchObject({ code: "prompt_limit" });
+    await t.ctx.db.query("delete from prompts");
+
+    await h.call(t.secret, "POST", "/v1/prompts", { name: "p", kind: "chat" });
+    const big = await h.call(t.secret, "PUT", "/v1/prompts/p/draft", {
+      revision: 0,
+      draft: { ...chatDraft, text: "x".repeat(400) },
+    });
+    expect(big.status).toBe(413);
+    expect(await errorOf(big)).toMatchObject({ code: "storage_quota_exceeded" });
+  });
+
+  it("starts a conversation from a label, pinned to the version it named then", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await publishedChat(h, t, ["One: {{customer}}, {{tone}}.", "Two: {{customer}}, {{tone}}."]);
+    await h.call(t.secret, "PUT", `${path}/labels/production`, { version: 1 });
+    const created = await h.call(t.secret, "POST", "/v1/conversations", {
+      prompt: { name: NAME, version: "production", variables: { customer: "Ada", tone: "dry" } },
+      externalUserId: "u1",
+    });
+    expect(created.status).toBe(201);
+    const conversation = (await created.json()) as Conversation;
+    expect(conversation).toMatchObject({
+      model: "faux/faux-1",
+      system: "One: Ada, dry.",
+      guardrails: [],
+      prompt: { name: NAME, version: 1 },
+    });
+
+    // Moving the label later changes nothing for the conversation already made.
+    await h.call(t.secret, "PUT", `${path}/labels/production`, { version: 2 });
+    const read = await h.call(t.secret, "GET", `/v1/conversations/${conversation.id}`);
+    expect(await read.json()).toMatchObject({
+      conversation: { system: "One: Ada, dry.", prompt: { name: NAME, version: 1 } },
+    });
+    const listed = await h.call(t.secret, "GET", "/v1/conversations");
+    expect(await listed.json()).toMatchObject({
+      conversations: [{ id: conversation.id, prompt: { name: NAME, version: 1 } }],
+    });
+    const next = await h.call(t.secret, "POST", "/v1/conversations", {
+      prompt: { name: NAME, version: "production", variables: { customer: "Bo" } },
+    });
+    expect(await next.json()).toMatchObject({
+      system: "Two: Bo, warm.",
+      prompt: { name: NAME, version: 2 },
+    });
+    // A conversation that wrote its own system prompt has none.
+    expect(await newConversation(h, t.secret)).toMatchObject({ prompt: null });
+  });
+
+  it("refuses a conversation whose prompt, variables or resolved model do not fit", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    await publishedChat(h, t, ["Hi {{customer}} {{tone}}"]);
+    const create = (body: object) => h.call(t.secret, "POST", "/v1/conversations", body);
+    const missing = await create({ prompt: { name: NAME, version: 1 } });
+    expect(await errorOf(missing)).toMatchObject({
+      code: "invalid_variables",
+      message: expect.stringContaining("customer"),
+    });
+    const unknown = await create({
+      prompt: { name: NAME, version: 1, variables: { customer: "a", mood: "b" } },
+    });
+    expect(await errorOf(unknown)).toMatchObject({
+      code: "invalid_variables",
+      message: expect.stringContaining("mood"),
+    });
+    expect((await create({ prompt: { name: NAME, version: 9 } })).status).toBe(404);
+    const both = await create({ prompt: { name: NAME, version: 1 }, system: "mine" });
+    expect(await errorOf(both)).toMatchObject({ code: "invalid_request" });
+
+    // The version's model goes through the same checks as a model in the request: here, the tenant has no key.
+    await h.call(t.secret, "PUT", `${path}/draft`, {
+      revision: 1,
+      draft: { ...chatDraft, text: "Hi {{customer}} {{tone}}", model: "anthropic/claude-x" },
+    });
+    await h.call(t.secret, "POST", `${path}/versions`, { revision: 2 });
+    const keyless = await create({
+      prompt: { name: NAME, version: "latest", variables: { customer: "a" } },
+    });
+    expect(await errorOf(keyless)).toMatchObject({
+      code: "invalid_model",
+      message: expect.stringContaining("PUT /v1/model-keys/anthropic"),
+    });
+
+    await h.call(t.secret, "POST", "/v1/prompts", {
+      name: "billing",
+      kind: "decision",
+      draft: { kind: "decision", questions: { q: { type: "noul", instructions: "Billing?" } } },
+    });
+    await h.call(t.secret, "POST", "/v1/prompts/billing/versions", { revision: 0 });
+    const decision = await create({ prompt: { name: "billing", version: 1 } });
+    expect(await errorOf(decision)).toMatchObject({ code: "wrong_kind" });
+    const render = await h.call(t.secret, "POST", "/v1/prompts/billing/versions/1/render", {});
+    expect(await errorOf(render)).toMatchObject({ code: "wrong_kind" });
+    expect((await t.ctx.db.query("select 1 from conversations")).rowCount).toBe(0);
+  });
+
+  it("runs a judgment from a decision prompt, records its version, and refuses a chat prompt", async () => {
+    const h = await harness({ keyless: [] });
+    const t = await h.tenant("acme");
+    await h.call(t.secret, "PUT", "/v1/model-keys/opencode", { apiKey: KEY });
+    const questions = { billing: { type: "noul", instructions: "Is `ticket` about billing?" } };
+    await h.call(t.secret, "POST", "/v1/prompts", {
+      name: "triage/billing",
+      kind: "decision",
+      draft: { kind: "decision", model: "opencode/jev-1.14", questions },
+    });
+    await h.call(t.secret, "POST", "/v1/prompts/triage%2Fbilling/versions", { revision: 0 });
+    await h.call(t.secret, "PUT", "/v1/prompts/triage%2Fbilling/labels/production", { version: 1 });
+
+    const submitted = await h.call(t.secret, "POST", "/v1/judgments", {
+      state: { ticket: "I was charged twice." },
+      prompt: { name: "triage/billing", version: "production" },
+    });
+    expect(submitted.status).toBe(202);
+    const { id } = (await submitted.json()) as { id: string };
+    expect(await (await h.call(t.secret, "GET", `/v1/judgments/${id}`)).json()).toEqual({
+      id,
+      status: "pending",
+      model: "opencode/jev-1.14",
+      createdAt: expect.any(String),
+      prompt: { name: "triage/billing", version: 1 },
+    });
+    const seen: unknown[] = [];
+    const executor = createTenantExecutor(
+      t.ctx.db,
+      {
+        "run-judgment": async (params) => {
+          seen.push(params);
+          return {
+            type: "answered",
+            model: "jev-1.14",
+            answers: { billing: { type: "noul", probability: 0.9 } },
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      },
+      { workerId: "w" },
+    );
+    for (const task of await executor.claim(5)) await executor.execute(task);
+    expect(seen).toEqual([
+      {
+        model: "opencode/jev-1.14",
+        state: { ticket: "I was charged twice." },
+        questions,
+        prompt: { name: "triage/billing", version: 1 },
+      },
+    ]);
+    expect(await (await h.call(t.secret, "GET", `/v1/judgments/${id}`)).json()).toMatchObject({
+      status: "answered",
+      prompt: { name: "triage/billing", version: 1 },
+    });
+
+    await publishedChat(h, t, ["Hi {{customer}} {{tone}}"]);
+    const chatPrompt = await h.call(t.secret, "POST", "/v1/judgments", {
+      state: "x",
+      prompt: { name: NAME, version: 1 },
+    });
+    expect(await errorOf(chatPrompt)).toMatchObject({ code: "wrong_kind" });
+    const mixed = await h.call(t.secret, "POST", "/v1/judgments", {
+      state: "x",
+      questions,
+      prompt: { name: "triage/billing", version: 1 },
+    });
+    expect(mixed.status).toBe(400);
   });
 });

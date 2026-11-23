@@ -18,8 +18,11 @@ export type TaskName = keyof typeof TASKS;
 export type TaskParams = {
   /** Continue a conversation after its message `seq` (the user message that caused this turn). */
   "run-turn": { conversationId: string; seq: number };
-  /** Judge `state` against `questions` with the model's provider. */
-  "run-judgment": JudgmentRequest;
+  /**
+   * Judge `state` against `questions` with the model's provider. `prompt` is the decision prompt version the questions
+   * and model came from (`PinnedPrompt`, ADR 0017), for `GET /v1/judgments/:id`; tasks from before prompts lack it.
+   */
+  "run-judgment": JudgmentRequest & { prompt?: { name: string; version: number } };
 };
 
 /** What a task's handler returns: Absurd stores it as the task's result, readable with `readTask`. Small JSON. */

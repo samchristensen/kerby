@@ -4,7 +4,7 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -75,10 +75,10 @@ Judgment providers follow the same rule: `packages/judgment` defines `JudgmentPr
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                  |
-| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, the Absurd schema                                                                                                                       | `packages/{durable,blobs,conversations}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                          |
+| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                        |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -120,9 +120,11 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
   429 `rate_limited` with `Retry-After`. `storageBytes` (api `DEFAULT_STORAGE_BYTES`, 1 GiB) is checked against
-  `sum(size)` of the tenant's blob index when a message is posted, before anything is stored and again inside the post's
-  transaction: 413 `storage_quota_exceeded`; a turn already admitted finishes. Before a key is verified, the only work is
-  the key lookup: a client address that fails `FAILED_AUTH_PER_MINUTE` (30) times in a minute gets 429 without one. The
+  the tenant's stored bytes, `sum(size)` of its blob index plus its prompt drafts and versions (`storedBytes` in
+  `packages/prompts`), when a message is posted, before anything is stored and again inside the post's transaction, and
+  when a prompt's draft grows or it is published: 413 `storage_quota_exceeded`; a turn already admitted finishes.
+  Before a key is verified, the only work is the key lookup: a client address that fails `FAILED_AUTH_PER_MINUTE` (30)
+  times in a minute gets 429 without one. The
   address is the socket peer, or with `TRUST_PROXY=true` (Railway, whose edge sets `X-Forwarded-For` with the client
   first) the left-most `X-Forwarded-For` entry. The numbers are defaults until pricing (plan 0001, M9).
 
@@ -200,6 +202,12 @@ flowchart LR
   flags it (`messages.blocked_by`), persists a flagged refusal and ends the turn, and `readHistory` never rehydrates a
   flagged message again. A tool call is judged inside its own step and, if blocked, never runs. Fail closed: no key means no
   answer and no tool run.
+- **Prompts** ([ADR 0017](docs/adr/0017-prompts.md)). Named, versioned chat prompts and decision models in the tenant's
+  database (`packages/prompts`): one draft with a revision (a save or publish names the revision it started from, else
+  409), immutable versions 1..N, labels that move (`latest` is implied). `POST /v1/conversations { prompt }` and
+  `POST /v1/judgments { state, prompt }` resolve a label once, when they are made, and record `{ name, version }`; a
+  conversation keeps the rendered system prompt, model and guardrails in its own row, so a turn never reads the prompt
+  tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).

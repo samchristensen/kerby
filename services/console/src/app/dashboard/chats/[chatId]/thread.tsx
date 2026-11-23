@@ -236,8 +236,16 @@ export function ChatThread({ chat }: { chat: ChatView }) {
             {chat.title ?? "Untitled chat"}
           </h1>
           <p className="truncate text-xs text-zinc-500">
-            <code className="font-mono">{chat.model}</code> · started{" "}
-            {formatDateTime(chat.createdAt)}
+            <code className="font-mono">{chat.model}</code>
+            {chat.prompt ? (
+              <>
+                {" · "}
+                <code className="font-mono">
+                  {chat.prompt.name}@v{chat.prompt.version}
+                </code>
+              </>
+            ) : null}{" "}
+            · started {formatDateTime(chat.createdAt)}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -248,6 +256,8 @@ export function ChatThread({ chat }: { chat: ChatView }) {
           ) : null}
           {chat.origin === "console" ? (
             <Badge tone="indigo">Console</Badge>
+          ) : chat.origin === "studio" ? (
+            <Badge tone="green">Studio</Badge>
           ) : (
             <Badge tone="zinc">
               {chat.externalUserId ? `API · ${chat.externalUserId}` : "API"}

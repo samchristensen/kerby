@@ -1,21 +1,27 @@
 import type { Metadata } from "next";
 import { PageHeader } from "../../../_components/ui.tsx";
 import { consoleService } from "../../../_lib/console.ts";
-import { requireSession } from "../../../_lib/session.ts";
+import { requireChatAccess } from "../../../_lib/session.ts";
 import { Workspace } from "../../_components/panes.tsx";
 import { NewChatForm } from "./form.tsx";
 
 export const metadata: Metadata = { title: "New chat" };
 
 export default async function NewChatPage() {
-  const session = await requireSession();
-  const providers = (await consoleService().providers(session))
-    .filter((provider) => provider.configured && provider.chat)
-    .map((provider) => provider.id);
+  const access = await requireChatAccess();
+  const service = consoleService();
+  const [providers, prompts] = await Promise.all([
+    service.providers(access.session),
+    service.prompts(access, "chat"),
+  ]);
   return (
     <Workspace>
       <PageHeader title="New chat" description="Start a conversation with your agent." />
-      <NewChatForm providers={providers} />
+      <NewChatForm
+        providers={providers.filter((p) => p.configured && p.chat).map((p) => p.id)}
+        // Only a published prompt can start a chat: a draft is tried in the Studio's playground.
+        prompts={prompts.filter((p) => p.latestVersion !== null)}
+      />
     </Workspace>
   );
 }

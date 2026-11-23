@@ -16,6 +16,7 @@
     "@kerby/durable": "workspace:*",
     "@kerby/judgment-systemone": "workspace:*",
     "@kerby/observability": "workspace:*",
+    "@kerby/prompts": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@kerby/serve": "workspace:*",

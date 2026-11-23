@@ -1,4 +1,4 @@
-import type { Guardrail } from "@kerby/contracts";
+import type { Guardrail, PinnedPrompt } from "@kerby/contracts";
 import type { TenantQueryable } from "@kerby/db";
 import { InvalidCursorError } from "./errors.ts";
 
@@ -12,6 +12,8 @@ export type ConversationRecord = {
   createdAt: Date;
   updatedAt: Date;
   guardrails: Guardrail[];
+  /** The chat prompt version it was started from (ADR 0017), or null. */
+  prompt: PinnedPrompt | null;
 };
 
 type ConversationRow = {
@@ -24,10 +26,17 @@ type ConversationRow = {
   created_at: Date;
   updated_at: Date;
   guardrails: Guardrail[];
+  prompt_name: string | null;
+  prompt_version: number | null;
 };
 
 const COLUMNS =
-  "id, external_user_id, model, system, title, last_error, created_at, updated_at, guardrails";
+  "id, external_user_id, model, system, title, last_error, created_at, updated_at, guardrails, prompt_name, prompt_version";
+
+const pinnedFromRow = (row: Pick<ConversationRow, "prompt_name" | "prompt_version">) =>
+  row.prompt_name === null || row.prompt_version === null
+    ? null
+    : { name: row.prompt_name, version: row.prompt_version };
 
 const fromRow = (row: ConversationRow): ConversationRecord => ({
   id: row.id,
@@ -39,6 +48,7 @@ const fromRow = (row: ConversationRow): ConversationRecord => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   guardrails: row.guardrails,
+  prompt: pinnedFromRow(row),
 });
 
 /** A conversation in a list: no system prompt (it may be 100 000 characters), with how many messages it holds. */
@@ -83,7 +93,7 @@ export async function listConversations(
   const { rows } = await db.query<
     Omit<ConversationRow, "system" | "last_error"> & { cursor_at: string; message_count: number }
   >(
-    `select c.id, c.external_user_id, c.model, c.title, c.created_at, c.updated_at,
+    `select c.id, c.external_user_id, c.model, c.title, c.created_at, c.updated_at, c.prompt_name, c.prompt_version,
             to_char(c.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at,
             (select count(*)::int from messages m where m.conversation_id = c.id) as message_count
        from conversations c
@@ -104,6 +114,7 @@ export async function listConversations(
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       messageCount: row.message_count,
+      prompt: pinnedFromRow(row),
     })),
     nextCursor: rows.length > page.limit && last ? `${last.cursor_at}_${last.id}` : null,
   };
@@ -120,15 +131,20 @@ export async function insertConversation(
     model: string;
     system: string;
     guardrails?: Guardrail[] | undefined;
+    /** The chat prompt version `system`, `model` and `guardrails` were taken from. */
+    prompt?: PinnedPrompt | undefined;
   },
 ): Promise<ConversationRecord> {
   const { rows } = await db.query<ConversationRow>(
-    `insert into conversations (external_user_id, model, system, guardrails) values ($1, $2, $3, $4::jsonb) returning ${COLUMNS}`,
+    `insert into conversations (external_user_id, model, system, guardrails, prompt_name, prompt_version)
+     values ($1, $2, $3, $4::jsonb, $5, $6) returning ${COLUMNS}`,
     [
       input.externalUserId ?? null,
       input.model,
       input.system,
       JSON.stringify(input.guardrails ?? []),
+      input.prompt?.name ?? null,
+      input.prompt?.version ?? null,
     ],
   );
   const row = rows[0];

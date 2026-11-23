@@ -14,6 +14,7 @@ import {
   type AgentMessageSchema,
   type AnswerSchema,
   type ContentPartSchema,
+  CreateConversationRequestSchema,
   CreateTenantRequestSchema,
   EventEnvelopeSchema,
   GetConversationQuerySchema,
@@ -22,9 +23,14 @@ import {
   type JudgmentOutcomeSchema,
   JudgmentRequestSchema,
   JudgmentSchema,
+  LATEST_LABEL,
   MAX_QUESTIONS,
   PostMessageRequestSchema,
+  PromptLabelSchema,
+  PromptNameSchema,
+  PromptVersionParamSchema,
   QuestionSchema,
+  SubmitJudgmentRequestSchema,
   type ToolCallSchema,
   type ToolResultSchema,
   type UsageSchema,
@@ -206,12 +212,61 @@ describe("judgment schemas", () => {
       id: crypto.randomUUID(),
       model: "typesafe/jev-latest",
       createdAt: new Date().toISOString(),
+      prompt: null,
     };
     expect(JudgmentSchema.safeParse({ ...base, status: "pending" }).success).toBe(true);
     expect(JudgmentSchema.safeParse({ ...base, status: "answered" }).success).toBe(false);
     expect(JudgmentSchema.safeParse({ ...base, status: "refused", error: "no key" }).success).toBe(
       true,
     );
+    expect(
+      JudgmentSchema.safeParse({
+        ...base,
+        status: "pending",
+        prompt: { name: "triage/billing", version: 2 },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("takes the questions written out or a decision prompt, never both", () => {
+    const questions = { billing: noul };
+    const prompt = { name: "triage/billing", version: "production" };
+    expect(SubmitJudgmentRequestSchema.safeParse({ state: "x", questions }).success).toBe(true);
+    expect(SubmitJudgmentRequestSchema.safeParse({ state: "x", prompt }).success).toBe(true);
+    expect(SubmitJudgmentRequestSchema.safeParse({ state: "x", questions, prompt }).success).toBe(
+      false,
+    );
+    expect(
+      SubmitJudgmentRequestSchema.safeParse({ state: "x", prompt, model: "typesafe/jev" }).success,
+    ).toBe(false);
+  });
+});
+
+describe("prompt references", () => {
+  it("names a prompt with up to 5 lowercase segments", () => {
+    for (const name of ["triage", "support/triage", "a/b/c/d/e", "v2-beta/x-1"])
+      expect(PromptNameSchema.safeParse(name).success).toBe(true);
+    for (const name of ["", "Support", "a/b/c/d/e/f", "/a", "a/", "a//b", "-a", "a b", "a/../b"])
+      expect(PromptNameSchema.safeParse(name).success).toBe(false);
+  });
+
+  it("reads a URL version as a number when it is digits and as a label otherwise", () => {
+    expect(PromptVersionParamSchema.parse("12")).toBe(12);
+    expect(PromptVersionParamSchema.parse("production")).toBe("production");
+    expect(PromptVersionParamSchema.parse("latest")).toBe(LATEST_LABEL);
+    for (const version of ["0", "-1", "1.5", "Prod", "9-lives", "x".repeat(33)])
+      expect(PromptVersionParamSchema.safeParse(version).success).toBe(false);
+    expect(PromptLabelSchema.safeParse("staging-2").success).toBe(true);
+  });
+
+  it("starts a conversation from a prompt or from its own system, model and guardrails, not both", () => {
+    const prompt = { name: "support/triage", version: 3, variables: { customer: "Ada" } };
+    expect(CreateConversationRequestSchema.safeParse({ prompt }).success).toBe(true);
+    expect(CreateConversationRequestSchema.safeParse({ prompt, externalUserId: "u" }).success).toBe(
+      true,
+    );
+    for (const extra of [{ system: "x" }, { model: "faux/faux-1" }, { guardrails: [] }])
+      expect(CreateConversationRequestSchema.safeParse({ prompt, ...extra }).success).toBe(false);
   });
 });
 
