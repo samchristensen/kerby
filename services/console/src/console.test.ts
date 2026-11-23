@@ -4,6 +4,7 @@ import {
   insertConsoleUser,
   insertTenant,
   readModelKey,
+  setConsoleAdmin,
   setRolePassword,
   setTenantStatus,
 } from "@kerby/control-plane";
@@ -82,7 +83,7 @@ async function harness(
     const session = (await service.session(result.token)) ?? expect.fail("no session");
     return { ...result, session };
   };
-  return { control, service, signUp, opener: createOpener([pair.privateKey]) };
+  return { control, asConsole, service, signUp, opener: createOpener([pair.privateKey]) };
 }
 
 describe("passwords", () => {
@@ -199,6 +200,80 @@ describe("accounts", () => {
     expect(
       await h.service.logIn({ email: "acme@example.com", password: PASSWORD }, "a"),
     ).toMatchObject({ ok: false, error: expect.stringContaining("not active") });
+  });
+});
+
+describe("sign-up allowlist", () => {
+  /** A signed-up person the operator then made an admin, as control's operator route does. */
+  async function adminHarness() {
+    const h = await harness();
+    const { token } = await h.signUp("owner");
+    await setConsoleAdmin(h.control.db, "owner@example.com", true);
+    const admin = (await h.service.session(token)) ?? expect.fail("no session");
+    return { ...h, admin };
+  }
+
+  it("is edited by an admin only, and the console's database role cannot make one", async () => {
+    const h = await adminHarness();
+    const { session: stranger } = await h.signUp("other");
+    expect(h.admin.isAdmin).toBe(true);
+    expect(stranger.isAdmin).toBe(false);
+    await expect(h.service.signupAllowlist(stranger)).rejects.toThrow(/only an admin/);
+    await expect(h.service.allowSignups(stranger, { emails: "x@example.com" })).rejects.toThrow(
+      /only an admin/,
+    );
+    await expect(h.service.disallowSignup(stranger, "owner@example.com")).rejects.toThrow(
+      /only an admin/,
+    );
+    // Only the operator writes the flag; the console's role reads it.
+    await expect(
+      h.asConsole.query(
+        "update console_users set is_admin = true where email = 'other@example.com'",
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("adds many addresses at once, normalized and without repeats, and says which input is wrong", async () => {
+    const h = await adminHarness();
+    expect(
+      await h.service.allowSignups(h.admin, {
+        emails:
+          " Ada@Example.com, grace@example.com;\nada@example.com  bob@example.com owner@example.com",
+      }),
+    ).toEqual({ ok: true, added: 4 });
+    expect(await h.service.allowSignups(h.admin, { emails: "ada@example.com" })).toEqual({
+      ok: true,
+      added: 0,
+    });
+    const list = await h.service.signupAllowlist(h.admin);
+    expect(list.map((entry) => [entry.email, entry.signedUp]).sort()).toEqual([
+      ["ada@example.com", false],
+      ["bob@example.com", false],
+      ["grace@example.com", false],
+      ["owner@example.com", true],
+    ]);
+
+    for (const emails of ["", "   ", "ada@example.com, not-an-email"]) {
+      const refused = await h.service.allowSignups(h.admin, { emails });
+      expect(refused, emails).toMatchObject({ ok: false, fields: { emails: expect.any(String) } });
+    }
+    expect(await h.service.signupAllowlist(h.admin)).toHaveLength(4);
+  });
+
+  it("removes an address, and audits each change without the address", async () => {
+    const h = await adminHarness();
+    await h.service.allowSignups(h.admin, { emails: "ada@example.com" });
+    expect(await h.service.disallowSignup(h.admin, "ADA@example.com")).toBe(true);
+    expect(await h.service.disallowSignup(h.admin, "ada@example.com")).toBe(false);
+    expect(await h.service.disallowSignup(h.admin, "not an email")).toBe(false);
+    const { rows } = await h.control.db.query<{ actor: string; action: string; detail: unknown }>(
+      "select actor, action, detail from audit_log where action like 'console.allowlist.%' order by id",
+    );
+    expect(rows).toEqual([
+      { actor: `user:${h.admin.userId}`, action: "console.allowlist.add", detail: { added: 1 } },
+      { actor: `user:${h.admin.userId}`, action: "console.allowlist.remove", detail: {} },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain("ada@");
   });
 });
 
