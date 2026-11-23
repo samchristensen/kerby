@@ -117,6 +117,7 @@ export function ChatDraftEditor({
           ...(row.criteria ? { criteria: row.criteria } : {}),
         };
       }),
+      tools: draft.tools,
       variables: current.map((variable) => {
         const row = variables[variable];
         return {

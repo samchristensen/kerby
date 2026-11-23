@@ -237,8 +237,11 @@ const ToolServerSummarySchema = z.object({
 });
 export type ToolServerSummary = z.infer<typeof ToolServerSummarySchema>;
 
-/** `GET /v1/tool-servers/:slug`: the server and every tool it listed. */
-export const ToolServerSchema = ToolServerSummarySchema.extend({ tools: z.array(ToolSchema) });
+/** `GET /v1/tool-servers/:slug`: the server, every tool it listed, and which integrations may use what of it. */
+export const ToolServerSchema = ToolServerSummarySchema.extend({
+  tools: z.array(ToolSchema),
+  grantedTo: z.array(z.object({ integrationId: z.uuid(), pattern: ToolPatternSchema })),
+});
 export type ToolServer = z.infer<typeof ToolServerSchema>;
 
 /** `GET /v1/tool-servers`: every server of the tenant, the built-in one first. */
