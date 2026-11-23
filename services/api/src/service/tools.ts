@@ -218,7 +218,9 @@ const summary = (
   status: server.status,
   lastError: server.lastError,
   syncedAt: server.syncedAt?.toISOString() ?? null,
-  ...counts,
+  toolCount: counts.toolCount,
+  enabledCount: counts.enabledCount,
+  driftedCount: counts.driftedCount,
   createdAt: server.createdAt.toISOString(),
   updatedAt: server.updatedAt.toISOString(),
 });

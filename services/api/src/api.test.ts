@@ -1787,9 +1787,10 @@ describe("tools (ADR 0019)", () => {
     const list = await h.call(t.secret, "GET", "/v1/tool-servers");
     const listText = await list.text();
     expect(listText).not.toContain(CREDENTIAL);
-    expect(
-      ListToolServersResponseSchema.parse(JSON.parse(listText)).servers.map((s) => s.slug),
-    ).toEqual(["kerby", "docs"]);
+    const servers = ListToolServersResponseSchema.parse(JSON.parse(listText)).servers;
+    expect(servers.map((s) => s.slug)).toEqual(["kerby", "docs"]);
+    // exactly the contract's fields: no internal ids
+    expect(JSON.parse(listText)).toEqual({ servers });
     const audit = await h.control.db.query<{ action: string; detail: object }>(
       "select action, detail from audit_log where action like 'tool%'",
     );
