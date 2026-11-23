@@ -947,10 +947,10 @@ describe("migration fan-out", () => {
       (await getTenant(control.db, behind.tenant.id)) ?? expect.fail("no tenant row");
     const goneRow = (await getTenant(control.db, gone.tenant.id)) ?? expect.fail("no tenant row");
 
-    // Make `behind` look like an older release: its newest migration was never applied.
+    // Make `behind` look like an older release: its newest migration (the tool tables) was never applied.
     const own = createTenantDb(await tenantUrl(behindRow.id));
-    await own.query("drop table trace_segments, tool_executions, messages, conversations");
-    await own.query("delete from schema_migrations where name like 'conversations/%'");
+    await own.query("drop table conversation_tools, integration_tools, tools, tool_servers");
+    await own.query("delete from schema_migrations where name like 'tools/%'");
     await own.close();
     await control.db.query("update tenants set schema_version = null where id = $1", [
       behind.tenant.id,
@@ -976,7 +976,9 @@ describe("migration fan-out", () => {
 
     const after = createTenantDb(await tenantUrl(behindRow.id));
     cleanups.push(() => after.close());
-    expect((await after.query("select 1 from conversations")).rowCount).toBe(0);
+    expect((await after.query("select 1 from tool_servers where kind = 'builtin'")).rowCount).toBe(
+      1,
+    );
     expect((await getTenant(control.db, behind.tenant.id))?.schemaVersion).toBe(
       readMigrations(tenantMigrationDirs).at(-1)?.name,
     );
