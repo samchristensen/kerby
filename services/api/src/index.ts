@@ -2,6 +2,9 @@
 import { createBlobs } from "@kerby/blobs";
 import { resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import type { Destinations } from "@kerby/delivery";
+import { createWebhookDestination } from "@kerby/delivery-webhook";
+import { createEgressFetch } from "@kerby/egress";
 import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import { SUPPORTED_PROVIDERS } from "@kerby/runtime-pi-durable/providers";
@@ -12,6 +15,19 @@ import { createApiApp } from "./runtime/http.ts";
 import type { ApiDeps } from "./types/index.ts";
 
 export { createApiApp } from "./runtime/http.ts";
+
+/**
+ * Every destination kind's adapter, built as the dispatcher builds them so both refuse the same destinations. The api
+ * only makes secrets and checks configs with them, and never delivers. `allowLocal`: http URLs and private addresses.
+ */
+export function createDestinations(allowLocal: boolean): Destinations {
+  return {
+    webhook: createWebhookDestination({
+      fetch: createEgressFetch({ timeoutMs: 10_000, ...(allowLocal ? { blockedRanges: [] } : {}) }),
+      allowLocal,
+    }),
+  };
+}
 
 async function startApi(config: ApiConfig) {
   configureAlerts({
@@ -36,6 +52,8 @@ async function startApi(config: ApiConfig) {
     pools,
     blobs,
     sealer: createSealer(config.secretsPublicKey),
+    deliverySealer: createSealer(config.deliverySecretsPublicKey),
+    destinations: createDestinations(config.allowLocalDestinations),
     settings: {
       defaultModel: config.defaultModel,
       // The adapters own the provider lists (ADR 0008, 0015); their `providers` subpaths load no adapter code.
@@ -51,6 +69,7 @@ async function startApi(config: ApiConfig) {
       defaultStorageBytes: config.defaultStorageBytes,
       failedAuthPerMinute: config.failedAuthPerMinute,
       trustProxy: config.trustProxy,
+      defaultSubscriptions: config.defaultSubscriptions,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

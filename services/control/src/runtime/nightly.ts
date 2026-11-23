@@ -1,9 +1,10 @@
-// Control's housekeeping: export retention and the bucket backup at a fixed UTC hour, and an hourly check that a
+// Control's housekeeping: export retention, tenant event and task retention, and the bucket backup at a fixed UTC hour, and an hourly check that a
 // backup succeeded within 26 hours (it catches a run that never happened). Every control instance keeps the timers; the
 // backup's advisory lock lets one of them copy.
 import { alert, errorFields, log } from "@kerby/observability";
 import { backupBuckets, checkBackupFreshness } from "../service/backup.ts";
 import { deleteExpiredExports } from "../service/export.ts";
+import { pruneTenants } from "../service/retention.ts";
 import { ConflictError, type ControlDeps } from "../types/index.ts";
 
 /** Quiet hours for tenants in the Americas and Europe. */
@@ -21,6 +22,9 @@ export function untilNext(now: Date, hour: number): number {
 async function nightly(deps: ControlDeps): Promise<void> {
   await deleteExpiredExports(deps).catch((error: unknown) =>
     alert("export retention failed", errorFields(error)),
+  );
+  await pruneTenants(deps).catch((error: unknown) =>
+    alert("tenant retention failed", errorFields(error)),
   );
   await backupBuckets(deps).catch((error: unknown) => {
     if (error instanceof ConflictError)

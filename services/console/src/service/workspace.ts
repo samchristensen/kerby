@@ -1,24 +1,17 @@
-// What a signed-in person does to their tenant: API keys, model keys, the overview. Each call is scoped to the session's
-// tenant, and each change is audited as `user:<id>`, never with a key's value.
-import { CreateKeyRequestSchema, PutModelKeyRequestSchema } from "@kerby/contracts";
+// What a signed-in person does to their tenant: model keys and the overview (integrations and their API keys are in
+// integrations.ts). Each call is scoped to the session's tenant, and each change is audited as `user:<id>`, never with a
+// key's value.
+import { PutModelKeyRequestSchema } from "@kerby/contracts";
 import {
-  ApiKeyLimitError,
-  type ApiKeyRecord,
   audit,
-  type CreatedKey,
-  createApiKey,
   deleteModelKey,
   getTenant,
   listApiKeys,
   listModelKeys,
-  MAX_API_KEYS_PER_TENANT,
   ModelKeyLimitError,
   putModelKey,
-  revokeApiKey,
 } from "@kerby/control-plane";
-import { z } from "zod";
 import type {
-  ApiKeyView,
   ConsoleDeps,
   FormFailure,
   FormInput,
@@ -29,20 +22,6 @@ import type {
 import { parseForm, refuse } from "./forms.ts";
 
 const actor = (session: Session) => `user:${session.userId}`;
-
-function keyView(key: ApiKeyRecord): ApiKeyView {
-  return {
-    id: key.id,
-    label: key.label,
-    createdAt: key.createdAt.toISOString(),
-    lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
-    revokedAt: key.revokedAt?.toISOString() ?? null,
-  };
-}
-
-const CreateKeyForm = CreateKeyRequestSchema.extend({
-  label: z.string().trim().max(100, "at most 100 characters").default(""),
-});
 
 export function createWorkspace(deps: ConsoleDeps) {
   const { control, sealer, settings } = deps;
@@ -68,50 +47,6 @@ export function createWorkspace(deps: ConsoleDeps) {
         modelKeys: modelKeys.length,
         apiUrl: settings.apiPublicUrl,
       };
-    },
-
-    /** Newest first. */
-    async apiKeys(session: Session): Promise<ApiKeyView[]> {
-      return (await listApiKeys(control, session.tenantId)).map(keyView).reverse();
-    },
-
-    async createApiKey(
-      session: Session,
-      form: FormInput,
-    ): Promise<{ ok: true; key: ApiKeyView; secret: string } | FormFailure> {
-      const parsed = parseForm(CreateKeyForm, form);
-      if (!parsed.ok) return parsed;
-      let created: CreatedKey;
-      try {
-        created = await createApiKey(control, session.tenantId, parsed.data.label);
-      } catch (error) {
-        if (error instanceof ApiKeyLimitError) {
-          return refuse(
-            `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
-          );
-        }
-        throw error;
-      }
-      await audit(control, {
-        tenantId: session.tenantId,
-        actor: actor(session),
-        action: "key.create",
-        detail: { keyId: created.key.id },
-      });
-      return { ok: true, key: keyView(created.key), secret: created.secret };
-    },
-
-    async revokeApiKey(session: Session, keyId: string): Promise<boolean> {
-      const revoked = await revokeApiKey(control, session.tenantId, keyId);
-      if (revoked) {
-        await audit(control, {
-          tenantId: session.tenantId,
-          actor: actor(session),
-          action: "key.revoke",
-          detail: { keyId },
-        });
-      }
-      return revoked;
     },
 
     async providers(session: Session): Promise<ProviderView[]> {

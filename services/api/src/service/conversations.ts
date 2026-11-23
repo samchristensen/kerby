@@ -12,6 +12,7 @@ import type {
   PostMessageRequest,
   PostMessageResponse,
   StreamInclude,
+  Visibility,
 } from "@kerby/contracts";
 import { DEFAULT_JUDGMENT_MODEL, PublicMessageSchema, parseModelId } from "@kerby/contracts";
 import { hasModelKey, hintTenantWork } from "@kerby/control-plane";
@@ -29,6 +30,7 @@ import {
   type StoredMessage,
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
+import { notifyDispatchers } from "@kerby/events";
 import { errorFields, log } from "@kerby/observability";
 import { type ApiDeps, NotFoundError } from "../types/index.ts";
 import { assertJudgmentModel, InvalidModelError } from "./models.ts";
@@ -37,6 +39,7 @@ import { renderChatPrompt } from "./prompts.ts";
 function conversationResource(record: {
   id: string;
   externalUserId: string | null;
+  integrationId: string | null;
   model: string;
   system: string;
   title: string | null;
@@ -48,6 +51,7 @@ function conversationResource(record: {
   return {
     id: record.id,
     externalUserId: record.externalUserId,
+    integrationId: record.integrationId,
     model: record.model,
     system: record.system,
     title: record.title,
@@ -58,16 +62,18 @@ function conversationResource(record: {
   };
 }
 
-/** The tenant's conversations, however they began, most recently active first. */
+/** The conversations `visibility` sees, however they began, most recently active first. */
 export async function listTenantConversations(
   ctx: TenantContext,
   query: ListConversationsQuery,
+  visibility: Visibility,
 ): Promise<ListConversationsResponse> {
-  const page = await listConversations(ctx.db, query);
+  const page = await listConversations(ctx.db, query, visibility);
   return {
     conversations: page.conversations.map((record) => ({
       id: record.id,
       externalUserId: record.externalUserId,
+      integrationId: record.integrationId,
       model: record.model,
       title: record.title,
       createdAt: record.createdAt.toISOString(),
@@ -82,10 +88,12 @@ export async function listTenantConversations(
 /**
  * A conversation with the request's system prompt, model and guardrails, or those of a published chat prompt: its
  * label is resolved once, here, and the conversation keeps the rendered text and the version it came from (ADR 0017).
+ * It is attributed to `integrationId` (null: a person in the console), which decides who sees it (ADR 0020).
  */
 export async function createConversation(
   deps: ApiDeps,
   ctx: TenantContext,
+  integrationId: string | null,
   request: CreateConversationRequest,
 ): Promise<Conversation> {
   const fromPrompt = request.prompt && (await renderChatPrompt(ctx, request.prompt));
@@ -117,12 +125,15 @@ export async function createConversation(
   for (const model of new Set(guardrails.map((g) => g.model ?? DEFAULT_JUDGMENT_MODEL)))
     await assertJudgmentModel(deps, ctx.tenantId, model);
   const record = await insertConversation(ctx.db, {
+    integrationId,
     externalUserId: request.externalUserId,
     model,
     system: fromPrompt?.text ?? request.system ?? deps.settings.defaultSystem,
     guardrails,
     prompt: fromPrompt && { name: fromPrompt.name, version: fromPrompt.version },
   });
+  // Its `conversation.created` event committed with it.
+  await notifyDispatchers(deps.control, ctx.tenantId);
   return conversationResource(record);
 }
 
@@ -130,17 +141,18 @@ const asParts = (content: PostMessageRequest["content"]): ContentPart[] =>
   typeof content === "string" ? [{ type: "text", text: content }] : content;
 
 /**
- * Append the message, enqueue its turn, and tell the workers there is work for this tenant. Refused when the tenant's
- * stored bytes, with this message, would pass `storageBytes`.
+ * Append the message, enqueue its turn, and tell the workers there is work for this tenant (and the dispatchers there is
+ * an event). Refused when the tenant's stored bytes, with this message, would pass `storageBytes`.
  */
 export async function postMessage(
   deps: ApiDeps,
   ctx: TenantContext,
+  visibility: Visibility,
   conversationId: string,
   request: PostMessageRequest,
   storageBytes: number,
 ): Promise<PostMessageResponse> {
-  if (!(await findConversation(ctx.db, conversationId)))
+  if (!(await findConversation(ctx.db, conversationId, visibility)))
     throw new NotFoundError("conversation not found");
   let seq: number;
   try {
@@ -157,6 +169,7 @@ export async function postMessage(
   await hintTenantWork(deps.control, ctx.tenantId).catch((error: unknown) => {
     log("warn", "could not hint workers; the full sweep will find the turn", errorFields(error));
   });
+  await notifyDispatchers(deps.control, ctx.tenantId);
   return { seq };
 }
 
@@ -170,10 +183,11 @@ const toPublic = (message: StoredMessage) => ({
 export async function getConversation(
   deps: ApiDeps,
   ctx: TenantContext,
+  visibility: Visibility,
   conversationId: string,
   page: GetConversationQuery,
 ): Promise<GetConversationResponse> {
-  const record = await findConversation(ctx.db, conversationId);
+  const record = await findConversation(ctx.db, conversationId, visibility);
   if (!record) throw new NotFoundError("conversation not found");
   const [{ messages, nextAfter }, busy] = await Promise.all([
     readMessages(ctx, deps.blobs, conversationId, page),
@@ -192,10 +206,11 @@ export async function getConversation(
 export async function getTrace(
   deps: ApiDeps,
   ctx: TenantContext,
+  visibility: Visibility,
   conversationId: string,
   page: GetTraceQuery,
 ): Promise<GetTraceResponse> {
-  if (!(await findConversation(ctx.db, conversationId)))
+  if (!(await findConversation(ctx.db, conversationId, visibility)))
     throw new NotFoundError("conversation not found");
   const { entries, nextAfter } = await readTrace(ctx, deps.blobs, conversationId, page);
   return { events: entries, nextAfter };
@@ -219,13 +234,14 @@ const REPLAY_PAGE = 100;
 export async function* conversationEvents(
   deps: ApiDeps,
   ctx: TenantContext,
+  visibility: Visibility,
   conversationId: string,
   afterSeq: number,
   include: readonly StreamInclude[],
   signal: AbortSignal,
   stillAllowed: () => Promise<boolean>,
 ): AsyncGenerator<StreamItem> {
-  if (!(await findConversation(ctx.db, conversationId)))
+  if (!(await findConversation(ctx.db, conversationId, visibility)))
     throw new NotFoundError("conversation not found");
 
   const wantsThinking = include.includes("thinking");

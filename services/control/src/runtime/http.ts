@@ -64,6 +64,7 @@ function tenantResource(tenant: TenantRecord): Tenant {
 function keyResource(key: ApiKeyRecord): ApiKey {
   return {
     id: key.id,
+    integrationId: key.integrationId,
     label: key.label,
     createdAt: key.createdAt.toISOString(),
     lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
@@ -229,7 +230,7 @@ export function createControlApp(deps: ControlDeps, tokens: ControlTokens): Fetc
       "/v1/operator/tenants/:id/keys",
       authorized(async (request, params) => {
         const body = await readJson(request, CreateKeyRequestSchema);
-        const created = await createKey(deps, id(params), body.label);
+        const created = await createKey(deps, id(params), body);
         const response: CreateKeyResponse = {
           apiKey: keyResource(created.key),
           secret: created.secret,

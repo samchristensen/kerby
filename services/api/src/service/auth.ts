@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { SCOPES, type Scope, type Visibility } from "@kerby/contracts";
 import {
   authenticateApiKey,
   authenticateConsoleSession,
@@ -7,8 +8,11 @@ import {
 import type { ControlDb } from "@kerby/db";
 import { type Principal, TenantUnavailableError, UnauthorizedError } from "../types/index.ts";
 
-type Entry = { tenant: TenantRecord; actor: string; expiresAt: number };
-type Found = { tenant: TenantRecord; actor: string } | undefined;
+/** Who a credential acts as, apart from its tenant, whose status is checked on every use. */
+type Identity = Omit<Principal, "tenantId" | "limits">;
+
+type Entry = { tenant: TenantRecord; identity: Identity; expiresAt: number };
+type Found = { tenant: TenantRecord; identity: Identity } | undefined;
 
 /**
  * What a control-plane lookup goes through before it runs (the caller's failed-authentication limit): it may wait its
@@ -25,15 +29,44 @@ export interface Authenticator {
   authenticate(presented: string, gate?: LookupGate): Promise<Principal>;
 }
 
-/** Who a verified API key or console session is, for the audit log: `key:<id>` or `user:<id>`. */
+/** A person in the console acts as the tenant: every scope, everything visible, attributed to no integration (ADR 0020). */
+const CONSOLE_SCOPES: ReadonlySet<Scope> = new Set(SCOPES);
+
+/**
+ * Who a verified API key or console session is. `actor` is for the audit log: `key:<id>` or `user:<id>`. A key acts for
+ * its integration with that integration's scopes, and sees only its own work unless it holds `tenant`.
+ */
 async function resolve(control: ControlDb, presented: string): Promise<Found> {
   if (presented.startsWith("kb_")) {
     const found = await authenticateApiKey(control, presented);
-    return found && { tenant: found.tenant, actor: `key:${found.keyId}` };
+    if (!found) return undefined;
+    const scopes: ReadonlySet<Scope> = new Set(found.integration.scopes);
+    const visibility: Visibility = scopes.has("tenant")
+      ? "tenant"
+      : { integrationId: found.integration.id };
+    return {
+      tenant: found.tenant,
+      identity: {
+        actor: `key:${found.keyId}`,
+        integrationId: found.integration.id,
+        scopes,
+        visibility,
+      },
+    };
   }
   // The console forwards the signed-in person's session token (ADR 0014): the tenant is the session's, never the caller's.
   const found = await authenticateConsoleSession(control, presented);
-  return found && { tenant: found.tenant, actor: `user:${found.userId}` };
+  return (
+    found && {
+      tenant: found.tenant,
+      identity: {
+        actor: `user:${found.userId}`,
+        integrationId: null,
+        scopes: CONSOLE_SCOPES,
+        visibility: "tenant",
+      },
+    }
+  );
 }
 
 /**
@@ -44,11 +77,11 @@ async function resolve(control: ControlDb, presented: string): Promise<Found> {
 const MAX_CACHED_CREDENTIALS = 10_000;
 
 /**
- * Verifies credentials against the control plane and trusts a verified one for `ttlMs`. Suspension, revocation, sign-out
- * and deletion therefore take effect within one TTL (ADR 0004). Failures are never cached: a wrong key costs a lookup.
- * The cache is least recently used first, bounded by `maxEntries`. Concurrent requests with one credential share one
- * lookup, so a client that opens many requests at once with a key the cache does not hold yet costs one lookup and
- * one admission, not one each.
+ * Verifies credentials against the control plane and trusts a verified one for `ttlMs`. Suspension, revocation, sign-out,
+ * deletion and a change of an integration's scopes therefore take effect within one TTL (ADR 0004, 0020). Failures are
+ * never cached: a wrong key costs a lookup. The cache is least recently used first, bounded by `maxEntries`. Concurrent
+ * requests with one credential share one lookup, so a client that opens many requests at once with a key the cache does
+ * not hold yet costs one lookup and one admission, not one each.
  */
 export function createAuthenticator(
   control: ControlDb,
@@ -84,7 +117,7 @@ export function createAuthenticator(
         const run = () => resolve(control, presented);
         const found = await (gate ? gate(run) : run());
         if (!found) throw new UnauthorizedError("invalid API key");
-        const entry = { tenant: found.tenant, actor: found.actor, expiresAt: now() + ttlMs };
+        const entry = { tenant: found.tenant, identity: found.identity, expiresAt: now() + ttlMs };
         if (ttlMs > 0) remember(cacheKey, entry);
         return entry;
       } finally {
@@ -104,7 +137,7 @@ export function createAuthenticator(
       if (entry.tenant.status !== "active") {
         throw new TenantUnavailableError(`tenant is ${entry.tenant.status}`);
       }
-      return { tenantId: entry.tenant.id, actor: entry.actor, limits: entry.tenant.limits };
+      return { tenantId: entry.tenant.id, ...entry.identity, limits: entry.tenant.limits };
     },
   };
 }

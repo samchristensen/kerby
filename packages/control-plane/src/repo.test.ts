@@ -1,4 +1,5 @@
-import { type ControlDb, createControlDb } from "@kerby/db";
+import { randomUUID } from "node:crypto";
+import type { ControlDb } from "@kerby/db";
 import {
   createOpener,
   createSealer,
@@ -15,43 +16,67 @@ import {
   authenticateConsoleSession,
   createApiKey,
   createConsoleSession,
+  createIntegration,
   deleteConsoleSession,
+  deleteIntegration,
   deleteModelKey,
+  deleteSubscription,
+  disableSubscription,
   EmailTakenError,
+  ensureDefaultIntegration,
   findConsoleUser,
   getTenant,
   hasModelKey,
   hintTenantWork,
   insertConsoleUser,
+  insertSubscription,
   insertTenant,
   listApiKeys,
+  listDeliverableSubscriptions,
   listDueTenants,
+  listIntegrations,
   listModelKeys,
+  listSubscriptions,
   listTenants,
   listTenantsWithoutDbPassword,
+  listTenantsWithSubscriptions,
   MAX_API_KEYS_PER_TENANT,
   MAX_MODEL_KEYS_PER_TENANT,
   ModelKeyLimitError,
   newTenantDbPassword,
+  openSubscriptionForDelivery,
   parseApiKey,
   putModelKey,
   readConsoleSession,
   readModelKey,
   readTenantDbPassword,
   readWakeupVersion,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
   recordUsage,
   resealTenantDbPasswords,
   resolveTenantDbUrl,
   revokeApiKey,
-  setRolePassword,
+  rotateSubscriptionSecret,
+  setIntegrationScopes,
   setTenantStatus,
   settleTenantWakeup,
   storeTenantDbPassword,
   TenantNameTakenError,
+  updateSubscription,
 } from "./index.ts";
-import { createTestControlDb } from "./testing.ts";
+import { asServiceRole, createTestControlDb } from "./testing.ts";
 
 const newTenant = (name: string) => ({ name, dbHost: "db.local", dbPort: 5432 });
+const newSubscription = (tenantId: string, integrationId: string) => ({
+  tenantId,
+  integrationId,
+  destination: { kind: "webhook" as const, url: "https://example.com/hook" },
+  types: ["*" as const],
+  scope: "own" as const,
+  description: "",
+  secret: "whsec-test",
+});
 
 describe("tenants", () => {
   it("inserts in provisioning state with names derived from the id, and refuses a duplicate name", async () => {
@@ -157,19 +182,25 @@ describe("api keys", () => {
   it("authenticates the key it created, to its tenant, and records use", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await createApiKey(control.db, tenant.id, "ci");
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
+    const { key, secret } = await createApiKey(control.db, tenant.id, integration.id, "ci");
     expect(secret).toMatch(/^kb_[0-9a-f]{12}_/);
     expect(parseApiKey(secret)?.id).toBe(key.id);
     const found = await authenticateApiKey(control.db, secret);
     expect(found?.tenant.id).toBe(tenant.id);
     expect(found?.keyId).toBe(key.id);
+    expect(found?.integration).toEqual(integration);
     expect((await listApiKeys(control.db, tenant.id))[0]?.lastUsedAt).toBeInstanceOf(Date);
   });
 
   it("never stores the secret", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { secret } = await createApiKey(control.db, tenant.id);
+    const { secret } = await createApiKey(
+      control.db,
+      tenant.id,
+      (await ensureDefaultIntegration(control.db, tenant.id)).id,
+    );
     const dump = JSON.stringify((await control.db.query("select * from api_keys")).rows);
     expect(dump).not.toContain(secret.slice(-20));
   });
@@ -177,7 +208,11 @@ describe("api keys", () => {
   it("refuses a wrong secret, a malformed key, an unknown id, and a revoked key", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await createApiKey(control.db, tenant.id);
+    const { key, secret } = await createApiKey(
+      control.db,
+      tenant.id,
+      (await ensureDefaultIntegration(control.db, tenant.id)).id,
+    );
     const wrongSecret = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
     expect(await authenticateApiKey(control.db, wrongSecret)).toBeUndefined();
     expect(await authenticateApiKey(control.db, "garbage")).toBeUndefined();
@@ -193,7 +228,11 @@ describe("api keys", () => {
     await using control = await createTestControlDb();
     const a = await insertTenant(control.db, newTenant("a"));
     const b = await insertTenant(control.db, newTenant("b"));
-    const { key, secret } = await createApiKey(control.db, a.id);
+    const { key, secret } = await createApiKey(
+      control.db,
+      a.id,
+      (await ensureDefaultIntegration(control.db, a.id)).id,
+    );
     expect(await revokeApiKey(control.db, b.id, key.id)).toBe(false);
     expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(a.id);
   });
@@ -202,9 +241,11 @@ describe("api keys", () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
     const other = await insertTenant(control.db, newTenant("other"));
+    const mine = await ensureDefaultIntegration(control.db, tenant.id);
+    const theirs = await ensureDefaultIntegration(control.db, other.id);
     const settled = await Promise.allSettled(
       Array.from({ length: MAX_API_KEYS_PER_TENANT + 5 }, () =>
-        createApiKey(control.db, tenant.id),
+        createApiKey(control.db, tenant.id, mine.id),
       ),
     );
     const refused = settled.filter((result) => result.status === "rejected");
@@ -213,19 +254,21 @@ describe("api keys", () => {
     const live = await listApiKeys(control.db, tenant.id);
     expect(live).toHaveLength(MAX_API_KEYS_PER_TENANT);
     // Another tenant's cap is its own.
-    await createApiKey(control.db, other.id);
+    await createApiKey(control.db, other.id, theirs.id);
 
     // Rotation at the cap: revoke and create in one transaction.
     const oldest = live[0] ?? expect.fail("no key");
     const rotated = await control.db.transaction(async (tx) => {
       expect(await revokeApiKey(tx, tenant.id, oldest.id)).toBe(true);
-      return createApiKey(tx, tenant.id, "rotated");
+      return createApiKey(tx, tenant.id, mine.id, "rotated");
     });
     expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
-    await expect(createApiKey(control.db, tenant.id)).rejects.toBeInstanceOf(ApiKeyLimitError);
+    await expect(createApiKey(control.db, tenant.id, mine.id)).rejects.toBeInstanceOf(
+      ApiKeyLimitError,
+    );
     // A revoked key no longer counts.
     expect(await revokeApiKey(control.db, tenant.id, rotated.key.id)).toBe(true);
-    await createApiKey(control.db, tenant.id);
+    await createApiKey(control.db, tenant.id, mine.id);
   });
 });
 
@@ -293,26 +336,16 @@ describe("tenant wakeups", () => {
   });
 });
 
-/** A handle on the control database as one of the limited service roles, given a password the way control does. */
-async function asRole(controlUrl: string, role: "kerby_app" | "kerby_console") {
-  const admin = createControlDb(controlUrl, { max: 1 });
-  await setRolePassword(admin, role, `${role}-password-for-tests`);
-  await admin.close();
-  const url = new URL(controlUrl);
-  url.username = role;
-  url.password = `${role}-password-for-tests`;
-  return createControlDb(url.toString(), { max: 1 });
-}
-
 describe("the limited app role (what api and worker connect as)", () => {
   it("does what the services need and nothing of the operator's", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
-    const { secret } = await createApiKey(control.db, tenant.id);
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
+    const { secret } = await createApiKey(control.db, tenant.id, integration.id);
     const box = createSecretBox([generateBoxKey()]);
     await storeTenantDbPassword(control.db, box, tenant.id, "tenant-db-password");
-    const app = await asRole(control.url, "kerby_app");
+    const app = await asServiceRole(control.url, "kerby_app");
     try {
       // api: verify a key; worker: list and read tenants, record usage
       expect((await authenticateApiKey(app, secret))?.tenant.id).toBe(tenant.id);
@@ -337,6 +370,41 @@ describe("the limited app role (what api and worker connect as)", () => {
       expect(new URL(await resolveTenantDbUrl(app, box, tenant.id)).password).toBe(
         "tenant-db-password",
       );
+      // api: manage subscriptions; dispatcher: find, open and deliver to them, record their health
+      const keys = generateSecretsKeyPair();
+      const id = randomUUID();
+      await insertSubscription(
+        app,
+        createSealer(keys.publicKey),
+        { ...newSubscription(tenant.id, integration.id), id },
+        10,
+      );
+      expect(await listSubscriptions(app, tenant.id)).toHaveLength(1);
+      expect(await updateSubscription(app, tenant.id, id, { description: "x" })).toBeDefined();
+      expect(
+        await rotateSubscriptionSecret(
+          app,
+          createSealer(keys.publicKey),
+          tenant.id,
+          id,
+          "s2",
+          1000,
+        ),
+      ).toBeDefined();
+      expect(await listTenantsWithSubscriptions(app)).toEqual([tenant.id]);
+      expect(await listDeliverableSubscriptions(app, tenant.id)).toHaveLength(1);
+      const opened = await openSubscriptionForDelivery(
+        app,
+        createOpener([keys.privateKey]),
+        tenant.id,
+        id,
+      );
+      expect(opened?.secrets).toEqual(["s2", "whsec-test"]);
+      expect(await recordDeliveryFailure(app, id, 60_000)).toBe(false);
+      await recordDeliverySuccess(app, id);
+      await disableSubscription(app, id, "gone");
+      await app.query("select pg_notify('tenant_events', 'x')");
+      expect(await deleteSubscription(app, tenant.id, id)).toBe(true);
 
       // operator-only data and writes are refused
       for (const sql of [
@@ -371,7 +439,7 @@ describe("the console role", () => {
       passwordHash: "scrypt$17$8$1$c2FsdA==$aGFzaA==",
     });
     const sealer = createSealer(generateSecretsKeyPair().publicKey);
-    const role = await asRole(control.url, "kerby_console");
+    const role = await asServiceRole(control.url, "kerby_console");
     try {
       // sign in: read the person, keep a session
       expect((await findConsoleUser(role, "ada@example.com"))?.id).toBe(user.id);
@@ -382,11 +450,33 @@ describe("the console role", () => {
       );
       expect((await readConsoleSession(role, token))?.tenantName).toBe("acme");
       await deleteConsoleSession(role, token);
-      // keys: create, list, revoke; the new key works at the api
-      const { key, secret } = await createApiKey(role, tenant.id, "ci");
-      expect((await listApiKeys(role, tenant.id)).map((k) => k.label)).toEqual(["ci"]);
+      // integrations: make, re-scope; keys: create, list, revoke; the new key works at the api
+      const integration = await createIntegration(role, tenant.id, {
+        name: "crm",
+        scopes: ["conversations"],
+      });
+      expect(
+        (await setIntegrationScopes(role, tenant.id, integration.id, ["events"]))?.scopes,
+      ).toEqual(["events"]);
+      expect((await listIntegrations(role, tenant.id)).map((i) => i.name)).toEqual(["crm"]);
+      const { key, secret } = await createApiKey(role, tenant.id, integration.id, "ci");
+      expect((await listApiKeys(role, tenant.id, integration.id)).map((k) => k.label)).toEqual([
+        "ci",
+      ]);
       expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(tenant.id);
       expect(await revokeApiKey(role, tenant.id, key.id)).toBe(true);
+      // deleting an integration revokes its keys and deletes its subscriptions
+      const { secret: other } = await createApiKey(role, tenant.id, integration.id);
+      await insertSubscription(
+        control.db,
+        sealer,
+        { ...newSubscription(tenant.id, integration.id), id: randomUUID() },
+        10,
+      );
+      expect((await role.query("select id from subscriptions")).rowCount).toBe(1);
+      expect(await deleteIntegration(role, tenant.id, integration.id)).toBe(true);
+      expect(await authenticateApiKey(control.db, other)).toBeUndefined();
+      expect(await listSubscriptions(control.db, tenant.id)).toEqual([]);
       // model keys, and the audit trail of both
       await putModelKey(role, sealer, tenant.id, "anthropic", "sk-test-1234");
       expect((await listModelKeys(role, tenant.id)).map((k) => k.provider)).toEqual(["anthropic"]);
@@ -446,7 +536,8 @@ describe("console people and sessions", () => {
     });
     const user = { id, tenantId: tenant.id };
     const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
-    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
+    // A minute back, not a millisecond: Postgres's clock (in Docker) may trail the test's.
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 60_000));
 
     expect(await readConsoleSession(control.db, live)).toMatchObject({
       userId: id,
@@ -486,8 +577,8 @@ describe("console people and sessions", () => {
     });
     const user = { id, tenantId: tenant.id };
     const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
-    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
-    const app = await asRole(control.url, "kerby_app");
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 60_000));
+    const app = await asServiceRole(control.url, "kerby_app");
     try {
       const found = await authenticateConsoleSession(app, live);
       expect(found?.userId).toBe(id);

@@ -61,7 +61,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message_end"), message: AgentMessageSchema }),
   z.object({
     type: z.literal("run_end"),
-    reason: z.enum(["done", "aborted", "refused"]),
+    reason: z.enum(["done", "aborted", "refused", "failed"]),
     error: z.string().exactOptional(),
   }),
 ]);

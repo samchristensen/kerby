@@ -1,6 +1,7 @@
 import type { Blobs } from "@kerby/blobs";
-import type { Limits } from "@kerby/contracts";
+import type { Limits, Scope, Visibility } from "@kerby/contracts";
 import type { ControlDb, TenantPools } from "@kerby/db";
+import type { Destinations } from "@kerby/delivery";
 import type { Sealer } from "@kerby/secrets";
 
 export type ApiDeps = {
@@ -9,6 +10,10 @@ export type ApiDeps = {
   blobs: Blobs;
   /** Seals tenants' model keys to the platform public key; it cannot open them. */
   sealer: Sealer;
+  /** Seals subscriptions' signing secrets to the dispatcher's public key (ADR 0019); only the dispatcher opens them. */
+  deliverySealer: Sealer;
+  /** One adapter per destination kind: the api makes secrets and checks configs with them, never delivers. */
+  destinations: Destinations;
   settings: {
     /** The model a conversation gets when the request names none; without one, a request must name its model. */
     defaultModel: string | undefined;
@@ -34,11 +39,25 @@ export type ApiDeps = {
     failedAuthPerMinute: number;
     /** Take the client address from the left-most `X-Forwarded-For` entry (behind Railway's proxy) instead of the socket. */
     trustProxy: boolean;
+    /** Event subscriptions a tenant may hold when its limits do not set `subscriptions`. */
+    defaultSubscriptions: number;
   };
 };
 
-/** Who is calling: established from a verified API key or console session, never from a request body. `actor` is `key:<id>` or `user:<id>`. */
-export type Principal = { tenantId: string; actor: string; limits: Limits };
+/**
+ * Who is calling: established from a verified API key or console session, never from a request body. `actor` is
+ * `key:<id>` or `user:<id>`. A key acts for its integration, with its scopes; a console session acts as the tenant, with
+ * every scope and no integration (ADR 0020).
+ */
+export type Principal = {
+  tenantId: string;
+  actor: string;
+  integrationId: string | null;
+  scopes: ReadonlySet<Scope>;
+  /** Whose work it sees: `"tenant"` with the `tenant` scope, else only its integration's. */
+  visibility: Visibility;
+  limits: Limits;
+};
 
 /** No valid key. */
 export class UnauthorizedError extends Error {

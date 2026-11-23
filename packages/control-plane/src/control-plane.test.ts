@@ -17,8 +17,10 @@ it("the control migrations create the control tables, and keys belong to a tenan
     "audit_log",
     "console_sessions",
     "console_users",
+    "integrations",
     "schema_migrations",
     "signup_allowlist",
+    "subscriptions",
     "tenant_db_credentials",
     "tenant_secrets",
     "tenant_wakeups",
@@ -27,7 +29,7 @@ it("the control migrations create the control tables, and keys belong to a tenan
   ]);
   await expect(
     control.db.query(
-      "insert into api_keys (id, tenant_id, key_hash) values ('k1', gen_random_uuid(), '\\x00')",
+      "insert into api_keys (id, tenant_id, integration_id, key_hash) values ('k1', gen_random_uuid(), gen_random_uuid(), '\\x00')",
     ),
   ).rejects.toThrow(/foreign key/);
 });

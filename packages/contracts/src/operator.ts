@@ -18,6 +18,10 @@ export const LimitsSchema = z.object({
    * `DEFAULT_STORAGE_BYTES`, 1 GiB). A turn already admitted finishes even if its answer goes over.
    */
   storageBytes: z.number().int().positive().optional(),
+  /** Event subscriptions the tenant may hold (default the api's `DEFAULT_SUBSCRIPTIONS`, 10; ADR 0019). */
+  subscriptions: z.number().int().nonnegative().optional(),
+  /** Deliveries in flight at once for this tenant (default the dispatcher's `DEFAULT_CONCURRENT_DELIVERIES`, 4). */
+  concurrentDeliveries: z.number().int().positive().optional(),
 });
 export type Limits = z.infer<typeof LimitsSchema>;
 
@@ -37,6 +41,8 @@ export type Tenant = z.infer<typeof TenantSchema>;
 
 const ApiKeySchema = z.object({
   id: z.string(),
+  /** The integration the key acts for (ADR 0020). */
+  integrationId: z.uuid(),
   label: z.string(),
   createdAt: z.iso.datetime(),
   lastUsedAt: z.iso.datetime().nullable(),
@@ -65,7 +71,11 @@ const CreateTenantResponseSchema = z.object({
 });
 export type CreateTenantResponse = z.infer<typeof CreateTenantResponseSchema>;
 
-export const CreateKeyRequestSchema = z.object({ label: z.string().max(100).optional() });
+/** A key for `integrationId`, or for the tenant's `default` integration. */
+export const CreateKeyRequestSchema = z.object({
+  label: z.string().max(100).optional(),
+  integrationId: z.uuid().optional(),
+});
 
 const CreateKeyResponseSchema = z.object({ apiKey: ApiKeySchema, secret: z.string() });
 export type CreateKeyResponse = z.infer<typeof CreateKeyResponseSchema>;

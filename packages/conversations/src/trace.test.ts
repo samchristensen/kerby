@@ -16,7 +16,11 @@ describe("trace", () => {
   it("reads back what runs reported, in the order it was recorded, across runs", async () => {
     await using tenant = await createTestTenant();
     const blobs = await createTestBlobs();
-    const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const conversation = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
 
     await appendTrace(tenant, blobs, conversation.id, [
       entry("run-a", 1, { type: "run_start" }),
@@ -44,7 +48,11 @@ describe("trace", () => {
   it("pages at whole segments, so every entry is returned once", async () => {
     await using tenant = await createTestTenant();
     const blobs = await createTestBlobs();
-    const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const conversation = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
     await appendTrace(tenant, blobs, conversation.id, [
       entry("r", 1, { type: "run_start" }),
       entry("r", 2, { type: "message_start", role: "assistant" }),
@@ -76,7 +84,11 @@ describe("trace", () => {
     // Segment ids 1 to 12: sorted as text, 10 would come before 7.
     await using tenant = await createTestTenant();
     const blobs = await createTestBlobs();
-    const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const conversation = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
     for (let n = 1; n <= 12; n++)
       await appendTrace(tenant, blobs, conversation.id, [
         entry("r", n, { type: "message_start", role: "assistant" }),
@@ -99,8 +111,16 @@ describe("trace", () => {
   it("keeps one conversation's trace apart from another's, and counts its bytes as stored", async () => {
     await using tenant = await createTestTenant();
     const blobs = await createTestBlobs();
-    const mine = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
-    const other = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const mine = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
+    const other = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
     await appendTrace(tenant, blobs, mine.id, [entry("r", 1, { type: "run_start" })]);
 
     expect((await readTrace(tenant, blobs, other.id, { after: 0, limit: 10 })).entries).toEqual([]);
@@ -113,7 +133,11 @@ describe("trace", () => {
   it("refuses a segment that is not one run's consecutive entries", async () => {
     await using tenant = await createTestTenant();
     const blobs = await createTestBlobs();
-    const conversation = await insertConversation(tenant.db, { model: "faux/faux-1", system: "" });
+    const conversation = await insertConversation(tenant.db, {
+      integrationId: null,
+      model: "faux/faux-1",
+      system: "",
+    });
     await expect(
       appendTrace(tenant, blobs, conversation.id, [
         entry("r", 1, { type: "run_start" }),

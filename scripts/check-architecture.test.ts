@@ -259,6 +259,39 @@ describe("checkArchitecture", () => {
       expect(violation?.rule).toBe("providers");
       expect(violation?.message).toContain("AgentRuntime");
     });
+
+    it("keeps a destination adapter in a service's index.ts, and lets anything use the port", () => {
+      const delivery = {
+        "packages/delivery/package.json": pkg("@kerby/delivery"),
+        "packages/delivery/src/index.ts": "export const x = 1;\n",
+        "packages/delivery-webhook/package.json": pkg("@kerby/delivery-webhook", {
+          "@kerby/delivery": "workspace:*",
+        }),
+        "packages/delivery-webhook/src/index.ts": imp("@kerby/delivery"),
+      };
+      const deps = { "@kerby/delivery": "workspace:*", "@kerby/delivery-webhook": "workspace:*" };
+      const wired = tree({
+        ...delivery,
+        "services/api/package.json": api(deps),
+        "services/api/src/index.ts": imp("./runtime/http.ts") + imp("@kerby/delivery-webhook"),
+        "services/api/src/service/chats.ts": imp("../repo/chats.ts") + imp("@kerby/delivery"),
+      });
+      expect(checkArchitecture(wired)).toEqual([]);
+
+      const buried = tree({
+        ...delivery,
+        "services/api/package.json": api(deps),
+        "services/api/src/service/chats.ts":
+          imp("../repo/chats.ts") + imp("@kerby/delivery-webhook"),
+      });
+      const [violation, ...rest] = checkArchitecture(buried);
+      expect(rest).toEqual([]);
+      expect(violation).toMatchObject({
+        rule: "providers",
+        file: "services/api/src/service/chats.ts",
+      });
+      expect(violation?.message).toContain("Destination from @kerby/delivery");
+    });
   });
 
   describe("docker", () => {

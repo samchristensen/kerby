@@ -1,5 +1,6 @@
 import type {
   ConversationSummary,
+  DeliveryAttempt,
   GetConversationResponse,
   Judgment,
   Limits,
@@ -11,6 +12,8 @@ import type {
   PromptVariable,
   PromptVersion,
   PromptVersionSummary,
+  Scope,
+  Subscription,
 } from "@kerby/contracts";
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
@@ -96,6 +99,34 @@ export type ApiKeyView = {
   revokedAt: string | null;
 };
 
+/** An integration (ADR 0020): who its keys act for and what they may do. */
+export type IntegrationView = {
+  id: string;
+  name: string;
+  /** In catalog order (`SCOPES`). */
+  scopes: Scope[];
+  createdAt: string;
+};
+
+type IntegrationSummaryView = IntegrationView & {
+  activeKeys: number;
+  subscriptions: number;
+};
+
+/** With its keys, newest first, revoked ones included. */
+type IntegrationDetailView = IntegrationView & { keys: ApiKeyView[] };
+
+/** A page of a subscription's delivery log, newest first; `nextBefore` reads the older page. */
+type DeliveryLogView = { deliveries: DeliveryAttempt[]; nextBefore: string | null };
+
+/** A checkbox of a form: what it stands for and its field name. */
+export type ScopeOption = { scope: Scope; description: string; field: string };
+export type EventTypeOption = { pattern: string; field: string };
+/** `*`, and per family (`turn`) its wildcard (`turn.*`) and its types. */
+export type EventTypeOptions = {
+  all: EventTypeOption;
+  families: { family: string; wildcard: EventTypeOption; types: EventTypeOption[] }[];
+};
 /** One address on the sign-up allowlist. */
 export type AllowedEmailView = { email: string; addedAt: string; signedUp: boolean };
 
@@ -182,14 +213,72 @@ export type ConsoleService = {
   /** Stop allowing `email`; an account it already made stays. False when it was not on the list. Admins only. */
   disallowSignup(session: Session, email: string): Promise<boolean>;
   overview(session: Session): Promise<Overview>;
-  apiKeys(session: Session): Promise<ApiKeyView[]>;
-  /** `secret` is the whole key, shown once and never stored. */
+
+  // Integrations (ADR 0020) and their keys, in the control database; audited as `user:<id>`. The pages cannot import
+  // the scope or event type catalogs (ADR 0014), so the service hands them out with their form fields.
+  /** Every scope with its description and the form field of its checkbox, in catalog order. */
+  scopeOptions(): ScopeOption[];
+  /** The tenant's live integrations, oldest first, with their live keys and subscriptions counted. */
+  integrations(access: ChatAccess): Promise<IntegrationSummaryView[]>;
+  /** A live integration with its keys; undefined when the tenant has none by that id. */
+  integration(session: Session, id: string): Promise<IntegrationDetailView | undefined>;
+  /** Form fields `name` and `scope.<scope>` (a checkbox per scope). */
+  createIntegration(
+    session: Session,
+    form: FormInput,
+  ): Promise<{ ok: true; id: string } | FormFailure>;
+  /** Replace its scopes: form fields `scope.<scope>`. Its keys follow within the api's auth cache TTL. */
+  setIntegrationScopes(
+    session: Session,
+    id: string,
+    form: FormInput,
+  ): Promise<{ ok: true } | FormFailure>;
+  /** Revoke its keys and delete its subscriptions. False when the tenant has no such live integration. */
+  deleteIntegration(session: Session, id: string): Promise<boolean>;
+  /** A key of the integration (form field `label`). `secret` is the whole key, shown once and never stored. */
   createApiKey(
     session: Session,
+    integrationId: string,
     form: FormInput,
   ): Promise<{ ok: true; key: ApiKeyView; secret: string } | FormFailure>;
   /** False when the tenant has no such live key. */
   revokeApiKey(session: Session, keyId: string): Promise<boolean>;
+
+  // Event subscriptions (ADR 0019), through the api's `/v1/subscriptions` with the person's session token.
+  eventTypeOptions(): EventTypeOptions;
+  /** The integration's subscriptions, oldest first. */
+  subscriptions(access: ChatAccess, integrationId: string): Promise<Subscription[]>;
+  /** Undefined when the tenant has none by that id. */
+  subscription(access: ChatAccess, id: string): Promise<Subscription | undefined>;
+  /**
+   * A webhook subscription of the integration: form fields `url`, `description`, `scope` (`own` or `tenant`) and
+   * `type.<pattern>` (a checkbox per type, per family wildcard such as `turn.*`, and `*`). `secret` is shown once.
+   */
+  createSubscription(
+    access: ChatAccess,
+    integrationId: string,
+    form: FormInput,
+  ): Promise<{ ok: true; subscription: Subscription; secret: string } | FormFailure>;
+  /** Enabling a disabled subscription resumes it where it stopped. */
+  setSubscriptionEnabled(
+    access: ChatAccess,
+    id: string,
+    enabled: boolean,
+  ): Promise<{ ok: true } | FormFailure>;
+  deleteSubscription(access: ChatAccess, id: string): Promise<{ ok: true } | FormFailure>;
+  /** A new signing secret, shown once; the old one keeps signing beside it until `previousExpiresAt`. */
+  rotateSubscriptionSecret(
+    access: ChatAccess,
+    id: string,
+  ): Promise<{ ok: true; secret: string; previousExpiresAt: string } | FormFailure>;
+  /** Queue a `ping` to the destination; the delivery log shows how it went. */
+  testSubscription(
+    access: ChatAccess,
+    id: string,
+  ): Promise<{ ok: true; eventId: string } | FormFailure>;
+  /** A page of its delivery log, newest first, older than `before` when given; undefined when there is no such subscription. */
+  deliveries(access: ChatAccess, id: string, before?: string): Promise<DeliveryLogView | undefined>;
+
   /** Every supported provider, configured or not, in the adapter's order. */
   providers(session: Session): Promise<ProviderView[]>;
   setModelKey(

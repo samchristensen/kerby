@@ -1,11 +1,16 @@
 // The tenant-facing API. Every route but /healthz authenticates a bearer credential (an API key, or the console's session
-// token for a signed-in person) and runs as that credential's tenant.
+// token for a signed-in person), runs as that credential's tenant, and declares the scope it needs (ADR 0020).
 import {
   CreateConversationRequestSchema,
   CreatePromptRequestSchema,
+  CreateSubscriptionRequestSchema,
+  expandEventTypes,
   GetConversationQuerySchema,
   GetTraceQuerySchema,
   ListConversationsQuerySchema,
+  ListDeliveriesQuerySchema,
+  ListEventsQuerySchema,
+  type ListEventsResponse,
   ListPromptsQuerySchema,
   ModelProviderSchema,
   PostMessageRequestSchema,
@@ -14,15 +19,18 @@ import {
   PromptVersionParamSchema,
   PublishPromptRequestSchema,
   PutModelKeyRequestSchema,
+  RedeliverRequestSchema,
   RenamePromptRequestSchema,
   RenderPromptRequestSchema,
   SaveDraftRequestSchema,
+  type Scope,
   SetPromptLabelRequestSchema,
   STREAM_INCLUDES,
   StreamIncludeSchema,
   SubmitJudgmentRequestSchema,
+  UpdateSubscriptionRequestSchema,
 } from "@kerby/contracts";
-import { ModelKeyLimitError } from "@kerby/control-plane";
+import { ModelKeyLimitError, SubscriptionLimitError } from "@kerby/control-plane";
 import {
   ConversationBusyError,
   ConversationFullError,
@@ -30,6 +38,7 @@ import {
   InvalidCursorError,
 } from "@kerby/conversations";
 import { isUuid, type TenantContext, type TenantLease } from "@kerby/db";
+import { pollEvents } from "@kerby/events";
 import { log, withTenant } from "@kerby/observability";
 import {
   DraftConflictError,
@@ -83,6 +92,20 @@ import {
   saveTenantDraft,
   setTenantPromptLabel,
 } from "../service/prompts.ts";
+import {
+  createTenantSubscription,
+  deleteTenantSubscription,
+  getTenantSubscription,
+  IntegrationRequiredError,
+  InvalidDestinationError,
+  listTenantDeliveries,
+  listTenantSubscriptions,
+  pingTenantSubscription,
+  redeliverToTenantSubscription,
+  rotateTenantSubscriptionSecret,
+  TenantScopeRequiredError,
+  updateTenantSubscription,
+} from "../service/subscriptions.ts";
 import {
   type ApiDeps,
   LookupRefusedError,
@@ -165,10 +188,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
   const failedAuth = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
   const lookups = new TurnsPerKey(LOOKUPS_PER_ADDRESS);
 
-  /** Authenticate, then run `handler` with the tenant's context. The tenant id comes from the key only. */
+  /**
+   * Authenticate, check the credential holds `scope`, then run `handler` with the tenant's context. The tenant id comes
+   * from the key only. Every route names its scope, so none can forget one.
+   */
   const authed =
     (
       route: string,
+      scope: Scope,
       handler: (
         request: Request,
         params: Record<string, string>,
@@ -224,6 +251,12 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       try {
         return await withTenant(principal.tenantId, async () => {
           try {
+            if (!principal.scopes.has(scope))
+              throw new HttpError(
+                403,
+                "forbidden",
+                `this key's integration lacks the "${scope}" scope; an integration's scopes are set in the console`,
+              );
             const rate =
               principal.limits.requestsPerMinute ?? deps.settings.defaultRequestsPerMinute;
             const wait = requests.take(principal.tenantId, rate);
@@ -246,6 +279,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(400, "invalid_request", error.message);
             if (error instanceof ModelKeyLimitError)
               throw new HttpError(409, "model_key_limit", error.message);
+            if (error instanceof SubscriptionLimitError)
+              throw new HttpError(409, "subscription_limit", error.message);
+            if (error instanceof InvalidDestinationError)
+              throw new HttpError(400, "invalid_destination", error.message);
+            if (error instanceof IntegrationRequiredError)
+              throw new HttpError(400, "invalid_request", error.message);
+            if (error instanceof TenantScopeRequiredError)
+              throw new HttpError(403, "forbidden", error.message);
             if (error instanceof InvalidModelError)
               throw new HttpError(400, "invalid_model", error.message);
             if (error instanceof PromptNameTakenError)
@@ -293,11 +334,40 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
   };
 
   /**
-   * Open event streams in this process, in all and per tenant: each leases its tenant's pool and shares the tenant's
-   * listening connection for as long as it lives (connection budget: docs/deploy.md#postgres).
+   * Requests that hold their tenant's pool while they wait (event streams, long polls of `GET /v1/events`), in this
+   * process in all and per tenant: each leases its tenant's pool and shares the tenant's listening connection for as
+   * long as it lives (connection budget: docs/deploy.md#postgres).
    */
   let streamsOpen = 0;
   const openStreams = new Map<string, number>();
+
+  /** Count one more held request of the tenant, or refuse it: 503 past the process cap, 429 past the tenant's. Returns its release. */
+  const admitStream = (tenantId: string, instead: string): (() => void) => {
+    if (streamsOpen >= deps.settings.maxStreamsPerProcess)
+      throw new HttpError(
+        503,
+        "server_busy",
+        `this server holds its maximum of ${deps.settings.maxStreamsPerProcess} open event streams; retry shortly, or ${instead}`,
+      );
+    const open = openStreams.get(tenantId) ?? 0;
+    if (open >= deps.settings.maxStreamsPerTenant)
+      throw new HttpError(
+        429,
+        "too_many_streams",
+        `at most ${deps.settings.maxStreamsPerTenant} event streams and long polls may be open at once`,
+      );
+    streamsOpen++;
+    openStreams.set(tenantId, open + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      streamsOpen--;
+      const left = (openStreams.get(tenantId) ?? 1) - 1;
+      if (left > 0) openStreams.set(tenantId, left);
+      else openStreams.delete(tenantId);
+    };
+  };
 
   const providerParam = (params: Record<string, string>): string => {
     const parsed = ModelProviderSchema.safeParse(params.provider);
@@ -335,14 +405,14 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/model-keys",
-      authed("GET /v1/model-keys", async (_request, _params, principal) =>
+      authed("GET /v1/model-keys", "admin", async (_request, _params, principal) =>
         json(200, await listTenantModelKeys(deps, principal)),
       ),
     ],
     [
       "PUT",
       "/v1/model-keys/:provider",
-      authed("PUT /v1/model-keys/:provider", async (request, params, principal) => {
+      authed("PUT /v1/model-keys/:provider", "admin", async (request, params, principal) => {
         // The adapters' lists (ADR 0008, 0015): a key for a provider nothing can use would fail only at the first call.
         const provider = params.provider ?? "";
         const providers = [
@@ -362,7 +432,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "DELETE",
       "/v1/model-keys/:provider",
-      authed("DELETE /v1/model-keys/:provider", async (_request, params, principal) => {
+      authed("DELETE /v1/model-keys/:provider", "admin", async (_request, params, principal) => {
         if (!(await removeModelKey(deps, principal, providerParam(params))))
           throw new NotFoundError("model key not found");
         return new Response(null, { status: 204 });
@@ -371,15 +441,20 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/conversations",
-      authed("POST /v1/conversations", async (request, _params, principal) => {
+      authed("POST /v1/conversations", "conversations", async (request, _params, principal) => {
         const body = await readJson(request, CreateConversationRequestSchema);
-        return json(201, await inTenant(principal, (ctx) => createConversation(deps, ctx, body)));
+        return json(
+          201,
+          await inTenant(principal, (ctx) =>
+            createConversation(deps, ctx, principal.integrationId, body),
+          ),
+        );
       }),
     ],
     [
       "GET",
       "/v1/conversations",
-      authed("GET /v1/conversations", async (request, _params, principal) => {
+      authed("GET /v1/conversations", "conversations", async (request, _params, principal) => {
         const query = ListConversationsQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
         );
@@ -391,29 +466,37 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           );
         return json(
           200,
-          await inTenant(principal, (ctx) => listTenantConversations(ctx, query.data)),
+          await inTenant(principal, (ctx) =>
+            listTenantConversations(ctx, query.data, principal.visibility),
+          ),
         );
       }),
     ],
     [
       "POST",
       "/v1/conversations/:id/messages",
-      authed("POST /v1/conversations/:id/messages", async (request, params, principal) => {
-        const id = conversationId(params);
-        const body = await readJson(request, PostMessageRequestSchema, {
-          maxBytes: MESSAGE_BODY_BYTES,
-        });
-        const storageBytes = principal.limits.storageBytes ?? deps.settings.defaultStorageBytes;
-        return json(
-          202,
-          await inTenant(principal, (ctx) => postMessage(deps, ctx, id, body, storageBytes)),
-        );
-      }),
+      authed(
+        "POST /v1/conversations/:id/messages",
+        "conversations",
+        async (request, params, principal) => {
+          const id = conversationId(params);
+          const body = await readJson(request, PostMessageRequestSchema, {
+            maxBytes: MESSAGE_BODY_BYTES,
+          });
+          const storageBytes = principal.limits.storageBytes ?? deps.settings.defaultStorageBytes;
+          return json(
+            202,
+            await inTenant(principal, (ctx) =>
+              postMessage(deps, ctx, principal.visibility, id, body, storageBytes),
+            ),
+          );
+        },
+      ),
     ],
     [
       "GET",
       "/v1/conversations/:id",
-      authed("GET /v1/conversations/:id", async (request, params, principal) => {
+      authed("GET /v1/conversations/:id", "conversations", async (request, params, principal) => {
         const id = conversationId(params);
         const query = GetConversationQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
@@ -425,124 +508,171 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
             "after must be a sequence number (0 or more) and limit 1 to 500",
           );
         const page = query.data;
-        return json(200, await inTenant(principal, (ctx) => getConversation(deps, ctx, id, page)));
+        return json(
+          200,
+          await inTenant(principal, (ctx) =>
+            getConversation(deps, ctx, principal.visibility, id, page),
+          ),
+        );
       }),
     ],
     [
       "GET",
       "/v1/conversations/:id/events",
-      authed("GET /v1/conversations/:id/events", async (request, params, principal) => {
-        const id = conversationId(params);
-        const header =
-          request.headers.get("last-event-id") ?? new URL(request.url).searchParams.get("after");
-        const after = header === null ? 0 : Number(header);
-        if (!Number.isInteger(after) || after < 0)
-          throw new HttpError(400, "invalid_request", "Last-Event-ID must be a sequence number");
-        const include = StreamIncludeSchema.safeParse(
-          new URL(request.url).searchParams.get("include") ?? undefined,
-        );
-        if (!include.success)
-          throw new HttpError(
-            400,
-            "invalid_request",
-            `include is a comma-separated list of: ${STREAM_INCLUDES.join(", ")}`,
+      authed(
+        "GET /v1/conversations/:id/events",
+        "conversations",
+        async (request, params, principal) => {
+          const id = conversationId(params);
+          const header =
+            request.headers.get("last-event-id") ?? new URL(request.url).searchParams.get("after");
+          const after = header === null ? 0 : Number(header);
+          if (!Number.isInteger(after) || after < 0)
+            throw new HttpError(400, "invalid_request", "Last-Event-ID must be a sequence number");
+          const include = StreamIncludeSchema.safeParse(
+            new URL(request.url).searchParams.get("include") ?? undefined,
           );
-        if (streamsOpen >= deps.settings.maxStreamsPerProcess)
-          throw new HttpError(
-            503,
-            "server_busy",
-            `this server holds its maximum of ${deps.settings.maxStreamsPerProcess} open event streams; retry shortly, or read the conversation with GET /v1/conversations/:id`,
+          if (!include.success)
+            throw new HttpError(
+              400,
+              "invalid_request",
+              `include is a comma-separated list of: ${STREAM_INCLUDES.join(", ")}`,
+            );
+          const releaseSlot = admitStream(
+            principal.tenantId,
+            "read the conversation with GET /v1/conversations/:id",
           );
-        const open = openStreams.get(principal.tenantId) ?? 0;
-        if (open >= deps.settings.maxStreamsPerTenant)
-          throw new HttpError(
-            429,
-            "too_many_streams",
-            `at most ${deps.settings.maxStreamsPerTenant} event streams may be open at once`,
-          );
-        streamsOpen++;
-        openStreams.set(principal.tenantId, open + 1);
-        let released = false;
-        let lease: TenantLease | undefined;
-        const release = async () => {
-          if (released) return;
-          released = true;
-          streamsOpen--;
-          const left = (openStreams.get(principal.tenantId) ?? 1) - 1;
-          if (left > 0) openStreams.set(principal.tenantId, left);
-          else openStreams.delete(principal.tenantId);
-          await lease?.release();
-        };
-        const presented = bearerToken(request) ?? "";
-        // A stream outlives the check that opened it: look again, so revoking a key or suspending a tenant ends it
-        // within the same window as for a request.
-        const stillAllowed = () =>
-          auth.authenticate(presented).then(
-            () => true,
-            () => false,
-          );
-        try {
-          // The pool stays leased for as long as the stream is open.
-          lease = await deps.pools.acquire(principal.tenantId);
-          // Look the conversation up before sending headers, so a wrong id is a 404 and not an empty stream.
-          if (!(await findConversation(lease.db, id)))
-            throw new NotFoundError("conversation not found");
-          const events = conversationEvents(
-            deps,
-            { tenantId: principal.tenantId, db: lease.db },
-            id,
-            after,
-            include.data,
-            request.signal,
-            stillAllowed,
-          );
-          return sse(events, release);
-        } catch (error) {
-          await release();
-          throw error;
-        }
-      }),
+          let released = false;
+          let lease: TenantLease | undefined;
+          const release = async () => {
+            if (released) return;
+            released = true;
+            releaseSlot();
+            await lease?.release();
+          };
+          const presented = bearerToken(request) ?? "";
+          // A stream outlives the check that opened it: look again, so revoking a key or suspending a tenant ends it
+          // within the same window as for a request.
+          const stillAllowed = () =>
+            auth.authenticate(presented).then(
+              () => true,
+              () => false,
+            );
+          try {
+            // The pool stays leased for as long as the stream is open.
+            lease = await deps.pools.acquire(principal.tenantId);
+            // Look the conversation up before sending headers, so a wrong id is a 404 and not an empty stream.
+            if (!(await findConversation(lease.db, id, principal.visibility)))
+              throw new NotFoundError("conversation not found");
+            const events = conversationEvents(
+              deps,
+              { tenantId: principal.tenantId, db: lease.db },
+              principal.visibility,
+              id,
+              after,
+              include.data,
+              request.signal,
+              stillAllowed,
+            );
+            return sse(events, release);
+          } catch (error) {
+            await release();
+            throw error;
+          }
+        },
+      ),
     ],
     [
       "GET",
       "/v1/conversations/:id/trace",
-      authed("GET /v1/conversations/:id/trace", async (request, params, principal) => {
-        const id = conversationId(params);
-        const query = GetTraceQuerySchema.safeParse(
-          Object.fromEntries(new URL(request.url).searchParams),
-        );
-        if (!query.success)
-          throw new HttpError(
-            400,
-            "invalid_request",
-            "after must be a cursor (0 or more) and limit 1 to 1000",
+      authed(
+        "GET /v1/conversations/:id/trace",
+        "conversations",
+        async (request, params, principal) => {
+          const id = conversationId(params);
+          const query = GetTraceQuerySchema.safeParse(
+            Object.fromEntries(new URL(request.url).searchParams),
           );
-        return json(200, await inTenant(principal, (ctx) => getTrace(deps, ctx, id, query.data)));
-      }),
+          if (!query.success)
+            throw new HttpError(
+              400,
+              "invalid_request",
+              "after must be a cursor (0 or more) and limit 1 to 1000",
+            );
+          return json(
+            200,
+            await inTenant(principal, (ctx) =>
+              getTrace(deps, ctx, principal.visibility, id, query.data),
+            ),
+          );
+        },
+      ),
     ],
     [
       "POST",
       "/v1/judgments",
-      authed("POST /v1/judgments", async (request, _params, principal) => {
+      authed("POST /v1/judgments", "judgments", async (request, _params, principal) => {
         const body = await readJson(request, SubmitJudgmentRequestSchema, {
           maxBytes: JUDGMENT_BODY_BYTES,
         });
-        return json(202, await inTenant(principal, (ctx) => submitJudgment(deps, ctx, body)));
+        return json(
+          202,
+          await inTenant(principal, (ctx) =>
+            submitJudgment(deps, ctx, principal.integrationId, body),
+          ),
+        );
       }),
     ],
     [
       "GET",
       "/v1/judgments/:id",
-      authed("GET /v1/judgments/:id", async (_request, params, principal) => {
+      authed("GET /v1/judgments/:id", "judgments", async (_request, params, principal) => {
         const id = z.uuid().safeParse(params.id);
         if (!id.success) throw new HttpError(404, "not_found", "judgment not found");
-        return json(200, await inTenant(principal, (ctx) => getJudgment(ctx, id.data)));
+        return json(
+          200,
+          await inTenant(principal, (ctx) => getJudgment(ctx, principal.visibility, id.data)),
+        );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/events",
+      authed("GET /v1/events", "events", async (request, _params, principal) => {
+        const query = ListEventsQuerySchema.safeParse(
+          Object.fromEntries(new URL(request.url).searchParams),
+        );
+        if (!query.success) {
+          const issue = query.error.issues[0];
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `${String(issue?.path[0] ?? "query")}: ${issue?.message ?? "invalid"}`,
+          );
+        }
+        const { after, limit, types, conversationId, wait } = query.data;
+        const filter = {
+          visibility: principal.visibility,
+          types: types && expandEventTypes(types),
+          conversationId,
+        };
+        // A long poll holds its tenant's pool and a listening connection as a stream does, so it counts as one.
+        const release =
+          wait === 0 ? () => {} : admitStream(principal.tenantId, "poll without wait");
+        try {
+          const page: ListEventsResponse = await inTenant(principal, (ctx) =>
+            pollEvents(ctx.db, after, filter, limit, wait * 1000, request.signal),
+          );
+          return json(200, page);
+        } finally {
+          release();
+        }
       }),
     ],
     [
       "GET",
       "/v1/prompts",
-      authed("GET /v1/prompts", async (request, _params, principal) => {
+      authed("GET /v1/prompts", "admin", async (request, _params, principal) => {
         const query = ListPromptsQuerySchema.safeParse(
           Object.fromEntries(new URL(request.url).searchParams),
         );
@@ -554,7 +684,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/prompts",
-      authed("POST /v1/prompts", async (request, _params, principal) => {
+      authed("POST /v1/prompts", "admin", async (request, _params, principal) => {
         const body = await readJson(request, CreatePromptRequestSchema);
         return json(
           201,
@@ -565,7 +695,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/prompts/:name",
-      authed("GET /v1/prompts/:name", async (_request, params, principal) => {
+      authed("GET /v1/prompts/:name", "admin", async (_request, params, principal) => {
         const name = promptName(params);
         return json(200, await inTenant(principal, (ctx) => getTenantPrompt(ctx, name)));
       }),
@@ -573,7 +703,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PATCH",
       "/v1/prompts/:name",
-      authed("PATCH /v1/prompts/:name", async (request, params, principal) => {
+      authed("PATCH /v1/prompts/:name", "admin", async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, RenamePromptRequestSchema);
         return json(
@@ -587,7 +717,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "DELETE",
       "/v1/prompts/:name",
-      authed("DELETE /v1/prompts/:name", async (_request, params, principal) => {
+      authed("DELETE /v1/prompts/:name", "admin", async (_request, params, principal) => {
         const name = promptName(params);
         await inTenant(principal, (ctx) => deleteTenantPrompt(deps, principal, ctx, name));
         return new Response(null, { status: 204 });
@@ -596,7 +726,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PUT",
       "/v1/prompts/:name/draft",
-      authed("PUT /v1/prompts/:name/draft", async (request, params, principal) => {
+      authed("PUT /v1/prompts/:name/draft", "admin", async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, SaveDraftRequestSchema);
         return json(
@@ -608,7 +738,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "POST",
       "/v1/prompts/:name/versions",
-      authed("POST /v1/prompts/:name/versions", async (request, params, principal) => {
+      authed("POST /v1/prompts/:name/versions", "admin", async (request, params, principal) => {
         const name = promptName(params);
         const body = await readJson(request, PublishPromptRequestSchema);
         return json(
@@ -620,20 +750,25 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "GET",
       "/v1/prompts/:name/versions/:version",
-      authed("GET /v1/prompts/:name/versions/:version", async (_request, params, principal) => {
-        const name = promptName(params);
-        const version = promptVersion(params);
-        return json(
-          200,
-          await inTenant(principal, (ctx) => getTenantPromptVersion(ctx, name, version)),
-        );
-      }),
+      authed(
+        "GET /v1/prompts/:name/versions/:version",
+        "admin",
+        async (_request, params, principal) => {
+          const name = promptName(params);
+          const version = promptVersion(params);
+          return json(
+            200,
+            await inTenant(principal, (ctx) => getTenantPromptVersion(ctx, name, version)),
+          );
+        },
+      ),
     ],
     [
       "POST",
       "/v1/prompts/:name/versions/:version/render",
       authed(
         "POST /v1/prompts/:name/versions/:version/render",
+        "admin",
         async (request, params, principal) => {
           const name = promptName(params);
           const version = promptVersion(params);
@@ -650,7 +785,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "PUT",
       "/v1/prompts/:name/labels/:label",
-      authed("PUT /v1/prompts/:name/labels/:label", async (request, params, principal) => {
+      authed("PUT /v1/prompts/:name/labels/:label", "admin", async (request, params, principal) => {
         const name = promptName(params);
         const label = promptLabel(params);
         const body = await readJson(request, SetPromptLabelRequestSchema);
@@ -665,14 +800,120 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     [
       "DELETE",
       "/v1/prompts/:name/labels/:label",
-      authed("DELETE /v1/prompts/:name/labels/:label", async (_request, params, principal) => {
-        const name = promptName(params);
-        const label = promptLabel(params);
-        await inTenant(principal, (ctx) =>
-          removeTenantPromptLabel(deps, principal, ctx, name, label),
+      authed(
+        "DELETE /v1/prompts/:name/labels/:label",
+        "admin",
+        async (_request, params, principal) => {
+          const name = promptName(params);
+          const label = promptLabel(params);
+          await inTenant(principal, (ctx) =>
+            removeTenantPromptLabel(deps, principal, ctx, name, label),
+          );
+          return new Response(null, { status: 204 });
+        },
+      ),
+    ],
+    [
+      "POST",
+      "/v1/subscriptions",
+      authed("POST /v1/subscriptions", "admin", async (request, _params, principal) => {
+        const body = await readJson(request, CreateSubscriptionRequestSchema, { maxBytes: 16_384 });
+        return json(
+          201,
+          await inTenant(principal, (ctx) => createTenantSubscription(deps, principal, ctx, body)),
         );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/subscriptions",
+      authed("GET /v1/subscriptions", "admin", async (_request, _params, principal) =>
+        json(200, await listTenantSubscriptions(deps, principal)),
+      ),
+    ],
+    [
+      "GET",
+      "/v1/subscriptions/:id",
+      authed("GET /v1/subscriptions/:id", "admin", async (_request, params, principal) =>
+        json(200, await getTenantSubscription(deps, principal, params.id ?? "")),
+      ),
+    ],
+    [
+      "PATCH",
+      "/v1/subscriptions/:id",
+      authed("PATCH /v1/subscriptions/:id", "admin", async (request, params, principal) => {
+        const body = await readJson(request, UpdateSubscriptionRequestSchema, { maxBytes: 16_384 });
+        return json(200, await updateTenantSubscription(deps, principal, params.id ?? "", body));
+      }),
+    ],
+    [
+      "DELETE",
+      "/v1/subscriptions/:id",
+      authed("DELETE /v1/subscriptions/:id", "admin", async (_request, params, principal) => {
+        await deleteTenantSubscription(deps, principal, params.id ?? "");
         return new Response(null, { status: 204 });
       }),
+    ],
+    [
+      "POST",
+      "/v1/subscriptions/:id/secret",
+      authed("POST /v1/subscriptions/:id/secret", "admin", async (_request, params, principal) =>
+        json(200, await rotateTenantSubscriptionSecret(deps, principal, params.id ?? "")),
+      ),
+    ],
+    [
+      "POST",
+      "/v1/subscriptions/:id/test",
+      authed("POST /v1/subscriptions/:id/test", "admin", async (_request, params, principal) =>
+        json(
+          202,
+          await inTenant(principal, (ctx) =>
+            pingTenantSubscription(deps, principal, ctx, params.id ?? ""),
+          ),
+        ),
+      ),
+    ],
+    [
+      "POST",
+      "/v1/subscriptions/:id/redeliver",
+      authed(
+        "POST /v1/subscriptions/:id/redeliver",
+        "admin",
+        async (request, params, principal) => {
+          const body = await readJson(request, RedeliverRequestSchema, { maxBytes: 4096 });
+          return json(
+            202,
+            await inTenant(principal, (ctx) =>
+              redeliverToTenantSubscription(deps, principal, ctx, params.id ?? "", body.eventId),
+            ),
+          );
+        },
+      ),
+    ],
+    [
+      "GET",
+      "/v1/subscriptions/:id/deliveries",
+      authed(
+        "GET /v1/subscriptions/:id/deliveries",
+        "admin",
+        async (request, params, principal) => {
+          const query = ListDeliveriesQuerySchema.safeParse(
+            Object.fromEntries(new URL(request.url).searchParams),
+          );
+          if (!query.success)
+            throw new HttpError(
+              400,
+              "invalid_request",
+              "limit must be 1 to 100, before a previous nextBefore",
+            );
+          return json(
+            200,
+            await inTenant(principal, (ctx) =>
+              listTenantDeliveries(deps, principal, ctx, params.id ?? "", query.data),
+            ),
+          );
+        },
+      ),
     ],
   ];
   return createRouter(routes);

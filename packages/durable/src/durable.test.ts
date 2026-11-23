@@ -72,6 +72,7 @@ describe("spawnInTx", () => {
 
 describe("readTask", () => {
   const request = {
+    integrationId: null,
     model: "typesafe/jev-latest",
     state: "I was charged twice.",
     questions: { billing: { type: "noul", instructions: "Is this about billing?" } },

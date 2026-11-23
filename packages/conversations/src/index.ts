@@ -2,16 +2,21 @@
 import { join } from "node:path";
 import { blobsMigrationsDir } from "@kerby/blobs";
 import { durableMigrationsDir } from "@kerby/durable";
+import { eventsMigrationsDir } from "@kerby/events";
 import { promptsMigrationsDir } from "@kerby/prompts";
 
 const conversationsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-/** Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, then prompts. */
+/**
+ * Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, prompts, then
+ * the event log.
+ */
 export const tenantMigrationDirs: readonly string[] = [
   durableMigrationsDir,
   blobsMigrationsDir,
   conversationsMigrationsDir,
   promptsMigrationsDir,
+  eventsMigrationsDir,
 ];
 
 export {
@@ -40,6 +45,6 @@ export {
   isBusy,
   listConversations,
   recordToolExecution,
-  setLastError,
 } from "./repo.ts";
 export { appendTrace, readTrace } from "./trace.ts";
+export { recordTurnOutcome, recordTurnStarted, type TurnOutcome } from "./turns.ts";

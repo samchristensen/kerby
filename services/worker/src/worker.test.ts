@@ -5,6 +5,7 @@ import { createTestBlobs } from "@kerby/blobs/testing";
 import type { Limits } from "@kerby/contracts";
 import {
   createApiKey,
+  ensureDefaultIntegration,
   hintTenantWork,
   insertTenant,
   putModelKey,
@@ -120,11 +121,16 @@ async function harness(options: Options = {}) {
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    await createApiKey(control.db, row.id);
+    const integration = await ensureDefaultIntegration(control.db, row.id);
+    await createApiKey(control.db, row.id, integration.id);
     const database = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);
-    return { id: row.id, ctx: { tenantId: row.id, db: database.db } };
+    return {
+      id: row.id,
+      integrationId: integration.id,
+      ctx: { tenantId: row.id, db: database.db },
+    };
   }
 
   /**
@@ -147,7 +153,11 @@ async function harness(options: Options = {}) {
   }
 
   async function conversation(t: Awaited<ReturnType<typeof tenant>>) {
-    return insertConversation(t.ctx.db, { model: "fake/fake-1", system: "Be brief." });
+    return insertConversation(t.ctx.db, {
+      integrationId: t.integrationId,
+      model: "fake/fake-1",
+      system: "Be brief.",
+    });
   }
 
   const messages = async (t: Awaited<ReturnType<typeof tenant>>, conversationId: string) =>
@@ -192,6 +202,16 @@ async function harness(options: Options = {}) {
   };
 }
 
+type EventRow = { type: string; integration_id: string | null; data: Record<string, unknown> };
+
+/** The tenant's event log, oldest first. */
+const eventsOf = async (t: { ctx: { db: TenantDb } }): Promise<EventRow[]> =>
+  (
+    await t.ctx.db.query<EventRow>(
+      "select type, integration_id, data from events order by position",
+    )
+  ).rows;
+
 const textOf = (message: AgentMessage | undefined): string =>
   message ? message.content.map((part) => ("text" in part ? part.text : "")).join("") : "";
 
@@ -205,6 +225,11 @@ describe("a turn", () => {
       notices.push(p),
     );
     cleanups.push(() => subscription.close());
+    const dispatcherNotices: string[] = [];
+    const dispatchers = await h.control.db.listen("tenant_events", (p) =>
+      dispatcherNotices.push(p),
+    );
+    cleanups.push(() => dispatchers.close());
 
     await h.post(t, conversation.id, "hello");
     const all = await h.settled(t, conversation.id, 2);
@@ -233,6 +258,23 @@ describe("a turn", () => {
     expect(types).toContain("text_delta");
     expect(types).toContain("persisted:2");
     expect(types.indexOf("persisted:2")).toBeGreaterThan(types.indexOf("run_start"));
+
+    const events = await eventually("turn.completed", async () => {
+      const rows = await eventsOf(t);
+      return rows.some((e) => e.type === "turn.completed") ? rows : false;
+    });
+    const c = conversation.id;
+    expect(events).toEqual(
+      [
+        { type: "conversation.created", data: expect.objectContaining({ conversationId: c }) },
+        { type: "message.created", data: expect.objectContaining({ conversationId: c, seq: 1 }) },
+        { type: "turn.started", data: { conversationId: c, seq: 1 } },
+        { type: "message.created", data: expect.objectContaining({ conversationId: c, seq: 2 }) },
+        { type: "turn.completed", data: { conversationId: c, seq: 1, lastSeq: 2 } },
+      ].map((e) => ({ ...e, integration_id: t.integrationId })),
+    );
+    // The dispatchers hear about this tenant on the control database.
+    await eventually("tenant_events", async () => dispatcherNotices.includes(t.id));
   });
 
   it("finds hinted work by its due sweep when no notification arrives", async () => {
@@ -459,6 +501,18 @@ describe("recovery", () => {
     // each message exactly once, in order
     const seqs = await t.ctx.db.query<{ seq: number }>("select seq from messages order by seq");
     expect(seqs.rows.map((r) => r.seq)).toEqual([1, 2, 3, 4]);
+    // Each event once, however many attempts the turn took.
+    const events = await eventsOf(t);
+    expect(events.map((e) => e.type)).toEqual([
+      "conversation.created",
+      "message.created",
+      "turn.started",
+      "message.created",
+      "message.created",
+      "message.created",
+      "turn.completed",
+    ]);
+    expect(events.at(-1)?.data).toEqual({ conversationId: conversation.id, seq: 1, lastSeq: 4 });
   });
 
   it("bills an answer whose attempt died between persisting and billing it, once, on the retry", async () => {
@@ -504,6 +558,11 @@ describe("recovery", () => {
     const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
+    const notices: string[] = [];
+    const subscription = await t.ctx.db.listen(conversationChannel(conversation.id), (p) =>
+      notices.push(p),
+    );
+    cleanups.push(() => subscription.close());
     await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
     await hintTenantWork(h.control.db, t.id);
@@ -529,6 +588,36 @@ describe("recovery", () => {
         errorMessage: "provider is down",
       }),
     ]);
+    const events = await eventsOf(t);
+    expect(events.filter((e) => e.type.startsWith("turn."))).toEqual([
+      {
+        type: "turn.started",
+        integration_id: t.integrationId,
+        data: { conversationId: conversation.id, seq: 1 },
+      },
+      {
+        type: "turn.failed",
+        integration_id: t.integrationId,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "error",
+          error: "the turn failed after 2 attempts",
+        },
+      },
+    ]);
+    // Clients watching the conversation are told it is over.
+    const ends = await eventually("a live run_end", async () => {
+      const found = notices
+        .map(parseNotice)
+        .flatMap((n) =>
+          n && "live" in n && n.live.event.type === "run_end" ? [n.live.event] : [],
+        );
+      return found.length > 0 ? found : false;
+    });
+    expect(ends).toEqual([
+      { type: "run_end", reason: "failed", error: "the turn failed after 2 attempts" },
+    ]);
   });
 
   it("a refused request ends the turn with the reason on the conversation, without retrying", async () => {
@@ -552,6 +641,21 @@ describe("recovery", () => {
     await eventually("turn done", async () => !(await isBusy(t.ctx.db, conversation.id)));
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    const outcomes = (await eventsOf(t)).filter((e) =>
+      /^turn\.(completed|blocked|failed)$/.test(e.type),
+    );
+    expect(outcomes).toEqual([
+      {
+        type: "turn.failed",
+        integration_id: t.integrationId,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "refused",
+          error: "model_error: 400 bad tool schema",
+        },
+      },
     ]);
     // a new message clears the error
     await h.post(t, conversation.id, "again");
@@ -710,6 +814,7 @@ describe("bring your own key", () => {
     });
     const t = await h.tenant("acme");
     const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
       model: "acme-ai/big-1",
       system: "s",
     });
@@ -730,7 +835,11 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime, modelKeys: async () => undefined });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
     await h.post(t, conversation.id, "hello");
     await eventually("last_error", () => lastError(t).then((e) => e ?? false));
     await eventually("turn done", async () => !(await isBusy(t.ctx.db, conversation.id)));
@@ -738,6 +847,23 @@ describe("bring your own key", () => {
     expect(ran).toBe(false);
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    expect((await eventsOf(t)).filter((e) => e.type.startsWith("turn."))).toEqual([
+      {
+        type: "turn.started",
+        integration_id: null,
+        data: { conversationId: conversation.id, seq: 1 },
+      },
+      {
+        type: "turn.failed",
+        integration_id: null,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "no_model_key",
+          error: expect.stringMatching(/no model key for provider "anthropic"/),
+        },
+      },
     ]);
   });
 
@@ -752,7 +878,11 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime, modelKeys: async () => secret });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
     const notices: string[] = [];
     const subscription = await t.ctx.db.listen(conversationChannel(conversation.id), (p) =>
       notices.push(p),
@@ -776,7 +906,11 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime: failing, modelKeys: async () => secret });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
     await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
     await hintTenantWork(h.control.db, t.id);
@@ -863,6 +997,20 @@ describe("fencing", () => {
         .rows[0]?.blob_id ?? "",
     );
     expect(new TextDecoder().decode(stored.body)).not.toContain("DIVERGENT");
+    // One outcome, the live run's: the lapsed run recorded none.
+    const outcomes = await eventually("the outcome", async () => {
+      const rows = (await eventsOf(t)).filter((e) =>
+        /^turn\.(completed|blocked|failed)$/.test(e.type),
+      );
+      return rows.length > 0 ? rows : false;
+    });
+    expect(outcomes).toEqual([
+      {
+        type: "turn.completed",
+        integration_id: t.integrationId,
+        data: { conversationId: conversation.id, seq: 1, lastSeq: 2 },
+      },
+    ]);
   });
 });
 
@@ -1027,11 +1175,17 @@ describe("judgments", () => {
   async function submit(
     h: Harness,
     t: Tenant,
-    body: TaskParams["run-judgment"] = request,
+    body: Omit<TaskParams["run-judgment"], "integrationId"> = request,
     hint = true,
+    integrationId: string | null = null,
   ) {
     const { taskId } = await t.ctx.db.transaction((tx) =>
-      spawnInTx(tx, "run-judgment", body, { idempotencyKey: `judgment:${crypto.randomUUID()}` }),
+      spawnInTx(
+        tx,
+        "run-judgment",
+        { ...body, integrationId },
+        { idempotencyKey: `judgment:${crypto.randomUUID()}` },
+      ),
     );
     if (hint) await hintTenantWork(h.control.db, t.id);
     return taskId;
@@ -1050,7 +1204,7 @@ describe("judgments", () => {
       modelKeys: async (_tenantId, providerId) => `key-for-${providerId}`,
     });
     const t = await h.tenant("acme");
-    const id = await submit(h, t);
+    const id = await submit(h, t, request, true, t.integrationId);
     const task = await finished(t, id);
     expect(task.result).toEqual({
       type: "answered",
@@ -1070,6 +1224,13 @@ describe("judgments", () => {
         model: "typesafe/jev-test",
         input_tokens: 12,
         output_tokens: 3,
+      },
+    ]);
+    expect(await eventsOf(t)).toEqual([
+      {
+        type: "judgment.completed",
+        integration_id: t.integrationId,
+        data: { judgmentId: id, status: "answered" },
       },
     ]);
   });
@@ -1098,6 +1259,13 @@ describe("judgments", () => {
     expect(calls).toHaveLength(0);
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    expect(await eventsOf(t)).toEqual([
+      {
+        type: "judgment.completed",
+        integration_id: null,
+        data: { judgmentId: task.id, status: "refused" },
+      },
     ]);
   });
 
@@ -1137,6 +1305,13 @@ describe("judgments", () => {
     const runs = await b.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
     expect(JSON.stringify(runs.rows)).toContain("[redacted]");
     expect(JSON.stringify(runs.rows)).not.toContain(secret);
+    expect(await eventsOf(b)).toEqual([
+      {
+        type: "judgment.failed",
+        integration_id: null,
+        data: { judgmentId: id, error: "connect failed for key [redacted]" },
+      },
+    ]);
   });
 
   describe("guardrails", () => {
@@ -1209,6 +1384,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
@@ -1234,6 +1410,19 @@ describe("judgments", () => {
       const all = await h.settled(t, conversation.id, 4);
       expect(textOf(all[3])).toBe("ok");
       expect(histories.map((history) => history.map(textOf))).toEqual([["hello there"]]);
+      const outcomes = await eventually("both outcomes", async () => {
+        const rows = (await eventsOf(t)).filter((e) =>
+          /^turn\.(completed|blocked|failed)$/.test(e.type),
+        );
+        return rows.length === 2 ? rows : false;
+      });
+      expect(outcomes.map((e) => [e.type, e.data])).toEqual([
+        [
+          "turn.blocked",
+          { conversationId: conversation.id, seq: 1, lastSeq: 2, guardrails: ["jailbreak"] },
+        ],
+        ["turn.completed", { conversationId: conversation.id, seq: 3, lastSeq: 4 }],
+      ]);
       const usage = await h.control.db.query(
         "select dedupe_key from usage where tenant_id = $1 order by dedupe_key",
         [t.id],
@@ -1272,6 +1461,7 @@ describe("judgments", () => {
       const t = await h.tenant("acme");
       const onOpencode = { ...jailbreak, name: "on_opencode", model: "opencode/jev-1.14" } as const;
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak, onOpencode],
@@ -1306,6 +1496,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
@@ -1319,6 +1510,19 @@ describe("judgments", () => {
       expect(histories).toEqual([]);
       expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
         { attempts: 1 },
+      ]);
+      const failed = (await eventsOf(t)).filter((e) => e.type === "turn.failed");
+      expect(failed).toEqual([
+        {
+          type: "turn.failed",
+          integration_id: null,
+          data: {
+            conversationId: conversation.id,
+            seq: 1,
+            reason: "guardrail_unavailable",
+            error: expect.stringMatching(/^a guardrail could not be checked/),
+          },
+        },
       ]);
     });
 
@@ -1334,6 +1538,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
@@ -1394,6 +1599,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [destructive],

@@ -26,6 +26,16 @@ export {
   storeTenantDbPassword,
 } from "./db-credentials.ts";
 export {
+  createIntegration,
+  deleteIntegration,
+  ensureDefaultIntegration,
+  getIntegration,
+  IntegrationNameTakenError,
+  type IntegrationRecord,
+  listIntegrations,
+  setIntegrationScopes,
+} from "./integrations.ts";
+export {
   ApiKeyLimitError,
   type ApiKeyRecord,
   authenticateApiKey,
@@ -53,6 +63,26 @@ export {
   listAllowedEmails,
   setConsoleAdmin,
 } from "./signup-allowlist.ts";
+export {
+  type DeliverableSubscription,
+  deleteSubscription,
+  disableSubscription,
+  getSubscription,
+  hasSubscriptions,
+  insertSubscription,
+  listDeletedSubscriptions,
+  listDeliverableSubscriptions,
+  listSubscriptions,
+  listTenantsWithSubscriptions,
+  openSubscriptionForDelivery,
+  purgeSubscription,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
+  rotateSubscriptionSecret,
+  SubscriptionLimitError,
+  type SubscriptionRecord,
+  updateSubscription,
+} from "./subscriptions.ts";
 export {
   deleteTenantRow,
   getTenant,
