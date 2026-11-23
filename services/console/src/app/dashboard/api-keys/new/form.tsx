@@ -14,9 +14,9 @@ export function NewApiKeyForm() {
   if (state?.ok) {
     return (
       <Card title="Key created">
-        <p className="mb-4 text-sm text-zinc-600">
-          <span className="font-medium text-zinc-900">{state.key.label || "Untitled key"}</span> is
-          ready to use.
+        <p className="mb-4 text-sm text-muted">
+          <span className="font-medium text-fg">{state.key.label || "Untitled key"}</span> is ready
+          to use.
         </p>
         <SecretReveal secret={state.secret} />
         <div className="mt-6">

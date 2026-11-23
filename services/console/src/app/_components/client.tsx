@@ -11,7 +11,7 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
   return (
     <button
       type="button"
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-xs font-medium text-fg shadow-sm hover:bg-raised"
       onClick={async () => {
         await navigator.clipboard.writeText(value);
         setCopied(true);
@@ -34,11 +34,11 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
 export function SecretReveal({ secret }: { secret: string }) {
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2 pl-3">
-        <code className="min-w-0 flex-1 break-all font-mono text-sm text-zinc-900">{secret}</code>
+      <div className="flex items-center gap-2 rounded-lg border border-line bg-page p-2 pl-3">
+        <code className="min-w-0 flex-1 break-all font-mono text-sm text-fg">{secret}</code>
         <CopyButton value={secret} />
       </div>
-      <p className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+      <p className="flex gap-2 rounded-lg border border-brand/30 bg-brand/10 px-3 py-2 text-sm text-brand-text">
         <svg
           aria-hidden="true"
           viewBox="0 0 20 20"
@@ -93,16 +93,16 @@ export function ConfirmAction({
   if (!asking) {
     return (
       <button type="button" className={buttonStyles.secondary} onClick={() => setAsking(true)}>
-        <span className="text-red-600">{label}</span>
+        <span className="text-danger">{label}</span>
       </button>
     );
   }
   return (
     <form
       action={action}
-      className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-3"
+      className="flex flex-wrap items-center gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3"
     >
-      <p className="flex-1 text-sm text-red-800">{question}</p>
+      <p className="flex-1 text-sm text-danger">{question}</p>
       <button type="button" className={buttonStyles.secondary} onClick={() => setAsking(false)}>
         Cancel
       </button>

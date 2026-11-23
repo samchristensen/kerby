@@ -37,7 +37,7 @@ export function NewPromptForm({ kind }: { kind: PromptKind }) {
           error={state?.fields?.name}
         />
         <fieldset className="space-y-2">
-          <legend className="text-sm font-medium text-zinc-800">Kind</legend>
+          <legend className="text-sm font-medium text-fg">Kind</legend>
           {KINDS.map((option) => (
             <label key={option.kind} className="flex items-start gap-2 text-sm">
               <input
@@ -48,8 +48,8 @@ export function NewPromptForm({ kind }: { kind: PromptKind }) {
                 className="mt-1"
               />
               <span>
-                <span className="font-medium text-zinc-900">{option.label}</span>
-                <span className="block text-zinc-500">{option.hint}</span>
+                <span className="font-medium text-fg">{option.label}</span>
+                <span className="block text-muted">{option.hint}</span>
               </span>
             </label>
           ))}

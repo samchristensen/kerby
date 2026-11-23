@@ -19,7 +19,7 @@ export function ManagePrompt({ name }: { name: string }) {
   const [asking, setAsking] = useState(false);
   return (
     <Card title="Name">
-      <p className="mb-4 text-sm text-zinc-500">
+      <p className="mb-4 text-sm text-muted">
         Until it is published, this prompt can be renamed or deleted. After that its name is fixed.
       </p>
       <form action={rename} className="space-y-3">
@@ -37,13 +37,13 @@ export function ManagePrompt({ name }: { name: string }) {
           Rename
         </SubmitButton>
       </form>
-      <div className="mt-5 border-t border-zinc-100 pt-4">
+      <div className="mt-5 border-t border-line pt-4">
         {asking ? (
           <form
             action={remove}
-            className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-3"
+            className="flex flex-wrap items-center gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3"
           >
-            <p className="flex-1 text-sm text-red-800">Delete this prompt and its draft?</p>
+            <p className="flex-1 text-sm text-danger">Delete this prompt and its draft?</p>
             <button
               type="button"
               className={buttonStyles.secondary}
@@ -57,7 +57,7 @@ export function ManagePrompt({ name }: { name: string }) {
           </form>
         ) : (
           <button type="button" className={buttonStyles.secondary} onClick={() => setAsking(true)}>
-            <span className="text-red-600">Delete prompt</span>
+            <span className="text-danger">Delete prompt</span>
           </button>
         )}
         {deleted?.error ? (

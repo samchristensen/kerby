@@ -41,7 +41,7 @@ export function ChatPlayground({ prompt }: { prompt: Prompt }) {
           {...(source === "draft" ? { known: draftVariables } : {})}
           {...(state ? { values: state.values } : {})}
         />
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-muted">
           This starts a real conversation on your model keys, listed in Chats as a Studio chat.
         </p>
         {state?.error ? <Alert tone="error">{state.error}</Alert> : null}
