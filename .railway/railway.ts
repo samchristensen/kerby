@@ -113,6 +113,8 @@ export default defineRailway((ctx) => {
       TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
       SECRETS_PUBLIC_KEY: preserve(),
       ...alerts,
+      // Tool servers connected with OAuth (ADR 0019): Kerby's redirect URI and client id live on the console's domain.
+      CONSOLE_PUBLIC_URL: `https://${variable("console", "RAILWAY_PUBLIC_DOMAIN")}`,
       // Railway's edge writes X-Forwarded-For with the client first: the failed-auth limit counts that address.
       TRUST_PROXY: "true",
     },
@@ -133,8 +135,9 @@ export default defineRailway((ctx) => {
     },
   });
 
-  // The console (ADR 0014): sign-up, sign-in, API keys, model keys and chat. Public, like the api. It seals model keys to
-  // the api's public key, reaches control only on its sign-up route and the api with the signed-in person's session.
+  // The console (ADR 0014): sign-up, sign-in, integrations and keys, model keys, tools and chat. Public, like the api. It
+  // seals model keys to the api's public key, reaches control only on its sign-up route and the api with the signed-in
+  // person's session.
   const consoleService = service("console", {
     source: source("console"),
     healthcheck: "/healthz",
@@ -147,6 +150,8 @@ export default defineRailway((ctx) => {
       CONSOLE_TOKEN: control.env.CONSOLE_TOKEN,
       SECRETS_PUBLIC_KEY: api.env.SECRETS_PUBLIC_KEY,
       API_PUBLIC_URL: `https://${variable("api", "RAILWAY_PUBLIC_DOMAIN")}`,
+      // Its own address, the api's CONSOLE_PUBLIC_URL: Kerby's OAuth client metadata document is served under it.
+      PUBLIC_URL: `https://${variable("console", "RAILWAY_PUBLIC_DOMAIN")}`,
       // Railway's edge writes X-Forwarded-For with the client first: the sign-up and sign-in limits count that address.
       TRUST_PROXY: "true",
     },

@@ -79,7 +79,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
 | Plane   | Database                                             | Holds                                                                                                                                                                                                                                                    | Migrations                                                                |
 | ------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations` and their `api_keys`, encrypted `tenant_secrets` (model keys, tool credentials), sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                              |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, prompts (`prompts`, `prompt_versions`, `prompt_labels`), tools (`tool_servers`, `tools`, `integration_tools`, `conversation_tools`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts,tools}/migrations/tenant/` |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, prompts (`prompts`, `prompt_versions`, `prompt_labels`), tools (`tool_servers`, `tools`, `integration_tools`, `conversation_tools`, `tool_oauth_flows`), the Absurd schema                          | `packages/{durable,blobs,conversations,prompts,tools}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -231,7 +231,7 @@ flowchart LR
   conversation keeps the rendered system prompt, model, guardrails and tools in its own row (tools in `conversation_tools`), so a turn never reads the prompt
   tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
 - **Tools** ([ADR 0019](docs/adr/0019-tools-and-integrations.md)). A tenant registers remote MCP servers (`tool_servers`:
-  a slug, a URL, `auth` none or a header whose value is a sealed credential) through admin routes `/v1/tool-servers*`;
+  a slug, a URL, `auth` none, a header whose value is a sealed credential, or OAuth) through admin routes `/v1/tool-servers*`;
   the reserved server `kerby` serves Kerby's own tools from code (`judge`, and `echo` where `ENABLE_ECHO_TOOL` is set).
   Registering a server, changing it, or `.../sync` enqueues `sync-tool-server` (on `turns`) in the same tenant
   transaction; only a worker can open the credential, so only a worker lists tools (`packages/mcp` over the egress guard,
@@ -244,7 +244,10 @@ flowchart LR
   pinned definition; a remote call runs in its tool step after the guardrails, one MCP session per server per run,
   `TOOL_CALL_TIMEOUT_MS` (60 s) each, the call id in `_meta`, text passed and cut at 256 KiB, and any failure is an error
   result the model reads, never a turn retry. `GET /v1/tools` lists what the caller may name. `make tools-e2e` is the
-  proof on the real stack.
+  proof on the real stack. OAuth: the api runs discovery, client registration (Kerby's Client ID Metadata Document on
+  the console, or dynamic registration), PKCE and the code exchange through the egress guard, keeping the pending flow in
+  `tool_oauth_flows` for 10 minutes; the console's callback page finishes it; the tokens are sealed like any credential,
+  and a worker refreshes them under a row lock on the secret (`CONSOLE_PUBLIC_URL` on the api, `PUBLIC_URL` on the console).
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).

@@ -102,11 +102,26 @@ session id); servers on 2025-11-25 and older still expect a session.
   sync, enable, effect, drift review, the integrations granted), an Integrations page in place of API keys (role, keys,
   grants) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
   `integration.*`) with ids, slugs and patterns only.
-- **OAuth comes next, on the same tables.** `auth: oauth` per MCP's authorization spec: a callback in the console, PKCE,
-  the `resource` parameter, the issuer check, a Client ID Metadata Document Kerby publishes with dynamic registration where
-  a server lacks it, and discovery and token calls through egress. Tokens are sealed under the server's secret name; the
-  worker refreshes them under a row lock on that secret, since two workers refreshing at once would revoke each other's
-  token. A credential belongs to the tenant, not to an end user.
+- **OAuth, for the whole tenant** (`auth: { kind: "oauth", scope? }`), per MCP's authorization spec (2026-07-28). An
+  admin starts it (`POST /v1/tool-servers/:slug/oauth/start` → `{ authorizationUrl }`; the console's Connect button): the
+  api, through egress and never following a redirect, finds the protected resource metadata (the 401's
+  `resource_metadata`, else the RFC 9728 well-known URIs; its `resource` must be the server's URL or a path prefix of it),
+  the authorization server's metadata (RFC 8414 or OpenID discovery, the issuer exactly as asked), and a client id: Kerby's
+  Client ID Metadata Document (`<console>/oauth/client-metadata.json`, served by the console without a session) when the
+  server supports it and the console is https, else dynamic registration (a public client preferred; a secret kept if one
+  is issued). PKCE S256 is required. The pending flow is a row of the tenant's `tool_oauth_flows` (state as a hash, the
+  verifier, endpoints, client, resource; 10 minutes, at most 5 per server, deleted when read), in plaintext because the
+  api, which holds only the public key, must read it back; it holds no token. The console's callback page
+  (`/dashboard/tools/oauth/callback`, signed in) posts `POST /v1/tool-servers/oauth/callback { state, iss?, code |
+  error }`; the api finds the flow in the caller's own tenant database (a code cannot land in another tenant), applies
+  RFC 9207's `iss` table before showing any authorization-server error, exchanges the code with `resource`, seals the
+  tokens as JSON under `tool-credential/<serverId>`, and queues a sync. Changing the auth kind, or the URL of an `oauth`
+  server, drops the credential (tokens are bound to the old address) and any pending flow. The worker sends `Bearer
+  <accessToken>` only to URLs within the credential's `resource`, refreshes when it expires within 60 s or once after a
+  401, under `select ... for update` on the secret row (another worker's fresh token is used as is; rotated refresh tokens
+  are stored), sealing with the public half of its own key. `invalid_grant` or no refresh token deletes the credential: the
+  console shows "not connected" and the model or `last_error` says to connect it again. A credential belongs to the
+  tenant, not to an end user.
 - **The MCP client sits behind one package**, `packages/mcp`, written on the `fetch` it is given (the egress guard's): no
   dependency, since Kerby needs only `tools/list` and `tools/call` over Streamable HTTP and `@modelcontextprotocol/sdk`
   1.32.2 speaks at most 2025-11-25. A session's first request is 2026-07-28 (`_meta` and `MCP-Protocol-Version` on every

@@ -116,6 +116,17 @@ the `turns` queue (it counts against `maxConcurrentTurns`); a server that failed
 `tenant_secrets`). Keys made before integrations sit in each tenant's `admin` integration `default` and keep full access;
 an integration's role and archiving take effect within the api's auth cache (30 s). `make tools-e2e` is the local proof.
 
+OAuth servers: the api (discovery, registration, code exchange, all through the egress guard) needs `CONSOLE_PUBLIC_URL`
+and the console `PUBLIC_URL`, both the console's public https address (the IaC sets both from its Railway domain): the
+redirect URI is `<console>/dashboard/tools/oauth/callback`, and Kerby's client id is its Client ID Metadata Document at
+`<console>/oauth/client-metadata.json`. Changing the console's domain changes Kerby's client id: tenants must connect
+their OAuth servers again. Without `CONSOLE_PUBLIC_URL`, starting OAuth is 400 `oauth_not_configured`.
+
+The release that added integrations (control migration `0007_integrations.sql`) makes `api_keys.integration_id`
+required: between control's deploy and the console's, the old console cannot create keys (it retries fine once the console
+is out). Do not roll the api back past that release: the older api ignores integrations, so every restricted key would act
+as an admin.
+
 ## Export a tenant
 
 `POST /v1/operator/tenants/<id>/export` (run as above) dumps the tenant's database and lists its objects into the
@@ -351,6 +362,7 @@ Production (2026-11-22): a Slack app with an incoming webhook into the alerts ch
 
 - Do not replace `TENANT_DB_KEYS` in one step on a live system: add the new key first (Secrets, above).
 - Do not give `control` a public domain, or the console the operator token or the administrative database URL.
+- Do not roll the api back past the release that added integrations (Tools, above): restricted keys would act as admins.
 - Do not delete `production` or its Postgres volume: backups belong to the volume.
 - Do not push a new service's first image to GHCR by hand (for a trial environment, say): the package is then created
   without a link to the repository, and CI's pushes to it are refused (`denied: permission_denied: read_package`). Let
