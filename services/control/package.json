@@ -12,6 +12,8 @@
     "@kerby/control-plane": "workspace:*",
     "@kerby/conversations": "workspace:*",
     "@kerby/db": "workspace:*",
+    "@kerby/durable": "workspace:*",
+    "@kerby/events": "workspace:*",
     "@kerby/observability": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@kerby/serve": "workspace:*",

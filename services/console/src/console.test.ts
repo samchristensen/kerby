@@ -1,16 +1,23 @@
+import { randomUUID } from "node:crypto";
+import { PutSearchSettingsRequestSchema } from "@kerby/contracts";
 import {
   authenticateApiKey,
   createApiKey,
-  createIntegration,
+  ensureDefaultIntegration,
   insertConsoleUser,
+  insertSubscription,
   insertTenant,
+  listSubscriptions,
+  MAX_API_KEYS_PER_TENANT,
   readModelKey,
   setConsoleAdmin,
-  setRolePassword,
   setTenantStatus,
 } from "@kerby/control-plane";
-import { createTestControlDb, type TestControlDb } from "@kerby/control-plane/testing";
-import { createControlDb } from "@kerby/db";
+import {
+  asServiceRole,
+  createTestControlDb,
+  type TestControlDb,
+} from "@kerby/control-plane/testing";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleService } from "./service/index.ts";
@@ -36,13 +43,7 @@ async function harness(
 ) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
-  // A role belongs to the whole cluster, which test files share as they run in parallel: every test that gives
-  // `kerby_console` a password gives this one (packages/control-plane's repo.test.ts too), or one breaks the other's sign-in.
-  await setRolePassword(control.db, "kerby_console", "kerby_console-password-for-tests");
-  const url = new URL(control.url);
-  url.username = "kerby_console";
-  url.password = "kerby_console-password-for-tests";
-  const asConsole = createControlDb(url.toString(), { max: 2 });
+  const asConsole = await asServiceRole(control.url, "kerby_console", 2);
   cleanups.push(() => asConsole.close());
 
   const signups: SignupClient = async ({ name, email, passwordHash }) => {
@@ -50,11 +51,7 @@ async function harness(
     if (taken.rowCount) return { ok: false, code: "name_taken" };
     const tenant = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
-    const integration = await createIntegration(control.db, {
-      tenantId: tenant.id,
-      name: "default",
-      role: "admin",
-    });
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
     const { secret } = await createApiKey(control.db, tenant.id, integration.id, "initial");
     try {
       const user = await insertConsoleUser(control.db, {
@@ -200,6 +197,36 @@ describe("accounts", () => {
     ).toBe(true);
   });
 
+  it("checks at most the account's limit of a concurrent burst of wrong passwords", async () => {
+    const h = await harness({ failedLoginsPerMinute: 4, failedLoginsPerAccountPerHour: 3 });
+    await h.signUp("acme", "ada@example.com");
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        h.service.logIn({ email: "ada@example.com", password: "wrong" }, `192.0.2.${i % 2}`),
+      ),
+    );
+    const errors = results.map((result) => (result.ok ? "signed in" : result.error));
+    expect(errors.filter((error) => error === "Wrong email or password.")).toHaveLength(3);
+    expect(errors.filter((error) => error?.startsWith("Too many failed sign-ins"))).toHaveLength(7);
+  });
+
+  it("charges nothing for a right password", async () => {
+    const h = await harness({ failedLoginsPerMinute: 2, failedLoginsPerAccountPerHour: 2 });
+    await h.signUp("acme", "ada@example.com");
+    const logIn = (password: string) =>
+      h.service.logIn({ email: "ada@example.com", password }, "192.0.2.1");
+    // Up to the limit at once, then more one after another.
+    const rights = [...(await Promise.all([logIn(PASSWORD), logIn(PASSWORD)]))];
+    for (let i = 0; i < 3; i++) rights.push(await logIn(PASSWORD));
+    expect(rights.map((result) => result.ok)).toEqual([true, true, true, true, true]);
+    // The whole budget is still there for mistakes.
+    for (let i = 0; i < 2; i++)
+      expect(await logIn("wrong")).toEqual({ ok: false, error: "Wrong email or password." });
+    expect(await logIn(PASSWORD)).toMatchObject({
+      error: expect.stringMatching(/^Too many failed sign-ins/),
+    });
+  });
+
   it("ends a suspended tenant's sessions at once and refuses its sign-ins", async () => {
     const h = await harness();
     const { token, session } = await h.signUp("acme");
@@ -286,106 +313,25 @@ describe("sign-up allowlist", () => {
 });
 
 describe("workspace", () => {
-  it("manages integrations and their keys for the session's tenant only, audited as the person", async () => {
+  it("says why a key past the tenant's cap is refused, and creates one again after a revoke", async () => {
     const h = await harness();
-    const a = await h.signUp("acme");
-    const b = await h.signUp("globex");
-    const [initial] = await h.service.integrations(a.session);
-    expect(initial).toMatchObject({ name: "default", role: "admin", liveKeys: 1 });
-
-    expect(await h.service.createIntegration(a.session, { name: " ", role: "owner" })).toEqual({
+    const { session } = await h.signUp("acme");
+    const integration = await ensureDefaultIntegration(h.control.db, session.tenantId);
+    // The sign-up's first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      expect((await h.service.createApiKey(session, integration.id, { label: `k${i}` })).ok).toBe(
+        true,
+      );
+    expect(await h.service.createApiKey(session, integration.id, { label: "one more" })).toEqual({
       ok: false,
-      fields: { name: "A name is required", role: "Choose admin or restricted" },
+      error: `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
     });
-    const made = await h.service.createIntegration(a.session, {
-      name: " bots ",
-      role: "restricted",
-    });
-    if (!made.ok) return expect.fail(JSON.stringify(made));
-    expect(made.integration).toMatchObject({ name: "bots", role: "restricted", liveKeys: 0 });
-    expect(await h.service.createIntegration(a.session, { name: "bots", role: "admin" })).toEqual({
-      ok: false,
-      fields: { name: "Another integration has this name" },
-    });
-    expect((await h.service.integrations(a.session)).map((i) => i.name)).toEqual([
-      "bots",
-      "default",
-    ]);
-    const id = made.integration.id;
-
-    const created = await h.service.createApiKey(a.session, id, { label: "  ci  " });
-    if (!created.ok) return expect.fail(JSON.stringify(created));
-    expect(created.key).toMatchObject({ label: "ci", integrationId: id });
-    expect(await authenticateApiKey(h.control.db, created.secret)).toMatchObject({
-      tenant: { name: "acme" },
-      integration: { id, role: "restricted" },
-    });
-    expect(await h.service.createApiKey(a.session, id, { label: "x".repeat(101) })).toEqual({
-      ok: false,
-      fields: { label: "At most 100 characters" },
-    });
-    expect((await h.service.integration(a.session, id))?.keys.map((k) => k.label)).toEqual(["ci"]);
-
-    // another tenant's session can neither see, change, archive, nor put a key in this integration, nor revoke its key
-    expect(await h.service.integration(b.session, id)).toBeUndefined();
-    expect(await h.service.integration(b.session, "not-a-uuid")).toBeUndefined();
-    expect((await h.service.integrations(b.session)).map((i) => i.id)).not.toContain(id);
-    expect(
-      await h.service.updateIntegration(b.session, id, { name: "mine", role: "admin" }),
-    ).toEqual({
-      ok: false,
-      error: "This integration no longer exists.",
-    });
-    expect(await h.service.createApiKey(b.session, id, {})).toEqual({
-      ok: false,
-      error: "This integration no longer exists.",
-    });
-    expect(await h.service.archiveIntegration(b.session, id)).toBe(false);
-    expect(await h.service.revokeApiKey(b.session, created.key.id)).toBe(false);
-    expect(await authenticateApiKey(h.control.db, created.secret)).toBeDefined();
-
-    const updated = await h.service.updateIntegration(a.session, id, {
-      name: "robots",
-      role: "admin",
-    });
-    expect(updated).toMatchObject({
-      ok: true,
-      integration: { name: "robots", role: "admin", liveKeys: 1 },
-    });
-    expect((await authenticateApiKey(h.control.db, created.secret))?.integration.role).toBe(
-      "admin",
-    );
-
-    const second = await h.service.createApiKey(a.session, id, {});
-    if (!second.ok) return expect.fail(JSON.stringify(second));
-    expect(await h.service.revokeApiKey(a.session, second.key.id)).toBe(true);
-    expect(await authenticateApiKey(h.control.db, second.secret)).toBeUndefined();
-
-    expect(await h.service.archiveIntegration(a.session, id)).toBe(true);
-    expect(await authenticateApiKey(h.control.db, created.secret)).toBeUndefined();
-    expect(await h.service.integration(a.session, id)).toBeUndefined();
-    expect((await h.service.overview(a.session)).activeApiKeys).toBe(1);
-
-    const { rows } = await h.control.db.query<{ action: string; actor: string; detail: object }>(
-      "select action, actor, detail from audit_log where tenant_id = $1 and (action like 'integration.%' or action like 'key.%') order by id",
-      [a.session.tenantId],
-    );
-    expect(rows.map((r) => r.action)).toEqual([
-      "integration.create",
-      "key.create",
-      "integration.update",
-      "key.create",
-      "key.revoke",
-      "integration.archive",
-    ]);
-    expect(rows.every((r) => r.actor === `user:${a.session.userId}`)).toBe(true);
-    expect(rows.filter((r) => r.action.startsWith("key."))).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ detail: { keyId: created.key.id, integrationId: id } }),
-      ]),
+    const newest = (await h.service.integration(session, integration.id))?.keys[0];
+    expect(await h.service.revokeApiKey(session, newest?.id ?? "")).toBe(true);
+    expect((await h.service.createApiKey(session, integration.id, { label: "one more" })).ok).toBe(
+      true,
     );
   });
-
   it("seals a model key for a supported provider and removes it", async () => {
     const h = await harness();
     const { session } = await h.signUp("acme");
@@ -433,6 +379,445 @@ describe("workspace", () => {
       { action: "model_key.delete", actor: `user:${session.userId}` },
       { action: "model_key.delete", actor: `user:${session.userId}` },
     ]);
+  });
+});
+
+/** A subscription as the api answers it. */
+const subscriptionBody = (integrationId: string, overrides: Record<string, unknown> = {}) => ({
+  id: randomUUID(),
+  integrationId,
+  destination: { kind: "webhook", url: "https://example.com/hook" },
+  types: ["turn.*"],
+  scope: "own",
+  description: "",
+  state: "active",
+  disabledReason: null,
+  failingSince: null,
+  createdAt: "2026-11-23T10:00:00.000Z",
+  updatedAt: "2026-11-23T10:00:00.000Z",
+  ...overrides,
+});
+
+describe("integrations", () => {
+  it("makes integrations with their scopes, refuses a name a live one has, and keeps each key in the integration it was made in", async () => {
+    const h = await harness();
+    const a = await h.signUp("acme");
+    const b = await h.signUp("globex");
+    const created = await h.service.createIntegration(a.session, {
+      name: "  Support bot ",
+      "scope.events": "on",
+      "scope.conversations": "on",
+    });
+    if (!created.ok) return expect.fail(JSON.stringify(created));
+    expect(await h.service.integration(a.session, created.id)).toMatchObject({
+      name: "Support bot",
+      scopes: ["conversations", "events"], // catalog order, whatever the form's
+      keys: [],
+    });
+
+    // a name a live integration of the tenant has (the provisioned `default` too); another tenant's does not count
+    for (const name of ["Support bot", "default"]) {
+      expect(await h.service.createIntegration(a.session, { name, "scope.events": "on" })).toEqual({
+        ok: false,
+        fields: { name: "An integration already has this name. Choose another." },
+      });
+    }
+    expect(
+      (await h.service.createIntegration(b.session, { name: "Support bot", "scope.events": "on" }))
+        .ok,
+    ).toBe(true);
+    expect(await h.service.createIntegration(a.session, { name: "-x" })).toEqual({
+      ok: false,
+      fields: {
+        name: "Letters, digits, spaces, dots, dashes, underscores",
+        scopes: "Choose at least one scope.",
+      },
+    });
+
+    const key = await h.service.createApiKey(a.session, created.id, { label: " ci " });
+    if (!key.ok) return expect.fail(JSON.stringify(key));
+    expect(key.key.label).toBe("ci");
+    const authenticated = await authenticateApiKey(h.control.db, key.secret);
+    expect(authenticated?.tenant.name).toBe("acme");
+    expect(authenticated?.integration).toMatchObject({
+      id: created.id,
+      scopes: ["conversations", "events"],
+    });
+    expect((await h.service.integration(a.session, created.id))?.keys.map((k) => k.label)).toEqual([
+      "ci",
+    ]);
+    expect(await h.service.createApiKey(a.session, created.id, { label: "x".repeat(101) })).toEqual(
+      { ok: false, fields: { label: "At most 100 characters" } },
+    );
+
+    // another tenant's session cannot see the integration, add a key to it, re-scope it, revoke its key or delete it
+    expect(await h.service.integration(b.session, created.id)).toBeUndefined();
+    expect(await h.service.createApiKey(b.session, created.id, {})).toEqual({
+      ok: false,
+      error: "This integration no longer exists.",
+    });
+    expect(
+      await h.service.setIntegrationScopes(b.session, created.id, { "scope.admin": "on" }),
+    ).toEqual({ ok: false, error: "This integration no longer exists." });
+    expect(await h.service.revokeApiKey(b.session, key.key.id)).toBe(false);
+    expect(await h.service.deleteIntegration(b.session, created.id)).toBe(false);
+    expect(await authenticateApiKey(h.control.db, key.secret)).toBeDefined();
+
+    // a re-scope reaches the key; no scope at all is refused
+    expect(
+      await h.service.setIntegrationScopes(a.session, created.id, { "scope.admin": "on" }),
+    ).toEqual({ ok: true });
+    expect((await authenticateApiKey(h.control.db, key.secret))?.integration.scopes).toEqual([
+      "admin",
+    ]);
+    expect(await h.service.setIntegrationScopes(a.session, created.id, {})).toEqual({
+      ok: false,
+      fields: { scopes: "Choose at least one scope." },
+    });
+
+    expect(await h.service.revokeApiKey(a.session, key.key.id)).toBe(true);
+    expect(await authenticateApiKey(h.control.db, key.secret)).toBeUndefined();
+    expect((await h.service.overview(a.session)).activeApiKeys).toBe(1);
+  });
+
+  it("counts live keys and subscriptions per integration, and a delete revokes the keys and deletes the subscriptions", async () => {
+    let listed: unknown[] = [];
+    const calls: Parameters<ApiClient>[0][] = [];
+    const h = await harness({}, async (request) => {
+      calls.push(request);
+      return new Response(JSON.stringify({ subscriptions: listed }), { status: 200 });
+    });
+    const { session, token } = await h.signUp("acme");
+    const created = await h.service.createIntegration(session, {
+      name: "back office",
+      "scope.conversations": "on",
+    });
+    if (!created.ok) return expect.fail(JSON.stringify(created));
+    const keys = [];
+    for (const label of ["one", "two"]) {
+      const key = await h.service.createApiKey(session, created.id, { label });
+      if (!key.ok) return expect.fail(JSON.stringify(key));
+      keys.push(key);
+    }
+    await h.service.revokeApiKey(session, keys[0]?.key.id ?? "");
+    // the row the api would have written, so the delete has one to remove
+    const subscription = await insertSubscription(
+      h.control.db,
+      createSealer(generateSecretsKeyPair().publicKey),
+      {
+        id: randomUUID(),
+        tenantId: session.tenantId,
+        integrationId: created.id,
+        destination: { kind: "webhook", url: "https://example.com/hook" },
+        types: ["*"],
+        scope: "own",
+        description: "",
+        secret: "whsec_test",
+      },
+      10,
+    );
+    listed = [subscriptionBody(created.id, { id: subscription.id })];
+
+    const access = { session, token };
+    expect(
+      (await h.service.integrations(access)).map((i) => [
+        i.name,
+        i.scopes,
+        i.activeKeys,
+        i.subscriptions,
+      ]),
+    ).toEqual([
+      ["default", ["conversations", "judgments", "events", "tenant", "admin"], 1, 0],
+      ["back office", ["conversations"], 1, 1],
+    ]);
+    expect(calls).toEqual([{ method: "GET", path: "/v1/subscriptions", token }]);
+
+    expect(await h.service.deleteIntegration(session, created.id)).toBe(true);
+    expect(await h.service.deleteIntegration(session, created.id)).toBe(false);
+    expect(await authenticateApiKey(h.control.db, keys[1]?.secret ?? "")).toBeUndefined();
+    expect(await h.service.integration(session, created.id)).toBeUndefined();
+    // deleted subscriptions are tombstones until a dispatcher cancels their deliveries (ADR 0019): none is live
+    const left = await h.control.db.query<{ state: string }>(
+      "select state from subscriptions where integration_id = $1",
+      [created.id],
+    );
+    expect(left.rows.map((row) => row.state)).toEqual(["deleted"]);
+    expect(await listSubscriptions(h.control.db, session.tenantId)).toEqual([]);
+    // a key cannot be made in a deleted integration, and its name is free again
+    expect(await h.service.createApiKey(session, created.id, {})).toEqual({
+      ok: false,
+      error: "This integration no longer exists.",
+    });
+    expect(
+      (await h.service.createIntegration(session, { name: "back office", "scope.events": "on" }))
+        .ok,
+    ).toBe(true);
+
+    const { rows } = await h.control.db.query<{ action: string; actor: string; detail: unknown }>(
+      "select action, actor, detail from audit_log where tenant_id = $1 order by id",
+      [session.tenantId],
+    );
+    const actor = `user:${session.userId}`;
+    expect(rows).toEqual([
+      {
+        action: "integration.create",
+        actor,
+        detail: { integrationId: created.id, name: "back office", scopes: "conversations" },
+      },
+      {
+        action: "key.create",
+        actor,
+        detail: { keyId: keys[0]?.key.id, integrationId: created.id },
+      },
+      {
+        action: "key.create",
+        actor,
+        detail: { keyId: keys[1]?.key.id, integrationId: created.id },
+      },
+      { action: "key.revoke", actor, detail: { keyId: keys[0]?.key.id } },
+      { action: "integration.delete", actor, detail: { integrationId: created.id } },
+      {
+        action: "integration.create",
+        actor,
+        detail: { integrationId: expect.any(String), name: "back office", scopes: "events" },
+      },
+    ]);
+  });
+
+  it("audits a re-scope", async () => {
+    const h = await harness();
+    const { session } = await h.signUp("acme");
+    const created = await h.service.createIntegration(session, {
+      name: "bot",
+      "scope.conversations": "on",
+    });
+    if (!created.ok) return expect.fail(JSON.stringify(created));
+    await h.service.setIntegrationScopes(session, created.id, {
+      "scope.tenant": "on",
+      "scope.events": "on",
+    });
+    const { rows } = await h.control.db.query<{ action: string; detail: unknown }>(
+      "select action, detail from audit_log where tenant_id = $1 and action = 'integration.scopes'",
+      [session.tenantId],
+    );
+    expect(rows).toEqual([
+      {
+        action: "integration.scopes",
+        detail: { integrationId: created.id, scopes: "events,tenant" },
+      },
+    ]);
+  });
+});
+
+describe("subscriptions", () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const error = (status: number, code: string, message = code) =>
+    json(status, { error: { code, message } });
+  const INTEGRATION_ID = "0b6c1f7e-2a4d-4e8b-9c3a-5d7e9f1a2b3c";
+  const SUBSCRIPTION_ID = "7a1d2c3b-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+  /** The console over a scripted api: every request it makes is recorded, `answer` says what the api replies. */
+  async function subscriptionHarness(answer: (request: Parameters<ApiClient>[0]) => Response) {
+    const calls: Parameters<ApiClient>[0][] = [];
+    const h = await harness({}, async (request) => {
+      calls.push(request);
+      return answer(request);
+    });
+    const user = await h.signUp("acme");
+    return { ...h, calls, access: { session: user.session, token: user.token } };
+  }
+
+  it("creates a webhook subscription from the ticked boxes, as few patterns as say the same, and returns its secret", async () => {
+    const h = await subscriptionHarness(() =>
+      json(201, {
+        subscription: subscriptionBody(INTEGRATION_ID, { id: SUBSCRIPTION_ID }),
+        secret: "whsec_c2VjcmV0",
+      }),
+    );
+    const created = await h.service.createSubscription(h.access, INTEGRATION_ID, {
+      url: " https://example.com/hook ",
+      description: " tickets ",
+      scope: "tenant",
+      // a family's wildcard covers its types; a lone type stays itself
+      "type.turn.*": "on",
+      "type.turn.started": "on",
+      "type.message.created": "on",
+    });
+    expect(created).toMatchObject({
+      ok: true,
+      secret: "whsec_c2VjcmV0",
+      subscription: { id: SUBSCRIPTION_ID },
+    });
+    expect(h.calls).toEqual([
+      {
+        method: "POST",
+        path: "/v1/subscriptions",
+        token: h.access.token,
+        body: {
+          integrationId: INTEGRATION_ID,
+          destination: { kind: "webhook", url: "https://example.com/hook" },
+          types: ["message.created", "turn.*"],
+          scope: "tenant",
+          description: "tickets",
+        },
+      },
+    ]);
+
+    // `*` says it all; a scope that is neither falls back to the integration's own events
+    await h.service.createSubscription(h.access, INTEGRATION_ID, {
+      url: "https://example.com/hook",
+      scope: "everything",
+      "type.*": "on",
+      "type.judgment.failed": "on",
+    });
+    expect(h.calls[1]?.body).toMatchObject({ types: ["*"], scope: "own", description: "" });
+
+    // nothing ticked, or a URL that is not one, never reaches the api
+    expect(await h.service.createSubscription(h.access, INTEGRATION_ID, { url: "" })).toEqual({
+      ok: false,
+      fields: {
+        url: "Enter the URL that receives the events",
+        types: "Choose at least one event type.",
+      },
+    });
+    expect(
+      await h.service.createSubscription(h.access, INTEGRATION_ID, {
+        url: "ftp://example.com",
+        "type.*": "on",
+      }),
+    ).toEqual({ ok: false, fields: { url: "An http(s) URL" } });
+    expect(
+      await h.service.createSubscription(h.access, "not-an-id", {
+        url: "https://example.com",
+        "type.*": "on",
+      }),
+    ).toEqual({ ok: false, error: "This integration no longer exists." });
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it("tells the person why the api refused a subscription, and treats anything else as a fault", async () => {
+    let reply = error(400, "invalid_destination", "private addresses cannot receive events");
+    const h = await subscriptionHarness(() => reply);
+    const create = () =>
+      h.service.createSubscription(h.access, INTEGRATION_ID, {
+        url: "https://10.0.0.1/hook",
+        scope: "tenant",
+        "type.*": "on",
+      });
+    expect(await create()).toEqual({
+      ok: false,
+      fields: { url: "private addresses cannot receive events" },
+    });
+    reply = error(403, "forbidden", "the integration lacks the tenant scope");
+    expect(await create()).toEqual({
+      ok: false,
+      fields: { scope: "the integration lacks the tenant scope" },
+    });
+    reply = error(409, "subscription_limit", "a tenant may hold at most 10 subscriptions");
+    expect(await create()).toEqual({
+      ok: false,
+      error: "a tenant may hold at most 10 subscriptions",
+    });
+    reply = error(404, "not_found");
+    expect(await create()).toEqual({ ok: false, error: "This integration no longer exists." });
+    reply = error(429, "rate_limited");
+    expect(await h.service.rotateSubscriptionSecret(h.access, SUBSCRIPTION_ID)).toEqual({
+      ok: false,
+      error: "Too many requests. Try again in a moment.",
+    });
+    reply = error(404, "not_found");
+    expect(await h.service.testSubscription(h.access, SUBSCRIPTION_ID)).toEqual({
+      ok: false,
+      error: "This subscription no longer exists. Reload the page.",
+    });
+    reply = error(401, "unauthorized");
+    await expect(create()).rejects.toThrow(/401 unauthorized/);
+    reply = new Response("bad gateway", { status: 502 });
+    await expect(h.service.deleteSubscription(h.access, SUBSCRIPTION_ID)).rejects.toThrow(/502/);
+  });
+
+  it("lists an integration's subscriptions, reads one and its delivery log, and manages it through the api", async () => {
+    const mine = subscriptionBody(INTEGRATION_ID, { id: SUBSCRIPTION_ID });
+    const other = subscriptionBody(randomUUID());
+    const delivery = {
+      id: "41",
+      eventIds: [randomUUID()],
+      attempt: 2,
+      outcome: "failed",
+      willRetry: true,
+      status: 500,
+      error: "HTTP 500",
+      response: "oops",
+      durationMs: 120,
+      at: "2026-11-23T10:00:00.000Z",
+    };
+    const h = await subscriptionHarness((request) => {
+      const path = new URL(request.path, "http://api").pathname;
+      if (request.method === "GET" && path === "/v1/subscriptions") {
+        return json(200, { subscriptions: [mine, other] });
+      }
+      if (path.endsWith("/deliveries"))
+        return json(200, { deliveries: [delivery], nextBefore: "41" });
+      if (path.endsWith("/secret")) {
+        return json(200, { secret: "whsec_bmV3", previousExpiresAt: "2026-11-24T10:00:00.000Z" });
+      }
+      if (path.endsWith("/test")) return json(202, { eventId: SUBSCRIPTION_ID });
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      if (path === `/v1/subscriptions/${SUBSCRIPTION_ID}`) return json(200, mine);
+      return error(404, "not_found");
+    });
+    const { access, calls } = h;
+
+    expect((await h.service.subscriptions(access, INTEGRATION_ID)).map((s) => s.id)).toEqual([
+      SUBSCRIPTION_ID,
+    ]);
+    expect(await h.service.subscription(access, SUBSCRIPTION_ID)).toEqual(mine);
+    expect(await h.service.subscription(access, randomUUID())).toBeUndefined();
+    expect(await h.service.deliveries(access, SUBSCRIPTION_ID, "41")).toEqual({
+      deliveries: [delivery],
+      nextBefore: "41",
+    });
+    // a position the api would refuse reads the newest page
+    await h.service.deliveries(access, SUBSCRIPTION_ID, "41; drop");
+    expect(await h.service.setSubscriptionEnabled(access, SUBSCRIPTION_ID, false)).toEqual({
+      ok: true,
+    });
+    expect(await h.service.rotateSubscriptionSecret(access, SUBSCRIPTION_ID)).toEqual({
+      ok: true,
+      secret: "whsec_bmV3",
+      previousExpiresAt: "2026-11-24T10:00:00.000Z",
+    });
+    expect(await h.service.testSubscription(access, SUBSCRIPTION_ID)).toEqual({
+      ok: true,
+      eventId: SUBSCRIPTION_ID,
+    });
+    expect(await h.service.deleteSubscription(access, SUBSCRIPTION_ID)).toEqual({ ok: true });
+
+    const path = `/v1/subscriptions/${SUBSCRIPTION_ID}`;
+    expect(calls.map(({ method, path, body }) => [method, path, body])).toEqual([
+      ["GET", "/v1/subscriptions", undefined],
+      ["GET", path, undefined],
+      ["GET", expect.stringMatching(/^\/v1\/subscriptions\/[0-9a-f-]{36}$/), undefined],
+      ["GET", `${path}/deliveries?limit=25&before=41`, undefined],
+      ["GET", `${path}/deliveries?limit=25`, undefined],
+      ["PATCH", path, { enabled: false }],
+      ["POST", `${path}/secret`, undefined],
+      ["POST", `${path}/test`, undefined],
+      ["DELETE", path, undefined],
+    ]);
+    // the person's session token on every call
+    expect(new Set(calls.map((call) => call.token))).toEqual(new Set([access.token]));
+
+    // an id that is not one never reaches a path
+    const before = calls.length;
+    expect(await h.service.subscription(access, "../prompts")).toBeUndefined();
+    expect(await h.service.deliveries(access, "../prompts")).toBeUndefined();
+    expect(await h.service.deleteSubscription(access, "x/y")).toEqual({
+      ok: false,
+      error: "This subscription no longer exists. Reload the page.",
+    });
+    expect(calls).toHaveLength(before);
   });
 });
 
@@ -529,6 +914,7 @@ describe("chats", () => {
     const conversation = {
       id: CONVERSATION_ID,
       externalUserId: "customer-7",
+      integrationId: null,
       model: "faux/faux-1",
       system: "",
       title: "m1",
@@ -632,6 +1018,110 @@ describe("chats", () => {
     expect(
       await h.service.createChat(h.access, { message: "hi", promptName: "a", promptVersion: "9" }),
     ).toMatchObject({ ok: false, fields: { promptVersion: expect.stringContaining("no longer") } });
+  });
+
+  it("searches with the query in a POST body only, and says why a search was refused", async () => {
+    const hit = {
+      conversationId: CONVERSATION_ID,
+      seq: 3,
+      role: "assistant",
+      title: null,
+      snippet: "the invoice was sent",
+      score: 0.5,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    let reply = () => json(200, { hits: [hit], mode: "keyword", notice: "No openai key." });
+    const h = await chatHarness(() => reply());
+    expect(await h.service.searchChats(h.access, { query: "   " })).toMatchObject({
+      ok: false,
+      fields: { query: expect.any(String) },
+    });
+    expect(h.calls).toEqual([]);
+
+    expect(await h.service.searchChats(h.access, { query: " invoice " })).toEqual({
+      ok: true,
+      result: {
+        mode: "keyword",
+        notice: "No openai key.",
+        hits: [
+          {
+            conversationId: CONVERSATION_ID,
+            seq: 3,
+            role: "assistant",
+            title: null,
+            snippet: "the invoice was sent",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(h.calls).toEqual([
+      {
+        method: "POST",
+        path: "/v1/search",
+        token: h.access.token,
+        body: { query: "invoice", limit: 20 },
+      },
+    ]);
+
+    reply = () => error(429, "rate_limited");
+    expect(await h.service.searchChats(h.access, { query: "invoice" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Too many"),
+    });
+    reply = () => error(503, "server_busy");
+    await expect(h.service.searchChats(h.access, { query: "invoice" })).rejects.toThrow(
+      /503 server_busy/,
+    );
+  });
+
+  it("reads the search settings with the suggested models whose key the tenant holds, and sets or clears the model", async () => {
+    const settings = (embeddingModel: string | null) => ({
+      embeddingModel,
+      lastError: null,
+      chunks: 10,
+      embedded: embeddingModel ? 4 : 0,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    let reply = (request: Parameters<ApiClient>[0]) =>
+      json(
+        200,
+        settings(
+          request.method === "PUT"
+            ? PutSearchSettingsRequestSchema.parse(request.body).embeddingModel
+            : null,
+        ),
+      );
+    const h = await chatHarness((request) => reply(request));
+    await h.service.setModelKey(h.access.session, "openai", { apiKey: "sk-test-123456" });
+
+    const read = await h.service.searchSettings(h.access);
+    expect(read).toMatchObject({ embeddingModel: null, chunks: 10, embedded: 0 });
+    expect(read.suggestions).toContainEqual({
+      provider: "openai",
+      model: "openai/text-embedding-3-small",
+      configured: true,
+    });
+    expect(read.suggestions.filter((s) => s.configured).map((s) => s.provider)).toEqual(["openai"]);
+
+    expect(
+      await h.service.setEmbeddingModel(h.access, {
+        embeddingModel: " openai/text-embedding-3-small ",
+      }),
+    ).toEqual({ ok: true, embeddingModel: "openai/text-embedding-3-small" });
+    expect(await h.service.setEmbeddingModel(h.access, { embeddingModel: "" })).toEqual({
+      ok: true,
+      embeddingModel: null,
+    });
+    expect(h.calls.filter((call) => call.method === "PUT").map((call) => call.body)).toEqual([
+      { embeddingModel: "openai/text-embedding-3-small" },
+      { embeddingModel: null },
+    ]);
+
+    reply = () => error(400, "invalid_model", "anthropic has no embedding models");
+    expect(
+      await h.service.setEmbeddingModel(h.access, { embeddingModel: "anthropic/claude-x" }),
+    ).toEqual({ ok: false, fields: { embeddingModel: "anthropic has no embedding models" } });
   });
 });
 
@@ -744,6 +1234,7 @@ describe("studio", () => {
     const conversation = {
       id: CONVERSATION_ID,
       externalUserId: studioUser,
+      integrationId: null,
       model: "opencode/big",
       title: null,
       createdAt: AT,
@@ -1041,7 +1532,7 @@ describe("tools", () => {
       request.path === "/v1/integrations"
         ? json(200, {
             integrations: [
-              { id: INTEGRATION_ID, name: "support bot", role: "restricted", createdAt: AT },
+              { id: INTEGRATION_ID, name: "support bot", scopes: ["conversations"], createdAt: AT },
             ],
           })
         : request.path === "/v1/tool-servers/github"

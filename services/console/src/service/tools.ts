@@ -1,4 +1,4 @@
-// The tenant's tools (ADR 0019): remote MCP servers, the tools each lists, which integrations may use them, and the
+// The tenant's tools (ADR 0022): remote MCP servers, the tools each lists, which integrations may use them, and the
 // tools a person may name on a chat. Everything goes through the api with the person's session token, as an admin.
 import {
   CreateToolServerRequestSchema,
@@ -169,7 +169,7 @@ export function createTools(deps: ConsoleDeps): Tools {
       const parsed = ToolServerSchema.parse(server);
       const view: ToolServerView = {
         ...parsed,
-        // An integration archived since the grant was read is left out: it can no longer use anything.
+        // An integration deleted since the grant was read is left out: it can no longer use anything.
         grantedTo: parsed.grantedTo.flatMap((grant) => {
           const name = names.get(grant.integrationId);
           return name === undefined ? [] : [{ ...grant, integrationName: name }];

@@ -1,5 +1,5 @@
 import { type Limits, LimitsSchema } from "@kerby/contracts";
-import type { ControlQueryable } from "@kerby/db";
+import { type ControlQueryable, isUuid } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
 
 export type TenantStatus = "provisioning" | "active" | "suspended" | "deleting" | "deleted";
@@ -125,8 +125,9 @@ export async function getTenant(
   db: ControlQueryable,
   id: string,
 ): Promise<TenantRecord | undefined> {
+  if (!isUuid(id)) return undefined;
   const { rows } = await db.query<TenantRow>(
-    `select ${TENANT_COLUMNS} from tenants where id::text = $1`,
+    `select ${TENANT_COLUMNS} from tenants where id = $1`,
     [id],
   );
   return rows[0] ? tenantFromRow(rows[0]) : undefined;
@@ -148,8 +149,9 @@ export async function setTenantStatus(
   id: string,
   status: TenantStatus,
 ): Promise<TenantRecord | undefined> {
+  if (!isUuid(id)) return undefined;
   const { rows } = await db.query<TenantRow>(
-    `update tenants set status = $2, updated_at = now() where id::text = $1 returning ${TENANT_COLUMNS}`,
+    `update tenants set status = $2, updated_at = now() where id = $1 returning ${TENANT_COLUMNS}`,
     [id, status],
   );
   return rows[0] ? tenantFromRow(rows[0]) : undefined;
@@ -160,16 +162,16 @@ export async function setSchemaVersion(
   id: string,
   version: string,
 ): Promise<void> {
-  await db.query("update tenants set schema_version = $2, updated_at = now() where id::text = $1", [
+  if (!isUuid(id)) return;
+  await db.query("update tenants set schema_version = $2, updated_at = now() where id = $1", [
     id,
     version,
   ]);
 }
 
-/** Remove a tenant row that never became usable (failed provisioning), with the password, integrations and keys made for it. */
+/** Remove a tenant row that never became usable (failed provisioning), with the password stored for it. */
 export async function deleteTenantRow(db: ControlQueryable, id: string): Promise<void> {
-  await db.query("delete from api_keys where tenant_id::text = $1", [id]);
-  await db.query("delete from integrations where tenant_id::text = $1", [id]);
-  await db.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
-  await db.query("delete from tenants where id::text = $1", [id]);
+  if (!isUuid(id)) return;
+  await db.query("delete from tenant_db_credentials where tenant_id = $1", [id]);
+  await db.query("delete from tenants where id = $1", [id]);
 }

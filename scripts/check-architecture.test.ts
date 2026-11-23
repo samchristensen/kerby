@@ -259,6 +259,39 @@ describe("checkArchitecture", () => {
       expect(violation?.rule).toBe("providers");
       expect(violation?.message).toContain("AgentRuntime");
     });
+
+    it("keeps a destination adapter in a service's index.ts, and lets anything use the port", () => {
+      const delivery = {
+        "packages/delivery/package.json": pkg("@kerby/delivery"),
+        "packages/delivery/src/index.ts": "export const x = 1;\n",
+        "packages/delivery-webhook/package.json": pkg("@kerby/delivery-webhook", {
+          "@kerby/delivery": "workspace:*",
+        }),
+        "packages/delivery-webhook/src/index.ts": imp("@kerby/delivery"),
+      };
+      const deps = { "@kerby/delivery": "workspace:*", "@kerby/delivery-webhook": "workspace:*" };
+      const wired = tree({
+        ...delivery,
+        "services/api/package.json": api(deps),
+        "services/api/src/index.ts": imp("./runtime/http.ts") + imp("@kerby/delivery-webhook"),
+        "services/api/src/service/chats.ts": imp("../repo/chats.ts") + imp("@kerby/delivery"),
+      });
+      expect(checkArchitecture(wired)).toEqual([]);
+
+      const buried = tree({
+        ...delivery,
+        "services/api/package.json": api(deps),
+        "services/api/src/service/chats.ts":
+          imp("../repo/chats.ts") + imp("@kerby/delivery-webhook"),
+      });
+      const [violation, ...rest] = checkArchitecture(buried);
+      expect(rest).toEqual([]);
+      expect(violation).toMatchObject({
+        rule: "providers",
+        file: "services/api/src/service/chats.ts",
+      });
+      expect(violation?.message).toContain("Destination from @kerby/delivery");
+    });
   });
 
   describe("docker", () => {
@@ -302,6 +335,29 @@ describe("checkArchitecture", () => {
         "packages/config/package.json": pkg("@kerby/config"),
         "packages/config/src/index.ts": reads,
         "scripts/tool.ts": reads,
+      });
+      expect(checkArchitecture(root)).toEqual([]);
+    });
+  });
+
+  describe("queries", () => {
+    it("rejects comparing a uuid column as text, which no index serves", () => {
+      const root = tree({
+        "packages/contracts/src/index.ts":
+          'export const q = "select 1 from tenants where id::text = $1";\n',
+        "services/api/src/repo/chats.ts":
+          'export const q = "delete from keys where tenant_id::text in ($1)";\n',
+      });
+      expect(rules(root)).toEqual([
+        "queries:packages/contracts/src/index.ts",
+        "queries:services/api/src/repo/chats.ts",
+      ]);
+    });
+
+    it("accepts a uuid comparison and other text casts", () => {
+      const root = tree({
+        "packages/contracts/src/index.ts":
+          'export const q = "select id::text as id from tenants where id = $1 and status::text = $2";\n',
       });
       expect(checkArchitecture(root)).toEqual([]);
     });

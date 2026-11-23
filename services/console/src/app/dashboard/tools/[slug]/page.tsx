@@ -201,8 +201,9 @@ export default async function ToolServerPage({
         <Card title="Granted to">
           {server.grantedTo.length === 0 ? (
             <p className="text-sm text-muted">
-              No restricted integration may use it. Admin integrations and this console hold every
-              tool; grant tools to a restricted one on its page under{" "}
+              No integration is granted it. Integrations holding{" "}
+              <code className="font-mono">admin</code> and this console may name every enabled tool;
+              grant tools to any other on its page under{" "}
               <Link href="/dashboard/integrations" className="text-brand-text hover:underline">
                 Integrations
               </Link>

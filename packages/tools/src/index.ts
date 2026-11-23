@@ -1,4 +1,4 @@
-// Tools (ADR 0019): the tenant tables of remote MCP servers, their tools, grants and conversations' tools, their repo,
+// Tools (ADR 0022): the tenant tables of remote MCP servers, their tools, grants and conversations' tools, their repo,
 // and Kerby's own tools.
 import { join } from "node:path";
 

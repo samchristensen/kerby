@@ -12,7 +12,7 @@ export default async function ToolsPage() {
     <Workspace>
       <PageHeader
         title="Add a tool server"
-        description="A remote MCP server whose tools your conversations may call. Nothing is offered until you enable a tool, grant it to an integration that is restricted, and a conversation names it."
+        description="A remote MCP server whose tools your conversations may call. Nothing is offered until you enable a tool, grant it to an integration (one holding admin needs no grant), and a conversation names it."
       />
       <NewServerForm />
     </Workspace>

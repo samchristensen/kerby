@@ -1,4 +1,4 @@
-// What listing a tenant's MCP server and calling its tools share (ADR 0019): the credential in its header (a header's
+// What listing a tenant's MCP server and calling its tools share (ADR 0022): the credential in its header (a header's
 // value, or an OAuth connection's access token, refreshed when it is about to expire or the server refuses it), and an
 // account of a failure the tenant may read (a sync's `last_error`, a tool's error result) that never holds a credential.
 import { EgressError } from "@kerby/egress";

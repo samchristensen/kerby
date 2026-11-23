@@ -1,41 +1,40 @@
-// Integrations (ADR 0019): a tenant's named clients. Every API key belongs to one, and the key may do what its
-// integration's role allows. Archiving an integration revokes its keys; the row stays (audit, grants by id) and frees
-// its name.
-import type { IntegrationRole } from "@kerby/contracts";
-import type { ControlDb, ControlQueryable } from "@kerby/db";
+// Integrations (ADR 0020): who a key acts for, and what it may do. The console makes and changes them; the api only
+// reads them, through the key it authenticates.
+import { DEFAULT_INTEGRATION, SCOPES, type Scope, ScopeSchema } from "@kerby/contracts";
+import { type ControlDb, type ControlQueryable, isUuid } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
 
 export type IntegrationRecord = {
   id: string;
   tenantId: string;
   name: string;
-  role: IntegrationRole;
+  scopes: Scope[];
   createdAt: Date;
-  updatedAt: Date;
-  archivedAt: Date | null;
 };
 
 type IntegrationRow = {
   id: string;
   tenant_id: string;
   name: string;
-  role: IntegrationRole;
+  scopes: string[];
   created_at: Date;
-  updated_at: Date;
-  archived_at: Date | null;
 };
 
-const COLUMNS = "id, tenant_id, name, role, created_at, updated_at, archived_at";
+const INTEGRATION_COLUMNS = "id, tenant_id, name, scopes, created_at";
 
-function integrationFromRow(row: IntegrationRow): IntegrationRecord {
+/** Scopes in catalog order; a scope the code no longer knows fails loudly rather than granting nothing quietly. */
+const scopesFromRow = (scopes: readonly string[]): Scope[] => {
+  const known = scopes.map((value) => ScopeSchema.parse(value));
+  return SCOPES.filter((scope) => known.includes(scope));
+};
+
+export function integrationFromRow(row: IntegrationRow): IntegrationRecord {
   return {
     id: row.id,
     tenantId: row.tenant_id,
     name: row.name,
-    role: row.role,
+    scopes: scopesFromRow(row.scopes),
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    archivedAt: row.archived_at,
   };
 }
 
@@ -43,113 +42,132 @@ export class IntegrationNameTakenError extends Error {
   override name = "IntegrationNameTakenError";
 }
 
-/** A key was asked for in an integration that is not a live integration of its tenant. */
-export class IntegrationNotFoundError extends Error {
-  override name = "IntegrationNotFoundError";
-}
-
-function nameTaken(error: unknown, name: string): never {
-  if (errorCode(error) === "23505")
-    throw new IntegrationNameTakenError(
-      `an integration named "${name}" already exists. Fix: choose another name, or archive the existing one first`,
-    );
-  throw error;
-}
-
-/** Throws `IntegrationNameTakenError` when a live integration of the tenant has the name. */
+/** Make an integration. Throws `IntegrationNameTakenError` when a live one of the tenant has the name. */
 export async function createIntegration(
   db: ControlQueryable,
-  input: { tenantId: string; name: string; role: IntegrationRole },
+  tenantId: string,
+  input: { name: string; scopes: readonly Scope[] },
 ): Promise<IntegrationRecord> {
   try {
     const { rows } = await db.query<IntegrationRow>(
-      `insert into integrations (tenant_id, name, role) values ($1, $2, $3) returning ${COLUMNS}`,
-      [input.tenantId, input.name, input.role],
+      `insert into integrations (tenant_id, name, scopes) values ($1, $2, $3) returning ${INTEGRATION_COLUMNS}`,
+      [tenantId, input.name, SCOPES.filter((scope) => input.scopes.includes(scope))],
     );
     const row = rows[0];
     if (!row) throw new Error("integration insert returned no row");
     return integrationFromRow(row);
   } catch (error) {
-    return nameTaken(error, input.name);
+    if (errorCode(error) === "23505")
+      throw new IntegrationNameTakenError(`an integration named "${input.name}" exists`);
+    throw error;
   }
 }
 
-/** The tenant's live integrations, by name. */
+/** The tenant's `default` integration, made with every scope if it has none (provisioning, operators' keys). */
+export async function ensureDefaultIntegration(
+  db: ControlQueryable,
+  tenantId: string,
+): Promise<IntegrationRecord> {
+  const found = await findIntegrationByName(db, tenantId, DEFAULT_INTEGRATION);
+  if (found) return found;
+  try {
+    return await createIntegration(db, tenantId, { name: DEFAULT_INTEGRATION, scopes: SCOPES });
+  } catch (error) {
+    // Made by a concurrent call between the lookup and the insert.
+    const raced =
+      error instanceof IntegrationNameTakenError &&
+      (await findIntegrationByName(db, tenantId, DEFAULT_INTEGRATION));
+    if (raced) return raced;
+    throw error;
+  }
+}
+
+async function findIntegrationByName(
+  db: ControlQueryable,
+  tenantId: string,
+  name: string,
+): Promise<IntegrationRecord | undefined> {
+  if (!isUuid(tenantId)) return undefined;
+  const { rows } = await db.query<IntegrationRow>(
+    `select ${INTEGRATION_COLUMNS} from integrations
+      where tenant_id = $1 and name = $2 and deleted_at is null`,
+    [tenantId, name],
+  );
+  return rows[0] ? integrationFromRow(rows[0]) : undefined;
+}
+
+/** The tenant's live integrations, oldest first. */
 export async function listIntegrations(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<IntegrationRecord[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<IntegrationRow>(
-    `select ${COLUMNS} from integrations where tenant_id::text = $1 and archived_at is null order by name, id`,
+    `select ${INTEGRATION_COLUMNS} from integrations
+      where tenant_id = $1 and deleted_at is null order by created_at, id`,
     [tenantId],
   );
   return rows.map(integrationFromRow);
 }
 
-/** A live integration of this tenant; undefined for anything else, including an id that is not a uuid. */
+/** A live integration of this tenant, or undefined (another tenant's id is simply not found). */
 export async function getIntegration(
   db: ControlQueryable,
   tenantId: string,
-  id: string,
+  integrationId: string,
 ): Promise<IntegrationRecord | undefined> {
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<IntegrationRow>(
-    `select ${COLUMNS} from integrations where id::text = $1 and tenant_id::text = $2 and archived_at is null`,
-    [id, tenantId],
+    `select ${INTEGRATION_COLUMNS} from integrations
+      where id = $1 and tenant_id = $2 and deleted_at is null`,
+    [integrationId, tenantId],
   );
-  const row = rows[0];
-  return row && integrationFromRow(row);
+  return rows[0] ? integrationFromRow(rows[0]) : undefined;
 }
 
-export async function findIntegrationByName(
+/** Replace a live integration's scopes; undefined when there is no such integration. Keys follow within the auth TTL. */
+export async function setIntegrationScopes(
   db: ControlQueryable,
   tenantId: string,
-  name: string,
+  integrationId: string,
+  scopes: readonly Scope[],
 ): Promise<IntegrationRecord | undefined> {
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<IntegrationRow>(
-    `select ${COLUMNS} from integrations where tenant_id::text = $1 and name = $2 and archived_at is null`,
-    [tenantId, name],
+    `update integrations set scopes = $3
+      where id = $1 and tenant_id = $2 and deleted_at is null
+      returning ${INTEGRATION_COLUMNS}`,
+    [integrationId, tenantId, SCOPES.filter((scope) => scopes.includes(scope))],
   );
-  const row = rows[0];
-  return row && integrationFromRow(row);
+  return rows[0] ? integrationFromRow(rows[0]) : undefined;
 }
 
-/** Rename or change the role of a live integration. Undefined when there is none; `IntegrationNameTakenError`. */
-export async function updateIntegration(
-  db: ControlQueryable,
-  tenantId: string,
-  id: string,
-  changes: { name?: string; role?: IntegrationRole },
-): Promise<IntegrationRecord | undefined> {
-  try {
-    const { rows } = await db.query<IntegrationRow>(
-      `update integrations set name = coalesce($3, name), role = coalesce($4, role), updated_at = now()
-        where id::text = $1 and tenant_id::text = $2 and archived_at is null returning ${COLUMNS}`,
-      [id, tenantId, changes.name ?? null, changes.role ?? null],
-    );
-    const row = rows[0];
-    return row && integrationFromRow(row);
-  } catch (error) {
-    return nameTaken(error, changes.name ?? "");
-  }
-}
-
-/** Archive a live integration and revoke its live keys, together. False when there is no such integration. */
-export async function archiveIntegration(
+/**
+ * Delete an integration: revoke its keys and delete its subscriptions, in one transaction. The row stays, marked, as
+ * revoked keys do. False when there is no such live integration.
+ */
+export async function deleteIntegration(
   db: ControlDb,
   tenantId: string,
-  id: string,
+  integrationId: string,
 ): Promise<boolean> {
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return false;
   return db.transaction(async (tx) => {
-    const { rows } = await tx.query<{ id: string }>(
-      `update integrations set archived_at = now(), updated_at = now()
-        where id::text = $1 and tenant_id::text = $2 and archived_at is null returning id`,
-      [id, tenantId],
+    const { rowCount } = await tx.query(
+      `update integrations set deleted_at = now()
+        where id = $1 and tenant_id = $2 and deleted_at is null`,
+      [integrationId, tenantId],
     );
-    const archived = rows[0];
-    if (!archived) return false;
+    if (rowCount !== 1) return false;
     await tx.query(
       "update api_keys set revoked_at = now() where integration_id = $1 and revoked_at is null",
-      [archived.id],
+      [integrationId],
+    );
+    // Tombstones: the dispatcher cancels their queued deliveries in the tenant's database, then removes them.
+    await tx.query(
+      `update subscriptions set state = 'deleted', updated_at = now()
+        where integration_id = $1 and tenant_id = $2 and state <> 'deleted'`,
+      [integrationId, tenantId],
     );
     return true;
   });

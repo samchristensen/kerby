@@ -1,4 +1,4 @@
-// OAuth connections the console began and the authorization server has not answered yet (ADR 0019): what the api
+// OAuth connections the console began and the authorization server has not answered yet (ADR 0022): what the api
 // reads back when the person's browser returns with a code. A flow is found only by its `state`, which is stored
 // hashed, read once (taken), and dies after ten minutes. It lives in the tenant's own database, so a state can only
 // ever finish a connection of the tenant whose session began it.

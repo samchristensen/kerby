@@ -8,7 +8,7 @@ export const LEGACY_VERSIONS: readonly string[] = ["2025-11-25", "2025-06-18", "
 export const META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
 export const META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
 export const META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
-/** Where a tool call carries Kerby's call id, for servers that deduplicate retried calls (ADR 0019). */
+/** Where a tool call carries Kerby's call id, for servers that deduplicate retried calls (ADR 0022). */
 export const MCP_CALL_ID_META_KEY = "kerby/callId";
 
 /** JSON-RPC codes a 2026-07-28 server answers with; one of them means "modern server, do not fall back". */

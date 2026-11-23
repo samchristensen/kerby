@@ -82,7 +82,7 @@ logs-query: ## Filtered JSON log lines: TENANT= LEVEL=warn MSG= SERVICE= SINCE=3
 e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes elsewhere (KERBY_E2E_KEEP=1 keeps the stack)
 	node scripts/e2e.ts
 
-tools-e2e: ## Tools on the real stack (ADR 0019): a local MCP server listed, granted to a restricted integration, called; drift pinned
+tools-e2e: ## Tools on the real stack (ADR 0022): a local MCP server listed, granted to an integration without admin, called; drift pinned
 	node scripts/tools-e2e.ts
 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, a 200-tenant load run (KERBY_LOAD_TENANTS=n) and stream saturation on two api processes

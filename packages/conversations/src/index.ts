@@ -2,20 +2,25 @@
 import { join } from "node:path";
 import { blobsMigrationsDir } from "@kerby/blobs";
 import { durableMigrationsDir } from "@kerby/durable";
+import { eventsMigrationsDir } from "@kerby/events";
 import { promptsMigrationsDir } from "@kerby/prompts";
+import { searchMigrationsDir } from "@kerby/search";
 import { toolsMigrationsDir } from "@kerby/tools";
 
 const conversationsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
 /**
- * Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, prompts, then
- * tools (whose conversation tools reference conversations).
+ * Every tenant database's migrations, in apply order: Absurd and queues, the blob index, conversations, prompts, the
+ * event log, the search index over conversations' messages (ADR 0021), then tools (whose conversation tools reference
+ * conversations; ADR 0022).
  */
 export const tenantMigrationDirs: readonly string[] = [
   durableMigrationsDir,
   blobsMigrationsDir,
   conversationsMigrationsDir,
   promptsMigrationsDir,
+  eventsMigrationsDir,
+  searchMigrationsDir,
   toolsMigrationsDir,
 ];
 
@@ -42,10 +47,10 @@ export {
   type ConversationRecord,
   findConversation,
   insertConversation,
+  insertConversationInTx,
   isBusy,
-  isConversationId,
   listConversations,
   recordToolExecution,
-  setLastError,
 } from "./repo.ts";
 export { appendTrace, readTrace } from "./trace.ts";
+export { recordTurnOutcome, recordTurnStarted, type TurnOutcome } from "./turns.ts";

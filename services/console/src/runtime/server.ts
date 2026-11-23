@@ -19,7 +19,7 @@ export type ConsoleServerOptions = {
   /** Take the client address from the left-most `X-Forwarded-For` entry (Railway's edge) instead of the socket. */
   trustProxy: boolean;
   /**
-   * Kerby's Client ID Metadata Document (ADR 0019), served at `OAUTH_CLIENT_METADATA_PATH` to anyone: authorization
+   * Kerby's Client ID Metadata Document (ADR 0022), served at `OAUTH_CLIENT_METADATA_PATH` to anyone: authorization
    * servers fetch it to learn Kerby's redirect URI. Undefined without a public URL: not served.
    */
   clientMetadata: Record<string, unknown> | undefined;

@@ -3,7 +3,9 @@ import { createAccounts } from "./accounts.ts";
 import { createAdmin } from "./admin.ts";
 import { createChats } from "./chats.ts";
 import { createIntegrations } from "./integrations.ts";
+import { createSearch } from "./search.ts";
 import { createStudio } from "./studio.ts";
+import { createSubscriptions } from "./subscriptions.ts";
 import { createTools } from "./tools.ts";
 import { createWorkspace } from "./workspace.ts";
 
@@ -14,7 +16,9 @@ export function createConsoleService(deps: ConsoleDeps): ConsoleService {
     ...createAdmin(deps),
     ...createWorkspace(deps),
     ...createIntegrations(deps),
+    ...createSubscriptions(deps),
     ...createChats(deps),
+    ...createSearch(deps),
     ...createStudio(deps),
     ...createTools(deps),
   };

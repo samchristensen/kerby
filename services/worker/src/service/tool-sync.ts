@@ -1,4 +1,4 @@
-// Listing a tenant's MCP server (ADR 0019): the `sync-tool-server` task. Only a worker can open the server's credential,
+// Listing a tenant's MCP server (ADR 0022): the `sync-tool-server` task. Only a worker can open the server's credential,
 // so only a worker lists its tools; the registry (`recordSync`) decides what the listing changes: a new tool arrives
 // disabled, an enabled tool keeps the definition an admin approved.
 import { MAX_TOOLS_PER_SERVER } from "@kerby/contracts";

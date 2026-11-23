@@ -1,9 +1,9 @@
-// A tool server's credential (ADR 0019): the value of the header it authenticates with, or the JSON of an OAuth
+// A tool server's credential (ADR 0022): the value of the header it authenticates with, or the JSON of an OAuth
 // connection's tokens, sealed like a model key in `tenant_secrets` under `tool-credential/<serverId>`. The name is
 // authenticated data and carries the server's id, not its slug, so a deleted server's leftover row never opens for a new
 // server under the same slug. The api and console seal (public key only); the worker opens inside the step that calls
 // the server, and replaces an OAuth connection's tokens when it refreshes them (`updateToolCredential`).
-import type { ControlDb, ControlQueryable } from "@kerby/db";
+import { type ControlDb, type ControlQueryable, isUuid } from "@kerby/db";
 import { type Opener, type Sealer, secretContext } from "@kerby/secrets";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -36,8 +36,9 @@ export async function deleteToolCredential(
   tenantId: string,
   serverId: string,
 ): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
-    "delete from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "delete from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, secretName(serverId)],
   );
   return rowCount === 1;
@@ -48,8 +49,9 @@ export async function hasToolCredential(
   tenantId: string,
   serverId: string,
 ): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
-    "select 1 from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "select 1 from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, secretName(serverId)],
   );
   return rowCount === 1;
@@ -62,9 +64,10 @@ export async function readToolCredential(
   tenantId: string,
   serverId: string,
 ): Promise<string | undefined> {
+  if (!isUuid(tenantId)) return undefined;
   const name = secretName(serverId);
   const { rows } = await db.query<{ ciphertext: Buffer }>(
-    "select ciphertext from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "select ciphertext from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, name],
   );
   const row = rows[0];
@@ -85,11 +88,12 @@ export async function updateToolCredential(
   serverId: string,
   change: (current: string) => Promise<string | null | undefined>,
 ): Promise<string | undefined> {
+  if (!isUuid(tenantId)) return undefined;
   const name = secretName(serverId);
   const context = secretContext(tenantId, name);
   return db.transaction(async (tx) => {
     const { rows } = await tx.query<{ ciphertext: Buffer }>(
-      "select ciphertext from tenant_secrets where tenant_id::text = $1 and name = $2 for update",
+      "select ciphertext from tenant_secrets where tenant_id = $1 and name = $2 for update",
       [tenantId, name],
     );
     const row = rows[0];
@@ -98,14 +102,14 @@ export async function updateToolCredential(
     const next = await change(current);
     if (next === undefined) return current;
     if (next === null) {
-      await tx.query("delete from tenant_secrets where tenant_id::text = $1 and name = $2", [
+      await tx.query("delete from tenant_secrets where tenant_id = $1 and name = $2", [
         tenantId,
         name,
       ]);
       return undefined;
     }
     await tx.query(
-      "update tenant_secrets set ciphertext = $3, created_at = now() where tenant_id::text = $1 and name = $2",
+      "update tenant_secrets set ciphertext = $3, created_at = now() where tenant_id = $1 and name = $2",
       [tenantId, name, keys.sealer.seal(next, context)],
     );
     return next;

@@ -1,10 +1,10 @@
 import { tenantPrefix } from "@kerby/blobs";
-import { DEFAULT_INTEGRATION_NAME, type Limits } from "@kerby/contracts";
+import type { Limits } from "@kerby/contracts";
 import {
   audit,
   createApiKey,
-  createIntegration,
   deleteTenantRow,
+  ensureDefaultIntegration,
   getTenant,
   insertTenant,
   listTenants,
@@ -38,7 +38,7 @@ export type Provisioned = { tenant: TenantRecord; key: Awaited<ReturnType<typeof
 
 /**
  * Provision a tenant: a database copied from the template, a role that can reach only it, the tenant migrations,
- * the `default` admin integration with the first key in it. On any failure nothing is left behind: the database, the role and the row are removed. `actor` is who
+ * the first key. On any failure nothing is left behind: the database, the role and the row are removed. `actor` is who
  * asked, for the audit log: an operator, or the console at sign-up.
  */
 export async function provisionTenant(
@@ -75,11 +75,7 @@ export async function provisionTenant(
     // The copy may predate the newest migrations: catch up, as the tenant's own role.
     await pools.use(tenant.id, (db) => migrate(db, tenantMigrationDirs));
     await setSchemaVersion(control, tenant.id, currentSchemaVersion());
-    const integration = await createIntegration(control, {
-      tenantId: tenant.id,
-      name: DEFAULT_INTEGRATION_NAME,
-      role: "admin",
-    });
+    const integration = await ensureDefaultIntegration(control, tenant.id);
     const key = await createApiKey(control, tenant.id, integration.id, "initial");
     const active = await setTenantStatus(control, tenant.id, "active");
     await audit(control, {
@@ -135,9 +131,9 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
 }
 
 /**
- * Delete: refuse new work, drop the database and role, delete the object prefix, purge integrations, keys, secrets and the console's
- * people and sessions. Every step is safe to repeat, so a failed delete is retried by calling it again. The row stays,
- * status `deleted`.
+ * Delete: refuse new work, drop the database and role, delete the object prefix, purge subscriptions, keys,
+ * integrations, secrets, the console's people and sessions, and the workers' wake-up hint. Every step is safe to repeat,
+ * so a failed delete is retried by calling it again. The row stays, status `deleted`.
  */
 export async function deleteTenant(deps: ControlDeps, id: string): Promise<void> {
   const { control, cluster, buckets, pools } = deps;
@@ -149,12 +145,15 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
   await cluster.dropRole(tenant.dbRole);
   const objects = await buckets.primary.deletePrefix(tenantPrefix(id));
   await control.transaction(async (tx) => {
-    await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
-    await tx.query("delete from integrations where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_sessions where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_users where tenant_id::text = $1", [id]);
+    // Foreign-key order: subscriptions and keys reference integrations.
+    await tx.query("delete from subscriptions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from api_keys where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from integrations where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_secrets where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_db_credentials where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_sessions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_users where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_wakeups where tenant_id = $1", [tenant.id]);
     await setTenantStatus(tx, id, "deleted");
   });
   await audit(control, {

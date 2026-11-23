@@ -11,11 +11,13 @@ import {
 } from "@kerby/contracts";
 import {
   createApiKey,
-  createIntegration,
+  ensureDefaultIntegration,
+  hintTenantWork,
   insertTenant,
   putModelKey,
   putToolCredential,
   readToolCredential,
+  readWakeupVersion,
   setTenantStatus,
   updateToolCredential,
 } from "@kerby/control-plane";
@@ -32,8 +34,8 @@ import {
   recordToolExecution,
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
-import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
-import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
+import { type ControlDb, type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
+import { readTask, spawnInTx, type TaskHandlers, type TaskParams } from "@kerby/durable";
 import { createEgressFetch } from "@kerby/egress";
 import type {
   JudgmentOutcome,
@@ -70,6 +72,7 @@ import {
   type WorkerDeps,
 } from "./index.ts";
 import { toolServerHeaders } from "./service/mcp.ts";
+import type { WorkerQueue } from "./service/scheduler.ts";
 import type { ToolCredentials } from "./types/index.ts";
 
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
@@ -118,6 +121,10 @@ type Options = {
   toolCredentials?: ToolCredentials["read"] | "sealed";
   /** Wrap the object store the worker and the test share, to make part of it fail. */
   wrapBlobs?: (blobs: Blobs) => Blobs;
+  /** Handlers in place of the worker's own for some tasks, in every worker of the harness. */
+  handlers?: (ctx: TenantContext) => Partial<TaskHandlers<WorkerQueue>>;
+  /** Wrap the control database the worker uses (the test keeps the real one), to make part of it fail. */
+  wrapControl?: (control: ControlDb) => ControlDb;
 };
 
 async function harness(options: Options = {}) {
@@ -146,13 +153,21 @@ async function harness(options: Options = {}) {
           read: stand,
           update: () => Promise.reject(new Error("a stand-in reader stores no OAuth connections")),
         };
+  const handlersFor = (workerDeps: WorkerDeps) => {
+    const own = createHandlers(workerDeps);
+    return (ctx: TenantContext): TaskHandlers<WorkerQueue> => ({
+      ...own(ctx),
+      ...options.handlers?.(ctx),
+    });
+  };
   const deps: WorkerDeps = {
-    control: control.db,
+    control: options.wrapControl ? options.wrapControl(control.db) : control.db,
     pools,
     blobs,
     runtime,
     modelKeys: options.modelKeys,
     judgments: options.judgments ?? [],
+    embeddings: [],
     toolCredentials,
     // The egress guard as production builds it, but letting the loopback test servers through.
     ...toolFetches({
@@ -165,49 +180,59 @@ async function harness(options: Options = {}) {
       claimTimeoutSeconds: 30,
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
       maxRunningTurns: 50,
+      maxRunningIndexTasks: 2,
+      maxRunningSearches: 4,
       sweepIntervalMs: 200,
+      // Out of reach of a test: work no hint announced is found only by the full sweep at start.
+      fullSweepIntervalMs: 600_000,
       enableEchoTool: options.echo ?? true,
       historyBudgetBytes: 8 * 1024 * 1024,
       toolCallTimeoutMs: 60_000,
       ...options.settings,
     },
   };
-  const scheduler = createScheduler(deps, createHandlers(deps));
+  const scheduler = createScheduler(deps, handlersFor(deps));
   await scheduler.start();
   cleanups.push(() => scheduler.stop(0));
 
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    const integration = await createIntegration(control.db, {
-      tenantId: row.id,
-      name: "default",
-      role: "admin",
-    });
+    const integration = await ensureDefaultIntegration(control.db, row.id);
     await createApiKey(control.db, row.id, integration.id);
     const database = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);
-    return { id: row.id, ctx: { tenantId: row.id, db: database.db } };
+    return {
+      id: row.id,
+      integrationId: integration.id,
+      ctx: { tenantId: row.id, db: database.db },
+    };
   }
 
-  /** Post a user message the way the API does, optionally without the notification (the sweep must find it). */
+  /**
+   * Post a user message the way the API does: `hint` marks the tenant due and notifies (`hintTenantWork`);
+   * `hint-only` marks it due as if the NOTIFY were lost (the due sweep must find it); `none` neither, as if the
+   * api failed after its commit (only a full sweep finds it).
+   */
   async function post(
     t: Awaited<ReturnType<typeof tenant>>,
     conversationId: string,
     text: string,
-    notify = true,
+    announce: "hint" | "hint-only" | "none" = "hint",
   ) {
     const posted = await postUserMessage(t.ctx, blobs, conversationId, [{ type: "text", text }], {
       storageBytes: 1024 ** 3,
     });
-    if (notify) await control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    if (announce === "hint") await hintTenantWork(control.db, t.id);
+    if (announce === "hint-only") await hintWithoutNotify(control.db, t.id);
     return posted.seq;
   }
 
   /** A conversation on the fake model that names `tools` (by default the built-in echo the fake model calls). */
   async function conversation(t: Awaited<ReturnType<typeof tenant>>, tools = ["kerby/echo"]) {
     const created = await insertConversation(t.ctx.db, {
+      integrationId: t.integrationId,
       model: "fake/fake-1",
       system: "Be brief.",
     });
@@ -227,6 +252,19 @@ async function harness(options: Options = {}) {
       return all.length >= count ? all : false;
     });
 
+  /** Spawn a task the way the api or a turn does, and notify the workers. */
+  async function spawn<N extends keyof TaskParams>(
+    t: Awaited<ReturnType<typeof tenant>>,
+    name: N,
+    params: TaskParams[N],
+  ) {
+    const { taskId } = await t.ctx.db.transaction((tx) =>
+      spawnInTx(tx, name, params, { idempotencyKey: `${name}:${crypto.randomUUID()}` }),
+    );
+    await control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    return taskId;
+  }
+
   /** A second worker process over the same databases, with its own runtime and settings. */
   async function extraWorker(extra: {
     runtime: AgentRuntime;
@@ -237,7 +275,7 @@ async function harness(options: Options = {}) {
       runtime: extra.runtime,
       settings: { ...deps.settings, ...extra.settings, workerId: "second-worker" },
     };
-    const other = createScheduler(second, createHandlers(second));
+    const other = createScheduler(second, handlersFor(second));
     await other.start();
     cleanups.push(() => other.stop(0));
     return other;
@@ -255,8 +293,19 @@ async function harness(options: Options = {}) {
     settled,
     extraWorker,
     secrets,
+    spawn,
   };
 }
+
+type EventRow = { type: string; integration_id: string | null; data: Record<string, unknown> };
+
+/** The tenant's event log, oldest first. */
+const eventsOf = async (t: { ctx: { db: TenantDb } }): Promise<EventRow[]> =>
+  (
+    await t.ctx.db.query<EventRow>(
+      "select type, integration_id, data from events order by position",
+    )
+  ).rows;
 
 const textOf = (message: AgentMessage | undefined): string =>
   message ? message.content.map((part) => ("text" in part ? part.text : "")).join("") : "";
@@ -511,6 +560,11 @@ describe("a turn", () => {
       notices.push(p),
     );
     cleanups.push(() => subscription.close());
+    const dispatcherNotices: string[] = [];
+    const dispatchers = await h.control.db.listen("tenant_events", (p) =>
+      dispatcherNotices.push(p),
+    );
+    cleanups.push(() => dispatchers.close());
 
     await h.post(t, conversation.id, "hello");
     const all = await h.settled(t, conversation.id, 2);
@@ -539,13 +593,44 @@ describe("a turn", () => {
     expect(types).toContain("text_delta");
     expect(types).toContain("persisted:2");
     expect(types.indexOf("persisted:2")).toBeGreaterThan(types.indexOf("run_start"));
+
+    const events = await eventually("turn.completed", async () => {
+      const rows = await eventsOf(t);
+      return rows.some((e) => e.type === "turn.completed") ? rows : false;
+    });
+    const c = conversation.id;
+    expect(events).toEqual(
+      [
+        { type: "conversation.created", data: expect.objectContaining({ conversationId: c }) },
+        { type: "message.created", data: expect.objectContaining({ conversationId: c, seq: 1 }) },
+        { type: "turn.started", data: { conversationId: c, seq: 1 } },
+        { type: "message.created", data: expect.objectContaining({ conversationId: c, seq: 2 }) },
+        { type: "turn.completed", data: { conversationId: c, seq: 1, lastSeq: 2 } },
+      ].map((e) => ({ ...e, integration_id: t.integrationId })),
+    );
+    // The dispatchers hear about this tenant on the control database.
+    await eventually("tenant_events", async () => dispatcherNotices.includes(t.id));
   });
 
-  it("finds work by its sweep when no notification arrives", async () => {
+  it("finds hinted work by its due sweep when no notification arrives", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "quiet", false);
+    await h.post(t, conversation.id, "quiet", "hint-only");
+    expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
+  });
+
+  it("leaves work no hint announced to the full sweep, which finds it", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "lost hint", "none");
+    // Several due sweeps pass and none looks at the tenant.
+    await sleep(1000);
+    const { rows } = await t.ctx.db.query<{ state: string }>("select state from absurd.t_turns");
+    expect(rows).toEqual([{ state: "pending" }]);
+    // A worker's full sweep (here the one at start) looks at every active tenant.
+    await h.extraWorker({ runtime: createDevelopmentRuntime() });
     expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
   });
 
@@ -845,7 +930,7 @@ describe("a turn's tools", () => {
       tools: [{ name: "send", effect: "write" }],
     });
     const conversation = await h.conversation(t, ["crm/send"]);
-    await h.post(t, conversation.id, "send it", false);
+    await h.post(t, conversation.id, "send it", "none");
     await retryFast(t);
     await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
     await h.settled(t, conversation.id, 3);
@@ -1293,6 +1378,62 @@ describe("OAuth tool servers", () => {
   });
 });
 
+describe("wake-ups", () => {
+  it("runs a retry when its backoff ends, with no new hint or notification", async () => {
+    const h = await harness({ runtime: crashingOnce(createDevelopmentRuntime()) });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "echo ping", "none");
+    await t.ctx.db.query(
+      `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":1}'::jsonb`,
+    );
+    await hintTenantWork(h.control.db, t.id);
+
+    // The first attempt dies; the second waits a second, then a due sweep finds it from the time the worker recorded.
+    const all = await h.settled(t, conversation.id, 4);
+    expect(all.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    const attempts = await t.ctx.db.query<{ attempts: number }>(
+      "select attempts from absurd.t_turns",
+    );
+    expect(attempts.rows).toEqual([{ attempts: 2 }]);
+    // The only hint after the post's is the one the finished turn gives its index task (ADR 0021): the retry took none.
+    await eventually(
+      "the index task's hint",
+      async () => (await readWakeupVersion(h.control.db, t.id)) === "2",
+    );
+    const indexing = await t.ctx.db.query("select 1 from absurd.t_index");
+    expect(indexing.rowCount).toBe(1);
+  });
+
+  it("keeps a tenant due when a hint arrives while its claim runs", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    const pools = h.deps.pools;
+    const acquire = pools.acquire.bind(pools);
+    let arrived = false;
+    pools.acquire = async (tenantId) => {
+      const lease = await acquire(tenantId);
+      return {
+        db: lease.db,
+        // Released after the claim, before the worker records the tenant's next due time: a turn is posted and
+        // hinted meanwhile, its NOTIFY lost. The claim saw nothing; the hint must win.
+        release: async () => {
+          if (!arrived) {
+            arrived = true;
+            await h.post(t, conversation.id, "meanwhile", "hint-only");
+          }
+          await lease.release();
+        },
+      };
+    };
+
+    h.scheduler.notify(t.id); // nothing queued yet
+    expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
+    expect(arrived).toBe(true);
+  });
+});
+
 /** A runtime that behaves like the real one but throws once, right after the tool result was persisted. */
 function crashingOnce(inner: AgentRuntime): AgentRuntime {
   let crashed = false;
@@ -1317,6 +1458,15 @@ async function retryFast(
 ) {
   await t.ctx.db.query(
     `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb, max_attempts = ${maxAttempts}`,
+  );
+}
+
+/** The api's hint without its NOTIFY: the tenant is due, but no worker is told. */
+async function hintWithoutNotify(db: ControlDb, tenantId: string) {
+  await db.query(
+    `insert into tenant_wakeups (tenant_id, due_at, version) values ($1, now(), 1)
+     on conflict (tenant_id) do update set due_at = now(), version = tenant_wakeups.version + 1`,
+    [tenantId],
   );
 }
 
@@ -1396,9 +1546,9 @@ describe("recovery", () => {
     const h = await harness({ runtime: crashingOnce(real) });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "echo ping", false);
+    await h.post(t, conversation.id, "echo ping", "none");
     await retryFast(t);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     const all = await h.settled(t, conversation.id, 4);
     expect(all.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
@@ -1414,6 +1564,49 @@ describe("recovery", () => {
     // each message exactly once, in order
     const seqs = await t.ctx.db.query<{ seq: number }>("select seq from messages order by seq");
     expect(seqs.rows.map((r) => r.seq)).toEqual([1, 2, 3, 4]);
+    // Each event once, however many attempts the turn took.
+    const events = await eventsOf(t);
+    expect(events.map((e) => e.type)).toEqual([
+      "conversation.created",
+      "message.created",
+      "turn.started",
+      "message.created",
+      "message.created",
+      "message.created",
+      "turn.completed",
+    ]);
+    expect(events.at(-1)?.data).toEqual({ conversationId: conversation.id, seq: 1, lastSeq: 4 });
+  });
+
+  it("bills an answer whose attempt died between persisting and billing it, once, on the retry", async () => {
+    /** The worker's first usage insert fails, as if the control database went away for a moment. */
+    const failingFirstUsage = (db: ControlDb): ControlDb => {
+      let failed = false;
+      const query: ControlDb["query"] = (text, params) => {
+        if (!failed && text.trimStart().startsWith("insert into usage")) {
+          failed = true;
+          return Promise.reject(new Error("control database unreachable"));
+        }
+        return db.query(text, params);
+      };
+      return { ...db, query };
+    };
+    const h = await harness({ wrapControl: failingFirstUsage });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "hello", "none");
+    await retryFast(t);
+    await hintTenantWork(h.control.db, t.id);
+
+    const all = await h.settled(t, conversation.id, 2);
+    expect(all.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
+      { attempts: 2 },
+    ]);
+    const usage = await h.control.db.query("select dedupe_key from usage where tenant_id = $1", [
+      t.id,
+    ]);
+    expect(usage.rows).toEqual([{ dedupe_key: `${conversation.id}:2` }]);
   });
 
   it("records why a turn failed for good, and is not busy afterwards", async () => {
@@ -1428,9 +1621,14 @@ describe("recovery", () => {
     const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    const notices: string[] = [];
+    const subscription = await t.ctx.db.listen(conversationChannel(conversation.id), (p) =>
+      notices.push(p),
+    );
+    cleanups.push(() => subscription.close());
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     await eventually("the turn to fail", async () => {
       const { rows } = await t.ctx.db.query<{ last_error: string | null }>(
@@ -1452,6 +1650,36 @@ describe("recovery", () => {
         attempt: 2,
         errorMessage: "provider is down",
       }),
+    ]);
+    const events = await eventsOf(t);
+    expect(events.filter((e) => e.type.startsWith("turn."))).toEqual([
+      {
+        type: "turn.started",
+        integration_id: t.integrationId,
+        data: { conversationId: conversation.id, seq: 1 },
+      },
+      {
+        type: "turn.failed",
+        integration_id: t.integrationId,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "error",
+          error: "the turn failed after 2 attempts",
+        },
+      },
+    ]);
+    // Clients watching the conversation are told it is over.
+    const ends = await eventually("a live run_end", async () => {
+      const found = notices
+        .map(parseNotice)
+        .flatMap((n) =>
+          n && "live" in n && n.live.event.type === "run_end" ? [n.live.event] : [],
+        );
+      return found.length > 0 ? found : false;
+    });
+    expect(ends).toEqual([
+      { type: "run_end", reason: "failed", error: "the turn failed after 2 attempts" },
     ]);
   });
 
@@ -1476,6 +1704,21 @@ describe("recovery", () => {
     await eventually("turn done", async () => !(await isBusy(t.ctx.db, conversation.id)));
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    const outcomes = (await eventsOf(t)).filter((e) =>
+      /^turn\.(completed|blocked|failed)$/.test(e.type),
+    );
+    expect(outcomes).toEqual([
+      {
+        type: "turn.failed",
+        integration_id: t.integrationId,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "refused",
+          error: "model_error: 400 bad tool schema",
+        },
+      },
     ]);
     // a new message clears the error
     await h.post(t, conversation.id, "again");
@@ -1563,9 +1806,9 @@ describe("trace", () => {
     const h = await harness({ runtime: crashingOnce(createDevelopmentRuntime()) });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "echo ping", false);
+    await h.post(t, conversation.id, "echo ping", "none");
     await retryFast(t);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await h.settled(t, conversation.id, 4);
 
     const entries = await trace(h.blobs, t, conversation.id);
@@ -1593,9 +1836,9 @@ describe("trace", () => {
     });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     const lastError = await eventually("the turn to fail", async () => {
       const { rows } = await t.ctx.db.query<{ last_error: string | null }>(
@@ -1634,6 +1877,7 @@ describe("bring your own key", () => {
     });
     const t = await h.tenant("acme");
     const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
       model: "acme-ai/big-1",
       system: "s",
     });
@@ -1654,7 +1898,11 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime, modelKeys: async () => undefined });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
     await h.post(t, conversation.id, "hello");
     await eventually("last_error", () => lastError(t).then((e) => e ?? false));
     await eventually("turn done", async () => !(await isBusy(t.ctx.db, conversation.id)));
@@ -1662,6 +1910,23 @@ describe("bring your own key", () => {
     expect(ran).toBe(false);
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    expect((await eventsOf(t)).filter((e) => e.type.startsWith("turn."))).toEqual([
+      {
+        type: "turn.started",
+        integration_id: null,
+        data: { conversationId: conversation.id, seq: 1 },
+      },
+      {
+        type: "turn.failed",
+        integration_id: null,
+        data: {
+          conversationId: conversation.id,
+          seq: 1,
+          reason: "no_model_key",
+          error: expect.stringMatching(/no model key for provider "anthropic"/),
+        },
+      },
     ]);
   });
 
@@ -1676,7 +1941,11 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime, modelKeys: async () => secret });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
     const notices: string[] = [];
     const subscription = await t.ctx.db.listen(conversationChannel(conversation.id), (p) =>
       notices.push(p),
@@ -1700,10 +1969,14 @@ describe("bring your own key", () => {
     };
     const h = await harness({ runtime: failing, modelKeys: async () => secret });
     const t = await h.tenant("acme");
-    const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
-    await h.post(t, conversation.id, "hello", false);
+    const conversation = await insertConversation(t.ctx.db, {
+      integrationId: null,
+      model: "anthropic/x",
+      system: "s",
+    });
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await eventually("the turn to fail", () => lastError(t).then((e) => e ?? false));
     const runs = await t.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
     expect(runs.rows.length).toBeGreaterThan(0);
@@ -1744,11 +2017,11 @@ describe("fencing", () => {
     const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await t.ctx.db.query(
       `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb`,
     );
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await reachedGate.promise;
 
     // The second worker takes the turn over once the first lease lapses, and is held up before it answers.
@@ -1787,6 +2060,20 @@ describe("fencing", () => {
         .rows[0]?.blob_id ?? "",
     );
     expect(new TextDecoder().decode(stored.body)).not.toContain("DIVERGENT");
+    // One outcome, the live run's: the lapsed run recorded none.
+    const outcomes = await eventually("the outcome", async () => {
+      const rows = (await eventsOf(t)).filter((e) =>
+        /^turn\.(completed|blocked|failed)$/.test(e.type),
+      );
+      return rows.length > 0 ? rows : false;
+    });
+    expect(outcomes).toEqual([
+      {
+        type: "turn.completed",
+        integration_id: t.integrationId,
+        data: { conversationId: conversation.id, seq: 1, lastSeq: 2 },
+      },
+    ]);
   });
 });
 
@@ -1914,6 +2201,135 @@ describe("scheduling", () => {
   });
 });
 
+describe("lanes", () => {
+  it("runs an index task while slow turns fill every turn slot of the worker", async () => {
+    const indexed: string[] = [];
+    const h = await harness({
+      settings: { maxRunningTurns: 1 },
+      handlers: () => ({
+        "index-conversation": async ({ conversationId }) => {
+          indexed.push(conversationId);
+        },
+      }),
+    });
+    const t = await h.tenant("acme");
+    const conversations = await Promise.all([1, 2].map(() => h.conversation(t)));
+    for (const c of conversations) await h.post(t, c.id, "[slow:1500] work");
+    await eventually("a turn to fill the worker", async () => h.scheduler.inFlight(t.id) === 1);
+
+    await h.spawn(t, "index-conversation", { conversationId: "probe" });
+    await eventually("the index task to run", async () => indexed.includes("probe"));
+    expect(h.scheduler.inFlight(t.id)).toBe(1);
+    const unfinished = await Promise.all(
+      conversations.map(async (c) => (await h.messages(t, c.id)).length < 2),
+    );
+    expect(unfinished.some(Boolean)).toBe(true);
+
+    for (const c of conversations) await h.settled(t, c.id, 2);
+  });
+
+  it("runs a turn while a slow index task holds every index slot of the worker", async () => {
+    const release = Promise.withResolvers<void>();
+    const h = await harness({
+      settings: { maxRunningIndexTasks: 1 },
+      handlers: () => ({
+        "index-conversation": async ({ conversationId }) => {
+          if (conversationId === "probe") await release.promise;
+        },
+      }),
+    });
+    cleanups.push(() => release.resolve());
+    const t = await h.tenant("acme");
+    const probe = await h.spawn(t, "index-conversation", { conversationId: "probe" });
+    await eventually("the index task to start", async () => {
+      return h.scheduler.inFlight(t.id, "index") === 1;
+    });
+
+    const started = Date.now();
+    const c = await h.conversation(t);
+    await h.post(t, c.id, "hi");
+    await h.settled(t, c.id, 2);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(h.scheduler.inFlight(t.id, "index")).toBe(1);
+
+    release.resolve();
+    await eventually("the index task to finish", async () => {
+      return (await readTask(t.ctx.db, "index-conversation", probe))?.state === "completed";
+    });
+  });
+
+  it("runs one index task per tenant at a time, counted across workers", async () => {
+    const h = await harness({
+      handlers: () => ({
+        "index-conversation": async () => {
+          await sleep(300);
+        },
+      }),
+    });
+    // Two workers with two index slots each: only the tenant's limit keeps a second task from starting.
+    await h.extraWorker({ runtime: createDevelopmentRuntime() });
+    const t = await h.tenant("acme");
+
+    let peak = 0;
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) {
+        const { rows } = await t.ctx.db.query<{ running: number }>(
+          "select count(*)::int as running from absurd.r_index where state = 'running'",
+        );
+        peak = Math.max(peak, rows[0]?.running ?? 0);
+        await sleep(20);
+      }
+    })();
+    cleanups.push(async () => {
+      sampling = false;
+      await sampler;
+    });
+
+    for (const n of [1, 2, 3, 4]) {
+      await h.spawn(t, "index-conversation", { conversationId: `c${n}` });
+    }
+    await eventually("every index task to finish", async () => {
+      const { rows } = await t.ctx.db.query<{ state: string; tasks: number }>(
+        "select state, count(*)::int as tasks from absurd.t_index group by state",
+      );
+      return rows.length === 1 && rows[0]?.state === "completed" && rows[0].tasks === 4;
+    });
+    sampling = false;
+    await sampler;
+    expect(peak).toBe(1);
+  });
+
+  it("answers a search promptly while the tenant's turns are at its limit", async () => {
+    const h = await harness({
+      handlers: () => ({
+        "run-search": async () => ({ mode: "keyword", notice: null, hits: [] }),
+      }),
+    });
+    const t = await h.tenant("acme", { maxConcurrentTurns: 1 });
+    const conversations = await Promise.all([1, 2].map(() => h.conversation(t)));
+    for (const c of conversations) await h.post(t, c.id, "[slow:1500] work");
+    await eventually("the tenant to reach its limit", async () => h.scheduler.inFlight(t.id) === 1);
+
+    const started = Date.now();
+    const id = await h.spawn(t, "run-search", {
+      query: "work",
+      limit: 10,
+      externalUserId: null,
+      visibility: "tenant",
+    });
+    const search = await eventually("the search to finish", async () => {
+      const task = await readTask(t.ctx.db, "run-search", id);
+      return task?.state === "completed" ? task : false;
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(search.result).toEqual({ mode: "keyword", notice: null, hits: [] });
+    expect(h.scheduler.inFlight(t.id)).toBe(1);
+
+    for (const c of conversations) await h.settled(t, c.id, 2);
+  });
+});
+
 describe("judgments", () => {
   const request: JudgmentRequest = {
     model: "typesafe/jev-latest",
@@ -1951,13 +2367,19 @@ describe("judgments", () => {
   async function submit(
     h: Harness,
     t: Tenant,
-    body: TaskParams["run-judgment"] = request,
-    notify = true,
+    body: Omit<TaskParams["run-judgment"], "integrationId"> = request,
+    hint = true,
+    integrationId: string | null = null,
   ) {
     const { taskId } = await t.ctx.db.transaction((tx) =>
-      spawnInTx(tx, "run-judgment", body, { idempotencyKey: `judgment:${crypto.randomUUID()}` }),
+      spawnInTx(
+        tx,
+        "run-judgment",
+        { ...body, integrationId },
+        { idempotencyKey: `judgment:${crypto.randomUUID()}` },
+      ),
     );
-    if (notify) await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    if (hint) await hintTenantWork(h.control.db, t.id);
     return taskId;
   }
 
@@ -1974,7 +2396,7 @@ describe("judgments", () => {
       modelKeys: async (_tenantId, providerId) => `key-for-${providerId}`,
     });
     const t = await h.tenant("acme");
-    const id = await submit(h, t);
+    const id = await submit(h, t, request, true, t.integrationId);
     const task = await finished(t, id);
     expect(task.result).toEqual({
       type: "answered",
@@ -1994,6 +2416,13 @@ describe("judgments", () => {
         model: "typesafe/jev-test",
         input_tokens: 12,
         output_tokens: 3,
+      },
+    ]);
+    expect(await eventsOf(t)).toEqual([
+      {
+        type: "judgment.completed",
+        integration_id: t.integrationId,
+        data: { judgmentId: id, status: "answered" },
       },
     ]);
   });
@@ -2022,6 +2451,13 @@ describe("judgments", () => {
     expect(calls).toHaveLength(0);
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
+    ]);
+    expect(await eventsOf(t)).toEqual([
+      {
+        type: "judgment.completed",
+        integration_id: null,
+        data: { judgmentId: task.id, status: "refused" },
+      },
     ]);
   });
 
@@ -2056,11 +2492,18 @@ describe("judgments", () => {
     const b = await throwing.tenant("thrown");
     const id = await submit(throwing, b, request, false);
     await retryFast(b, 2);
-    await throwing.control.db.query("select pg_notify('tenant_work', $1)", [b.id]);
+    await hintTenantWork(throwing.control.db, b.id);
     expect((await finished(b, id)).state).toBe("failed");
     const runs = await b.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
     expect(JSON.stringify(runs.rows)).toContain("[redacted]");
     expect(JSON.stringify(runs.rows)).not.toContain(secret);
+    expect(await eventsOf(b)).toEqual([
+      {
+        type: "judgment.failed",
+        integration_id: null,
+        data: { judgmentId: id, error: "connect failed for key [redacted]" },
+      },
+    ]);
   });
 
   describe("guardrails", () => {
@@ -2133,6 +2576,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
@@ -2158,6 +2602,19 @@ describe("judgments", () => {
       const all = await h.settled(t, conversation.id, 4);
       expect(textOf(all[3])).toBe("ok");
       expect(histories.map((history) => history.map(textOf))).toEqual([["hello there"]]);
+      const outcomes = await eventually("both outcomes", async () => {
+        const rows = (await eventsOf(t)).filter((e) =>
+          /^turn\.(completed|blocked|failed)$/.test(e.type),
+        );
+        return rows.length === 2 ? rows : false;
+      });
+      expect(outcomes.map((e) => [e.type, e.data])).toEqual([
+        [
+          "turn.blocked",
+          { conversationId: conversation.id, seq: 1, lastSeq: 2, guardrails: ["jailbreak"] },
+        ],
+        ["turn.completed", { conversationId: conversation.id, seq: 3, lastSeq: 4 }],
+      ]);
       const usage = await h.control.db.query(
         "select dedupe_key from usage where tenant_id = $1 order by dedupe_key",
         [t.id],
@@ -2196,6 +2653,7 @@ describe("judgments", () => {
       const t = await h.tenant("acme");
       const onOpencode = { ...jailbreak, name: "on_opencode", model: "opencode/jev-1.14" } as const;
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak, onOpencode],
@@ -2230,6 +2688,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
@@ -2243,6 +2702,19 @@ describe("judgments", () => {
       expect(histories).toEqual([]);
       expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
         { attempts: 1 },
+      ]);
+      const failed = (await eventsOf(t)).filter((e) => e.type === "turn.failed");
+      expect(failed).toEqual([
+        {
+          type: "turn.failed",
+          integration_id: null,
+          data: {
+            conversationId: conversation.id,
+            seq: 1,
+            reason: "guardrail_unavailable",
+            error: expect.stringMatching(/^a guardrail could not be checked/),
+          },
+        },
       ]);
     });
 
@@ -2258,13 +2730,14 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [jailbreak],
       });
-      await h.post(t, conversation.id, "hello", false);
+      await h.post(t, conversation.id, "hello", "none");
       await retryFast(t, 2);
-      await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+      await hintTenantWork(h.control.db, t.id);
       await eventually("the turn to fail", () => lastError(t).then((e) => e ?? false));
       expect(await lastError(t)).toBe("the turn failed after 2 attempts");
       expect(histories).toEqual([]);
@@ -2318,6 +2791,7 @@ describe("judgments", () => {
       });
       const t = await h.tenant("acme");
       const conversation = await insertConversation(t.ctx.db, {
+        integrationId: null,
         model: "fake/fake-1",
         system: "s",
         guardrails: [destructive],
@@ -2510,13 +2984,17 @@ describe("worker config", () => {
     expect(refused.error?.issues[0]?.path).toEqual(["secretsPrivateKeys"]);
   });
 
-  it("refuses a worker-wide turn cap that is not a positive integer", () => {
-    const refused = workerConfigSchema.safeParse({
-      ...base,
-      secretsPrivateKeys: "a2V5",
-      maxRunningTurns: "0",
-    });
-    expect(refused.success).toBe(false);
-    expect(refused.error?.issues[0]?.path).toEqual(["maxRunningTurns"]);
+  it("refuses a worker-wide lane cap that is not a positive integer", () => {
+    for (const key of ["maxRunningTurns", "maxRunningIndexTasks", "maxRunningSearches"]) {
+      for (const value of ["0", "1.5"]) {
+        const refused = workerConfigSchema.safeParse({
+          ...base,
+          secretsPrivateKeys: "a2V5",
+          [key]: value,
+        });
+        expect(refused.success).toBe(false);
+        expect(refused.error?.issues[0]?.path).toEqual([key]);
+      }
+    }
   });
 });

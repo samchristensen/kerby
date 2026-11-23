@@ -1,4 +1,4 @@
-// An MCP client on a given `fetch` (ADR 0019): Streamable HTTP, stateless 2026-07-28 first, falling back to the
+// An MCP client on a given `fetch` (ADR 0022): Streamable HTTP, stateless 2026-07-28 first, falling back to the
 // handshake revisions (2025-11-25 and older). Kerby declares no client capabilities.
 import { z } from "zod";
 import { clip, McpError } from "./errors.ts";
@@ -57,7 +57,7 @@ const MAX_ERROR_BODY_CHARS = 64 * 1024;
 /** Statuses that, without a recognized 2026-07-28 error in the body, mean "a handshake server": fall back. */
 const FALLBACK_STATUSES = new Set([400, 404, 405]);
 
-/** @public The worker and the registry's sync read listings (ADR 0019). */
+/** @public The worker and the registry's sync read listings (ADR 0022). */
 export type McpToolListing = {
   name: string;
   title?: string;
@@ -65,16 +65,16 @@ export type McpToolListing = {
   inputSchema: Record<string, unknown>;
   annotations?: Record<string, unknown>;
 };
-/** @public The worker turns content into what the model reads (ADR 0019). */
+/** @public The worker turns content into what the model reads (ADR 0022). */
 export type McpContent = { type: "text"; text: string } | { type: string; [key: string]: unknown };
-/** @public The worker turns a call's outcome into a tool result (ADR 0019). */
+/** @public The worker turns a call's outcome into a tool result (ADR 0022). */
 export type McpCallOutcome = {
   content: McpContent[];
   structuredContent?: unknown;
   isError: boolean;
 };
 
-/** @public The worker holds one per server per run (ADR 0019). */
+/** @public The worker holds one per server per run (ADR 0022). */
 export interface McpSession {
   /**
    * Every tool the server lists, following `nextCursor` for at most 50 pages. With `limits`, stops with a `protocol`

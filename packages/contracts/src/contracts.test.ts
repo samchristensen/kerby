@@ -95,6 +95,7 @@ describe("conversation response", () => {
     const parsed = GetConversationResponseSchema.parse({
       conversation: {
         id: "6f1c1d0e-9d38-4d9e-8c8e-0d6a4d4f1b11",
+        integrationId: null,
         externalUserId: null,
         model: "faux",
         system: "",

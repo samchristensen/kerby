@@ -17,7 +17,7 @@ export const CreateConversationRequestSchema = z
     /** Guardrails for this conversation; the tenant must hold a key for the default judgment provider. */
     guardrails: GuardrailsSchema.optional(),
     /**
-     * The tools the assistant may call (ADR 0019), as `<server>/<tool>` or `<server>/*`. None named, none offered. The
+     * The tools the assistant may call (ADR 0022), as `<server>/<tool>` or `<server>/*`. None named, none offered. The
      * caller's integration must be granted every one.
      */
     tools: ToolSelectionSchema.optional(),
@@ -44,6 +44,8 @@ export type CreateConversationRequest = z.infer<typeof CreateConversationRequest
 const ConversationSchema = z.object({
   id: z.uuid(),
   externalUserId: z.string().nullable(),
+  /** The integration that started it (ADR 0020); null when a person started it in the console. */
+  integrationId: z.uuid().nullable(),
   model: z.string(),
   system: z.string(),
   /** The opening of the first user message; null before one is posted, and for conversations older than titles. */
@@ -55,7 +57,7 @@ const ConversationSchema = z.object({
   guardrails: GuardrailsSchema.default([]),
   /** The chat prompt version it was started from (ADR 0017); null when the request wrote its own system prompt. */
   prompt: PinnedPromptSchema.nullable().default(null),
-  /** The tools it may call (ADR 0019), by the servers' current names; a deleted server's drop out. */
+  /** The tools it may call (ADR 0022), by the servers' current names; a deleted server's drop out. */
   tools: z.array(ToolPatternSchema).default([]),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;

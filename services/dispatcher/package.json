@@ -1,0 +1,26 @@
+{
+  "name": "@kerby/dispatcher",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/config": "workspace:*",
+    "@kerby/contracts": "workspace:*",
+    "@kerby/control-plane": "workspace:*",
+    "@kerby/db": "workspace:*",
+    "@kerby/delivery": "workspace:*",
+    "@kerby/delivery-webhook": "workspace:*",
+    "@kerby/durable": "workspace:*",
+    "@kerby/egress": "workspace:*",
+    "@kerby/events": "workspace:*",
+    "@kerby/observability": "workspace:*",
+    "@kerby/secrets": "workspace:*",
+    "@kerby/serve": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@kerby/conversations": "workspace:*"
+  }
+}

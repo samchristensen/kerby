@@ -43,7 +43,7 @@ responses would tie up a worker or its memory.
 
 ## Consequences
 
-- Wiring is per caller: the MCP client (ADR 0019: the worker's listings and tool calls) and any custom base URL pass this
+- Wiring is per caller: the MCP client (ADR 0022: the worker's listings and tool calls) and any custom base URL pass this
   `fetch`.
 - A tenant cannot reach a service on Railway's private network or the metadata endpoint, even through a public redirect
   or a rebinding DNS server. It can still make Kerby call any public host on any port; per-tenant rate limits (G2)
@@ -54,10 +54,10 @@ responses would tie up a worker or its memory.
 
 ## Amendment: the first caller, and named hosts for the development stack (2026-11-23)
 
-- The worker passes this `fetch` to `packages/mcp` for every listing and call of a tenant's MCP server (ADR 0019), with
+- The worker passes this `fetch` to `packages/mcp` for every listing and call of a tenant's MCP server (ADR 0022), with
   `timeoutMs` from `TOOL_CALL_TIMEOUT_MS` (60 s).
 - `allowedHosts`: host names (exact, case-insensitive) whose addresses skip the range check, so the Compose stack can reach
   an MCP server on the developer's machine (`host.docker.internal`, `make tools-e2e`). A redirect away from one is checked
-  like any hop. The worker and the api (OAuth discovery and code exchange, ADR 0019) take them from `EGRESS_ALLOWED_HOSTS`
+  like any hop. The worker and the api (OAuth discovery and code exchange, ADR 0022) take them from `EGRESS_ALLOWED_HOSTS`
   and refuse to start with any unless `KERBY_ENVIRONMENT=development`, so production has none. On the api they are also
   the hosts from which OAuth accepts plain http.

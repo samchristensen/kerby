@@ -21,9 +21,10 @@ x-tenant-env: &tenant-env
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # Postgres 18 with pgvector (ADR 0021), as hosted: Railway's `postgres-ssl:18` ships the extension too.
+    image: pgvector/pgvector:0.8.7-pg18-trixie
     # The same limit as hosted Postgres (docs/deploy.md#postgres), so `make multitenant` measures against it.
-    command: ["-c", "max_connections=500"]
+    command: ["-c", "max_connections=550"]
     environment:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: kerby_control
@@ -100,14 +101,18 @@ services:
       # Clients reach the api directly here, so X-Forwarded-For is not trusted (TRUST_PROXY is on only on Railway).
       TRUST_PROXY: "false"
       PORT: "8080"
-      # Kerby's OAuth redirect URI and Client ID Metadata Document live on the console (ADR 0019); the console below has
+      # Kerby's OAuth redirect URI and Client ID Metadata Document live on the console (ADR 0022); the console below has
       # the same address as PUBLIC_URL. Plain http here, so authorization servers get a dynamically registered client.
       CONSOLE_PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
-      # Development only (ADR 0019), like the worker's: OAuth discovery and the code exchange may reach a test MCP server
+      # Seals subscriptions' signing secrets to the dispatcher's development key pair (the private half is below).
+      DELIVERY_SECRETS_PUBLIC_KEY: "mf8gEAsa6cy+Ow2gG9CTu5e/1IGoegYQSSOz5vfEkB0="
+      # Development only: webhook subscriptions may point at http and private addresses (a receiver on this machine).
+      KERBY_ENVIRONMENT: development
+      ALLOW_LOCAL_DESTINATIONS: "true"
+      # Development only (ADR 0022), like the worker's: OAuth discovery and the code exchange may reach a test MCP server
       # and its authorization server on this machine, over plain http; 127.0.0.1 is where the browser opens a test
       # server's authorize endpoint (`startOAuthFixture({ urlHost: "host.docker.internal", browserHost: "127.0.0.1" })`).
       # Every other tenant URL must still be public.
-      KERBY_ENVIRONMENT: development
       EGRESS_ALLOWED_HOSTS: host.docker.internal,127.0.0.1
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -136,12 +141,32 @@ services:
       # Judgments (ADR 0015) call TypeSafe and OpenCode with the tenant's own key; point these at stand-ins to exercise them offline.
       TYPESAFE_BASE_URL: ${KERBY_TYPESAFE_BASE_URL:-https://api.typesafe.ai}
       OPENCODE_SYSTEMONE_BASE_URL: ${KERBY_OPENCODE_SYSTEMONE_BASE_URL:-https://opencode.ai/inference/systemone}
-      # Development only (ADR 0019): the egress guard lets this host through although it is private, so a test MCP server
+      # Development only (ADR 0022): the egress guard lets this host through although it is private, so a test MCP server
       # on this machine can answer (`make tools-e2e`). Every other tenant URL must still be public.
       EGRESS_ALLOWED_HOSTS: host.docker.internal
     extra_hosts:
       # Docker Desktop resolves it by itself; Linux needs the gateway named.
       - "host.docker.internal:host-gateway"
+    depends_on:
+      control: { condition: service_healthy }
+
+  # Pushes tenants' events to their subscriptions (ADR 0019). No published port: it only calls out.
+  dispatcher:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: services/dispatcher/Dockerfile
+      target: ${KERBY_IMAGE_TARGET:-prod}
+    environment:
+      <<: *tenant-env
+      # Development only: deliver to http and private addresses, so a receiver on this machine (or
+      # http://host.docker.internal:<port>/) works. Production refuses it.
+      KERBY_ENVIRONMENT: development
+      ALLOW_LOCAL_DESTINATIONS: "true"
+      SWEEP_INTERVAL_SECONDS: "3"
+      CLAIM_TIMEOUT_SECONDS: "10"
+      # A development key pair (the public half is on the api above): never use it anywhere real.
+      DELIVERY_SECRETS_PRIVATE_KEYS: "AKF+0EGRGw0BZcEEWEst38zHg303ne+y56QH16TSBm0="
     depends_on:
       control: { condition: service_healthy }
 

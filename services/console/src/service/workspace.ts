@@ -1,6 +1,6 @@
 // What a signed-in person does to their tenant: model keys and the overview (integrations and their API keys are in
-// integrations.ts). Each call is scoped to the session's tenant, and each change is audited as `user:<id>`, never with
-// a key's value.
+// integrations.ts). Each call is scoped to the session's tenant, and each change is audited as `user:<id>`, never with a
+// key's value.
 import { PutModelKeyRequestSchema } from "@kerby/contracts";
 import {
   audit,

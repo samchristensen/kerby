@@ -1,31 +1,43 @@
 import {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   audit,
   type CreatedKey,
   createApiKey,
+  ensureDefaultIntegration,
+  getIntegration,
   listApiKeys,
   revokeApiKey,
 } from "@kerby/control-plane";
-import { type ControlDeps, NotFoundError } from "../types/index.ts";
-import { keyIntegration } from "./integrations.ts";
+import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 const ACTOR = "operator";
 
+/** A key for one of the tenant's integrations, or for its `default` one (made if missing). */
 export async function createKey(
   deps: ControlDeps,
   tenantId: string,
-  label?: string,
-  integrationId?: string,
+  request: { label?: string | undefined; integrationId?: string | undefined } = {},
 ): Promise<CreatedKey> {
   await getTenantRecord(deps, tenantId);
-  const integration = await keyIntegration(deps.control, tenantId, integrationId);
-  const created = await createApiKey(deps.control, tenantId, integration.id, label);
+  const integration =
+    request.integrationId === undefined
+      ? await ensureDefaultIntegration(deps.control, tenantId)
+      : await getIntegration(deps.control, tenantId, request.integrationId);
+  if (!integration) throw new NotFoundError(`integration ${request.integrationId} not found`);
+  const created = await createApiKey(deps.control, tenantId, integration.id, request.label).catch(
+    (error: unknown) => {
+      if (error instanceof ApiKeyLimitError)
+        throw new ConflictError(error.message, "api_key_limit");
+      throw error;
+    },
+  );
   await audit(deps.control, {
     tenantId,
     actor: ACTOR,
     action: "key.create",
-    detail: { keyId: created.key.id, integrationId: integration.id },
+    detail: { keyId: created.key.id },
   });
   return created;
 }
@@ -36,8 +48,8 @@ export async function listKeys(deps: ControlDeps, tenantId: string): Promise<Api
 }
 
 /**
- * A new key in the old key's integration, and the old one revoked in the same transaction: there is never a moment
- * with neither, and access never moves with a key.
+ * A new key for the old one's integration, and the old one revoked in the same transaction: there is never a moment
+ * with neither.
  */
 export async function rotateKey(
   deps: ControlDeps,
@@ -46,7 +58,9 @@ export async function rotateKey(
 ): Promise<CreatedKey> {
   await getTenantRecord(deps, tenantId);
   const created = await deps.control.transaction(async (tx) => {
-    const old = (await listApiKeys(tx, tenantId)).find((key) => key.id === keyId);
+    const old = (await listApiKeys(tx, tenantId)).find(
+      (key) => key.id === keyId && key.revokedAt === null,
+    );
     if (!old || !(await revokeApiKey(tx, tenantId, keyId)))
       throw new NotFoundError(`key ${keyId} not found`);
     return createApiKey(tx, tenantId, old.integrationId, "rotated");
@@ -55,11 +69,7 @@ export async function rotateKey(
     tenantId,
     actor: ACTOR,
     action: "key.rotate",
-    detail: {
-      revokedKeyId: keyId,
-      newKeyId: created.key.id,
-      integrationId: created.key.integrationId,
-    },
+    detail: { revokedKeyId: keyId, newKeyId: created.key.id },
   });
   return created;
 }

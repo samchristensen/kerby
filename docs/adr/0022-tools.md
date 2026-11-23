@@ -1,4 +1,4 @@
-# 0019. Tools: remote MCP servers, granted to integrations, named by each conversation
+# 0022. Tools: remote MCP servers, granted to integrations, named by each conversation
 
 - Status: proposed
 - Date: 2026-11-23
@@ -8,10 +8,11 @@
 A tenant's agent should act on the tenant's own systems. [ADR 0001](0001-platform-and-tenancy.md) set the frame: the
 tenant registers remote MCP servers (a URL plus auth), no tenant code runs in Kerby, every call goes through the egress
 guard ([ADR 0010](0010-egress-guard.md)), and credentials are sealed like model keys ([ADR 0008](0008-byok-sealed-secrets.md)).
-Left open: who manages tools, from where, and who may use which. Three facts of the code shape the answer.
+Left open: who manages tools, from where, and who may use which. Integrations, their scopes, attribution and visibility
+are [ADR 0020](0020-integrations-and-scopes.md)'s: a key belongs to an integration, the integration holds scopes
+(`admin` among them), and a console session acts as the tenant with every scope. This ADR adds tools on top. Two facts
+of the code shape the answer.
 
-- An API key can do everything: `api_keys` has no scope, and the api's `Principal` is a tenant, an actor and limits. A key
-  limited to some tools that can still call the routes that register and grant tools is not limited.
 - A conversation belongs to the tenant, not to a key: any key may post to any conversation, and a turn does not know who
   posted the message that started it (`run-turn` params are `{ conversationId, seq }`).
 - Only the worker can open a sealed secret. The api and the console hold the public key, so neither can call an MCP server
@@ -24,18 +25,15 @@ session id); servers on 2025-11-25 and older still expect a session.
 
 ## Decision
 
-- **An integration holds access; its keys belong to it.** A new control table `integrations` (tenant, a name unique among
-  live ones, `role` `admin` or `restricted`, `archived_at`), and `api_keys.integration_id` (not null). The migration gives
-  every tenant an `admin` integration named `default` holding its existing keys, so no existing key loses anything.
-  Provisioning's first key, the operator's key routes and the console all make a key inside an integration; rotation makes
-  the new key in the same one, so access never moves with a key. Archiving an integration revokes its keys.
-  `authenticateApiKey` reads the integration with the key and the api caches both, so a role change lands within the auth
-  cache window. A console session acts as `admin`. Who may create integrations and keys is unchanged from
-  [ADR 0014](0014-tenant-console.md): a signed-in person in the console, and the operator.
-  - `admin` may do everything the API offers and holds every tool.
-  - `restricted` may create, post to, read and stream conversations (from a prompt too), submit and read judgments, and
-    list its tools (`GET /v1/tools`). Every other route is 403 `forbidden`, the message naming the role and what it may
-    call. Least privilege; a route joins the list when a client needs it.
+- **Tools are granted to ADR 0020's integrations.** What a caller may name: an integration holding `admin`, every enabled
+  tool; any other integration, only the tools granted to it; a console session acts as the tenant, so every enabled
+  tool. Grants live in the tenant database keyed by the integration's id, so rotation (a new key in the same
+  integration) never moves access. Route scopes: tool-server management (`/v1/tool-servers*`, OAuth start and callback)
+  and grant management (`GET /v1/integrations`, `GET`/`PUT /v1/integrations/:id/tools`) need `admin`; `GET /v1/tools`
+  needs `conversations`; conversation routes keep ADR 0020's scopes and `Visibility`. A deleted integration has no live
+  key, so its grants are inert: they stay in the tenant database (the console, which deletes integrations, has no
+  tenant-database access), the api refuses grants for an integration that is not live, and a server's `grantedTo` lists
+  only live integrations.
 - **Tool servers and tools live in the tenant database** (a new `packages/tools`, `migrations/tenant/`).
   - `tool_servers`: `slug` (`[a-z0-9-]{1,24}`, unique, fixed once made; `kerby` is reserved), `url`, `auth` (`none`, or
     `header` with the header's name), sync status (`syncing`, `ready`, `error` with its reason) and `synced_at`.
@@ -55,8 +53,9 @@ session id); servers on 2025-11-25 and older still expect a session.
   with a credential must use https. Only the worker opens it, inside the step that uses it, and scrubs it from errors as
   it does a model key.
 - **The worker lists tools; nothing else can.** Making a server, changing its URL or credential, or
-  `POST /v1/tool-servers/:slug/sync` enqueues a `sync-tool-server` task on the `turns` queue (the only queue workers
-  claim; like a judgment it counts against concurrent turns). The worker opens the credential and calls `tools/list`
+  `POST /v1/tool-servers/:slug/sync` enqueues a `sync-tool-server` task on the `turns` queue (one of the queues workers
+  claim, with `index` and `search`; like a judgment it counts against concurrent turns), and the api hints workers that
+  the tenant has work. The worker opens the credential and calls `tools/list`
   through `createEgressFetch` (30 s and 1 MiB a page; at most 200 tools and 4 MiB a listing, stopped as soon as either
   is past, so a tenant's server cannot fill a shared worker's memory; an input schema is at most 64 KiB), then:
   - a new tool arrives disabled, pinned to what was listed;
@@ -78,7 +77,7 @@ session id); servers on 2025-11-25 and older still expect a session.
   old conversation's. `<slug>/*` covers the server's tools that are enabled at each turn.
 - **The poster must hold every tool the conversation names.** Creating a conversation and posting a message check, before
   anything is stored, that the caller's grants cover the conversation's tools (`<slug>/*` needs a grant for the whole
-  server); otherwise 403 `tool_not_granted`, naming the patterns. So a restricted integration cannot push a conversation
+  server); otherwise 403 `tool_not_granted`, naming the patterns. So an integration without `admin` cannot push a conversation
   someone else started into tools it was not given, a narrowed grant applies from its next message, and a turn needs no
   record of who posted.
 - **Built-ins are tools like any other.** The reserved server `kerby` serves Kerby's own tools from code: `judge` (when
@@ -86,7 +85,7 @@ session id); servers on 2025-11-25 and older still expect a session.
   They need no enabling, but a grant and a conversation's pattern like the rest; ADR 0015's implicit offer of `judge`
   ends. A new Kerby capability ships as a `kerby/<name>` tool.
 - **A turn's tools** are the conversation's tools that are enabled, not removed and available now, at most 64 (past that
-  the turn ends with `last_error`). The worker calls a remote tool inside its `tool:<callId>` step, after the guardrails
+  the turn ends `turn.failed` with reason `too_many_tools`, and `last_error`). The worker calls a remote tool inside its `tool:<callId>` step, after the guardrails
   ([ADR 0016](0016-guardrails.md)): through `createEgressFetch`, `TOOL_CALL_TIMEOUT_MS` (60 s) per call, one MCP session
   per server per run opened on first use, the call id in `_meta` (`kerby/callId`) for servers that deduplicate, and no
   client capabilities (no sampling, roots or elicitation: a server cannot spend the tenant's model key or ask a person
@@ -101,16 +100,16 @@ session id); servers on 2025-11-25 and older still expect a session.
   (an attempt began the call and never stored a result), a `write` tool is not called again: the model gets an error
   result saying the call was interrupted and may or may not have taken effect. A `read` tool runs again. A tool's
   `ToolSpec.readOnly` is its effect.
-- **Tools are managed through the API, and the console uses the same routes.** Admin: `POST`/`GET /v1/tool-servers`,
+- **Tools are managed through the API, and the console uses the same routes.** Scope `admin`: `POST`/`GET /v1/tool-servers`,
   `GET`/`PATCH`/`DELETE /v1/tool-servers/:slug`, `PUT /v1/tool-servers/:slug/credential`,
   `POST /v1/tool-servers/:slug/sync`, `PATCH /v1/tool-servers/:slug/tools/:name` (`enabled`, `effect`,
   `acceptDefinition`), `GET /v1/integrations`, `GET`/`PUT /v1/integrations/:id/tools` (the grants; `kerby_app` reads
-  `integrations` to check the id is the tenant's). Any caller: `GET /v1/tools`, the tools it may use, with descriptions
+  `integrations` to check the id is the tenant's). Scope `conversations`: `GET /v1/tools`, the tools it may use, with descriptions
   and schemas, so a client can name them. Refusals: 400 `unknown_tool` (with `problems`), `too_many_tools`,
   `tool_not_usable`, `builtin_tool_server`; 403 `tool_not_granted`; 409 `tool_server_exists`, `tool_server_limit`. The
   console calls these with the person's session token, as the Studio does, and adds Tools pages (servers, credential,
-  sync, enable, effect, drift review, the integrations granted), an Integrations page in place of API keys (role, keys,
-  grants) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
+  sync, enable, effect, drift review, the integrations granted), a tools card on ADR 0020's integration page (its grants,
+  or for an integration holding `admin` a note that it may use every enabled tool) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
   `integration.*`) with ids, slugs, patterns and a server URL's origin only (some servers put a secret in the path).
 - **Schema n-1 is tolerated.** A tenant whose tool migration has not run yet answers as one with no tools: reads of an
   empty tool list run no query, and `listConversationTools` treats a missing table as none.
@@ -148,7 +147,7 @@ session id); servers on 2025-11-25 and older still expect a session.
   endpoint). `make tools-e2e` proves the path on the real stack; the OAuth Connect flow was walked by hand in the console
   against `startOAuthFixture` on the host.
 - Rejected:
-  - Grants on keys (restricted keys): rotation makes a new key here (`rotateKey`), so every rotation would have to copy
+  - Grants on keys: rotation makes a new key here (`rotateKey`), so every rotation would have to copy
     them, and one client with two keys could hold two policies. (owner's call)
   - Tools a conversation gets without naming them, such as every tool granted: a new grant or a newly enabled tool would
     silently widen what existing conversations can do. (owner's call)
@@ -164,11 +163,10 @@ session id); servers on 2025-11-25 and older still expect a session.
 
 ## Consequences
 
-- Existing keys keep full access (`default`, `admin`); a narrower client needs a new integration and new keys.
+- Existing keys sit in ADR 0020's `default` integration, which holds every scope and so every enabled tool; a narrower
+  client needs a new integration without `admin`, and grants.
 - A conversation that relied on `judge` being offered no longer gets it until it names `kerby/judge`. The fake model
   asks for `kerby__echo` instead of `echo`, and the conversations of `make e2e` and the worker's tests name `kerby/echo`.
-- A restricted integration still reads every conversation of its tenant: grants limit what its turns can do, not what it
-  can see. Per-integration visibility is not built.
 - A tool's output is untrusted text in the model's context, and guardrails do not read it (ADR 0016).
 - A `write` tool cut off by a crash is reported, not repeated: the model, and through it the user, may have to check.
 - A failing remote tool is the model's to handle; the turn does not retry it.

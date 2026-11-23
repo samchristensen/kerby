@@ -8,6 +8,7 @@ import type {
   GetTraceResponse,
   Limits,
   PostMessageResponse,
+  Scope,
 } from "@kerby/contracts";
 import {
   ListAvailableToolsResponseSchema,
@@ -15,16 +16,18 @@ import {
   ListToolServersResponseSchema,
   MAX_CONVERSATION_TOOLS,
   MAX_TOOL_SERVERS,
+  SCOPES,
   StartToolServerOAuthResponseSchema,
   ToolGrantsSchema,
   ToolSchema,
   ToolServerSchema,
 } from "@kerby/contracts";
 import {
-  archiveIntegration,
   createApiKey,
   createConsoleSession,
   createIntegration,
+  deleteIntegration,
+  ensureDefaultIntegration,
   hasToolCredential,
   insertConsoleUser,
   insertTenant,
@@ -32,7 +35,6 @@ import {
   readToolCredential,
   revokeApiKey,
   setTenantStatus,
-  updateIntegration,
 } from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import { appendTrace, notifyLive } from "@kerby/conversations";
@@ -42,12 +44,14 @@ import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
 import { createEgressFetch } from "@kerby/egress";
 import { parseOAuthCredential } from "@kerby/mcp";
 import { startOAuthFixture } from "@kerby/mcp/testing";
+import { chunkText, writeChunks, writeEmbeddings } from "@kerby/search";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { findToolServer, recordSync, updateTool } from "@kerby/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createApiApp } from "./index.ts";
+import { createApiApp, createDestinations } from "./index.ts";
+import { LOOKUPS_PER_ADDRESS } from "./runtime/http.ts";
 import { createAuthenticator } from "./service/auth.ts";
 import type { ApiDeps } from "./types/index.ts";
 
@@ -67,13 +71,16 @@ async function harness(
     providers?: string[];
     failedAuthPerMinute?: number;
     trustProxy?: boolean;
-    enableEchoTool?: boolean;
     maxStreamsPerProcess?: number;
+    searchWaitMs?: number;
+    allowLocalDestinations?: boolean;
+    enableEchoTool?: boolean;
     /** The console's public address; default an https one. Null: unset. */
     consolePublicUrl?: string | null;
   } = {},
 ) {
   const keys = generateSecretsKeyPair();
+  const deliveryKeys = generateSecretsKeyPair();
   const control = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
   const blobs = await createTestBlobs();
@@ -87,11 +94,15 @@ async function harness(
     pools,
     blobs,
     sealer: createSealer(keys.publicKey),
+    deliverySealer: createSealer(deliveryKeys.publicKey),
+    destinations: createDestinations(options.allowLocalDestinations ?? false),
     // The egress guard as production builds it, letting the loopback OAuth fixture through.
     toolFetch: createEgressFetch({ blockedRanges: [] }),
     settings: {
       defaultModel: "faux/faux-1",
       modelProviders: options.providers ?? ["anthropic", "openai", "opencode"],
+      embeddingProviders: ["openai"],
+      searchWaitMs: options.searchWaitMs ?? 10_000,
       judgmentProviders: ["typesafe", "opencode"],
       keylessProviders: options.keyless ?? ["faux"],
       defaultSystem: "Be helpful.",
@@ -103,6 +114,7 @@ async function harness(
       defaultStorageBytes: 1024 ** 3,
       failedAuthPerMinute: options.failedAuthPerMinute ?? 1000,
       trustProxy: options.trustProxy ?? false,
+      defaultSubscriptions: 10,
       enableEchoTool: options.enableEchoTool ?? false,
       consolePublicUrl:
         options.consolePublicUrl === null
@@ -115,20 +127,33 @@ async function harness(
   cleanups.push(() => server.close());
   const base = `http://127.0.0.1:${server.port}`;
 
-  /** A tenant: a control-plane row, a key, and its own migrated database. */
+  /** A tenant: a control-plane row, its `default` integration (every scope) and a key of it, and its own migrated database. */
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    const integration = await createIntegration(control.db, {
-      tenantId: row.id,
-      name: "default",
-      role: "admin",
-    });
+    const integration = await ensureDefaultIntegration(control.db, row.id);
     const { key, secret } = await createApiKey(control.db, row.id, integration.id);
     const database: TestTenant = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);
-    return { id: row.id, key, secret, ctx: { tenantId: row.id, db: database.db }, database };
+    return {
+      id: row.id,
+      integration,
+      key,
+      secret,
+      ctx: { tenantId: row.id, db: database.db },
+      database,
+    };
+  }
+
+  /** Another integration of the tenant, with `scopes`, and a key of it. */
+  async function integration(tenantId: string, scopes: readonly Scope[]) {
+    const made = await createIntegration(control.db, tenantId, {
+      name: `integration-${crypto.randomUUID().slice(0, 8)}`,
+      scopes,
+    });
+    const { secret } = await createApiKey(control.db, tenantId, made.id);
+    return { id: made.id, secret };
   }
 
   const call = (
@@ -157,7 +182,7 @@ async function harness(
     });
     return createConsoleSession(control.db, { id, tenantId }, new Date(Date.now() + ttlMs));
   }
-  return { control, blobs, deps, base, tenant, call, keys, signIn };
+  return { control, blobs, deps, base, tenant, integration, call, keys, signIn };
 }
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
@@ -206,13 +231,14 @@ describe("authentication", () => {
     const h = await harness();
     const t = await h.tenant("acme");
     let clock = 1_000;
-    const auth = createAuthenticator(h.control.db, 30_000, () => clock);
+    const auth = createAuthenticator(h.control.db, 30_000, { now: () => clock });
     await expect(auth.authenticate(t.secret)).resolves.toEqual({
       tenantId: t.id,
       actor: `key:${t.key.id}`,
+      integrationId: t.integration.id,
+      scopes: new Set(["conversations", "judgments", "events", "tenant", "admin"]),
+      visibility: "tenant",
       limits: {},
-      role: "admin",
-      integrationId: t.key.integrationId,
     });
 
     await setTenantStatus(h.control.db, t.id, "suspended");
@@ -222,54 +248,21 @@ describe("authentication", () => {
     await expect(auth.authenticate(t.secret)).rejects.toThrow(/suspended/);
   });
 
-  it("lets a restricted key use conversations and judgments only", async () => {
+  it("keeps at most its bound of credentials, forgetting the least recently used", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
-    const bots = await createIntegration(h.control.db, {
-      tenantId: t.id,
-      name: "bots",
-      role: "restricted",
-    });
-    const { secret } = await createApiKey(h.control.db, t.id, bots.id);
-    for (const [method, path, body] of [
-      ["GET", "/v1/model-keys", undefined],
-      ["PUT", "/v1/model-keys/anthropic", { apiKey: "sk-test-1234567890" }],
-      ["DELETE", "/v1/model-keys/anthropic", undefined],
-      ["GET", "/v1/prompts", undefined],
-      ["POST", "/v1/prompts", { name: "p", kind: "chat" }],
-      ["GET", "/v1/prompts/p", undefined],
-    ] as const) {
-      const response = await h.call(secret, method, path, body);
-      expect(response.status, `${method} ${path}`).toBe(403);
-      expect(await response.json()).toMatchObject({
-        error: { code: "forbidden", message: expect.stringContaining('"restricted"') },
-      });
-    }
-    const conversation = await newConversation(h, secret);
-    expect((await h.call(secret, "GET", `/v1/conversations/${conversation.id}`)).status).toBe(200);
-    expect((await h.call(secret, "GET", "/v1/conversations")).status).toBe(200);
-    expect((await h.call(secret, "GET", `/v1/judgments/${crypto.randomUUID()}`)).status).toBe(404);
-    // the tenant's admin key still reaches everything
-    expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(200);
-    expect((await h.call(t.secret, "GET", "/v1/prompts")).status).toBe(200);
-  });
-
-  it("applies a role change once the auth cache TTL has passed", async () => {
-    const h = await harness();
-    const t = await h.tenant("acme");
-    let clock = 1_000;
-    const auth = createAuthenticator(h.control.db, 30_000, () => clock);
-    expect((await auth.authenticate(t.secret)).role).toBe("admin");
-    await updateIntegration(h.control.db, t.id, t.key.integrationId, { role: "restricted" });
-    clock += 29_999;
-    expect((await auth.authenticate(t.secret)).role).toBe("admin");
-    clock += 2;
-    expect((await auth.authenticate(t.secret)).role).toBe("restricted");
-    await archiveIntegration(h.control.db, t.id, t.key.integrationId);
-    clock += 30_001;
-    await expect(auth.authenticate(t.secret)).rejects.toThrow(/invalid/);
-    // through the app (cache TTL 0 here), the archived integration's key is refused at once
-    expect((await h.call(t.secret, "GET", "/v1/conversations")).status).toBe(401);
+    const b = await createApiKey(h.control.db, t.id, t.integration.id);
+    const c = await createApiKey(h.control.db, t.id, t.integration.id);
+    const auth = createAuthenticator(h.control.db, 60_000, { maxEntries: 2 });
+    await auth.authenticate(t.secret);
+    await auth.authenticate(b.secret);
+    await auth.authenticate(t.secret); // a hit: b is now the least recently used
+    await auth.authenticate(c.secret); // past the bound: b is forgotten
+    await revokeApiKey(h.control.db, t.id, t.key.id);
+    await revokeApiKey(h.control.db, t.id, b.key.id);
+    // Both inside the TTL: the remembered key is still trusted, the forgotten one is looked up again and refused.
+    await expect(auth.authenticate(t.secret)).resolves.toMatchObject({ tenantId: t.id });
+    await expect(auth.authenticate(b.secret)).rejects.toThrow(/invalid API key/);
   });
 
   it("accepts a console session as the signed-in person's tenant, and ends with the session or the tenant", async () => {
@@ -287,8 +280,6 @@ describe("authentication", () => {
     await expect(auth.authenticate(token)).resolves.toMatchObject({
       tenantId: t.id,
       actor: expect.stringMatching(/^user:[0-9a-f-]{36}$/),
-      role: "admin",
-      integrationId: null,
     });
     expect(
       (
@@ -1025,6 +1016,67 @@ describe("failed authentication limit", () => {
     expect(spoofed.status).toBe(429);
   });
 
+  it("holds under a concurrent burst of bad keys: only about the limit's worth are looked up", async () => {
+    const h = await harness({ failedAuthPerMinute: 3 });
+    const bad = (i: number) => `kb_${i.toString(16).padStart(12, "0")}_${"A".repeat(43)}`;
+    const statuses = await Promise.all(
+      Array.from(
+        { length: 24 },
+        async (_, i) => (await h.call(bad(i), "GET", "/v1/model-keys")).status,
+      ),
+    );
+    // Lookups that were already running when the limit ran out still finish: at most one turn's worth beyond it.
+    const looked = statuses.filter((status) => status === 401).length;
+    expect(looked).toBeGreaterThanOrEqual(3);
+    expect(looked).toBeLessThanOrEqual(3 + LOOKUPS_PER_ADDRESS - 1);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(24 - looked);
+  });
+
+  it("charges nothing for a key that verifies, looked up or cached", async () => {
+    const h = await harness({ failedAuthPerMinute: 2, authCacheMs: 60_000 });
+    const t = await h.tenant("acme");
+    const other = await createApiKey(h.control.db, t.id, t.integration.id);
+    // Lookups of good keys count no failure, however many run at once.
+    const statuses = await Promise.all(
+      [t.secret, other.secret, t.secret, other.secret].map(
+        async (secret) => (await h.call(secret, "GET", "/v1/model-keys")).status,
+      ),
+    );
+    expect(statuses).toEqual([200, 200, 200, 200]);
+    for (let i = 0; i < 5; i++)
+      expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(200);
+    // The whole budget is still there for mistakes.
+    for (const key of ["garbage", "garbage"])
+      expect((await h.call(key, "GET", "/v1/model-keys")).status).toBe(401);
+    expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(429);
+  });
+
+  it("lets many concurrent requests with one key the cache does not hold yet share one lookup", async () => {
+    const h = await harness({ failedAuthPerMinute: 2, authCacheMs: 60_000 });
+    const t = await h.tenant("acme");
+    // A client starting many requests at once on a cold cache is not an address failing to authenticate.
+    const statuses = await Promise.all(
+      Array.from(
+        { length: 10 },
+        async () => (await h.call(t.secret, "GET", "/v1/model-keys")).status,
+      ),
+    );
+    expect(statuses).toEqual(Array.from({ length: 10 }, () => 200));
+  });
+
+  it("lets many good keys at once from one address through, past the failure limit", async () => {
+    const h = await harness({ failedAuthPerMinute: 2 });
+    const t = await h.tenant("acme");
+    const keys = [t.secret];
+    for (let i = 0; i < 11; i++)
+      keys.push((await createApiKey(h.control.db, t.id, t.integration.id)).secret);
+    // One integration holding many keys, or the console forwarding many people's sessions: not failures.
+    const statuses = await Promise.all(
+      keys.map(async (key) => (await h.call(key, "GET", "/v1/model-keys")).status),
+    );
+    expect(statuses).toEqual(keys.map(() => 200));
+  });
+
   it("behind a trusted proxy, limits the left-most X-Forwarded-For address", async () => {
     const h = await harness({ failedAuthPerMinute: 2, trustProxy: true });
     const t = await h.tenant("acme");
@@ -1080,7 +1132,7 @@ describe("judgments", () => {
   /** Claim and run the tenant's queued judgment the way a worker would, with `handler` as its body. */
   async function work(t: Tenant, handler: TaskHandlers["run-judgment"]) {
     const executor = createTenantExecutor(t.ctx.db, { "run-judgment": handler }, { workerId: "w" });
-    for (const task of await executor.claim(5)) await executor.execute(task);
+    for (const task of (await executor.claim(5)).tasks) await executor.execute(task);
   }
 
   const submit = async (h: Harness, t: Tenant, request: object = body) => {
@@ -1672,13 +1724,14 @@ describe("prompts", () => {
       },
       { workerId: "w" },
     );
-    for (const task of await executor.claim(5)) await executor.execute(task);
+    for (const task of (await executor.claim(5)).tasks) await executor.execute(task);
     expect(seen).toEqual([
       {
         model: "opencode/jev-1.14",
         state: { ticket: "I was charged twice." },
         questions,
         prompt: { name: "triage/billing", version: 1 },
+        integrationId: t.integration.id,
       },
     ]);
     expect(await (await h.call(t.secret, "GET", `/v1/judgments/${id}`)).json()).toMatchObject({
@@ -1701,7 +1754,788 @@ describe("prompts", () => {
   });
 });
 
-describe("tools (ADR 0019)", () => {
+describe("chat search", () => {
+  type Searched = {
+    hits: {
+      conversationId: string;
+      seq: number;
+      role: string;
+      snippet: string;
+      createdAt: string;
+    }[];
+    mode: "hybrid" | "keyword";
+    notice: string | null;
+  };
+  type Settings = {
+    embeddingModel: string | null;
+    lastError: string | null;
+    chunks: number;
+    embedded: number;
+  };
+
+  /** A conversation whose one user message is `content`, indexed the way the worker would after its turn. */
+  async function indexed(
+    h: Harness,
+    t: Tenant,
+    content: string,
+    body: object = {},
+    secret = t.secret,
+  ) {
+    const conversation = await newConversation(h, secret, body);
+    const posted = await h.call(secret, "POST", `/v1/conversations/${conversation.id}/messages`, {
+      content,
+    });
+    expect(posted.status).toBe(202);
+    const batch = {
+      from: 0,
+      through: 1,
+      messages: [
+        { seq: 1, role: "user" as const, createdAt: new Date(), chunks: chunkText(content) },
+      ],
+    };
+    expect(await writeChunks(t.ctx.db, conversation.id, batch)).toBe(true);
+    return conversation.id;
+  }
+
+  const search = async (h: Harness, credential: string, body: object) => {
+    const response = await h.call(credential, "POST", "/v1/search", body);
+    expect(response.status).toBe(200);
+    return (await response.json()) as Searched;
+  };
+  it("finds only what the key's integration sees, and keeps its settings behind `admin`", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const own: Scope[] = ["conversations"];
+    const a = await h.integration(t.id, own);
+    const b = await h.integration(t.id, own);
+    const ofA = await indexed(h, t, "The renewal for Acme.", {}, a.secret);
+    const ofB = await indexed(h, t, "The renewal for Globex.", {}, b.secret);
+    const ids = (found: Searched) => found.hits.map((hit) => hit.conversationId).sort();
+
+    // Without `tenant`, a key finds its own integration's chats and nothing of another's.
+    expect(ids(await search(h, a.secret, { query: "renewal" }))).toEqual([ofA]);
+    expect(ids(await search(h, b.secret, { query: "renewal" }))).toEqual([ofB]);
+    expect(ids(await search(h, t.secret, { query: "renewal" }))).toEqual([ofA, ofB].sort());
+    // The embedding model is the tenant's, beside its model keys.
+    expect((await h.call(a.secret, "GET", "/v1/search/settings")).status).toBe(403);
+    expect(
+      (await h.call(a.secret, "PUT", "/v1/search/settings", { embeddingModel: null })).status,
+    ).toBe(403);
+  });
+
+  const putModel = (h: Harness, t: Tenant, embeddingModel: string | null) =>
+    h.call(t.secret, "PUT", "/v1/search/settings", { embeddingModel });
+
+  /** Claim the tenant's next search and run it the way a worker would, with `handler` as its body. */
+  async function answerSearch(t: Tenant, handler: TaskHandlers<"search">["run-search"]) {
+    const executor = createTenantExecutor(
+      t.ctx.db,
+      { "run-search": handler },
+      { workerId: "w", queue: "search" },
+    );
+    for (let tries = 0; tries < 200; tries++) {
+      const [task] = (await executor.claim(4)).tasks;
+      if (task) return executor.execute(task);
+      await sleep(20);
+    }
+    throw new Error("no search to claim");
+  }
+
+  const backfills = async (t: Tenant) =>
+    (await t.ctx.db.query("select 1 from absurd.t_index where task_name = 'index-backfill'"))
+      .rowCount;
+
+  it("finds a conversation by its words, for a key or a console session, filtered by end user", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.", {
+      externalUserId: "u1",
+    });
+    const other = await indexed(h, t, "The Acme renewal call moved to Friday.", {
+      externalUserId: "u2",
+    });
+    await indexed(h, t, "Lunch options near the office.");
+
+    const person = await h.signIn(t.id);
+    for (const credential of [t.secret, person]) {
+      const found = await search(h, credential, { query: "priced renewal" });
+      expect(found).toMatchObject({ mode: "keyword", notice: null });
+      expect(found.hits[0]).toMatchObject({ conversationId: renewal, seq: 1, role: "user" });
+      expect(found.hits[0]?.snippet).toContain("renewal");
+      expect(Number.isNaN(Date.parse(found.hits[0]?.createdAt ?? ""))).toBe(false);
+    }
+    const all = await search(h, t.secret, { query: "renewal" });
+    expect(all.hits.map((hit) => hit.conversationId).sort()).toEqual([renewal, other].sort());
+    const u2 = await search(h, t.secret, { query: "renewal", externalUserId: "u2" });
+    expect(u2.hits.map((hit) => hit.conversationId)).toEqual([other]);
+    expect((await search(h, t.secret, { query: "zeppelin" })).hits).toEqual([]);
+  });
+
+  it("refuses an empty query or no credential, and never searches another tenant's chats", async () => {
+    const h = await harness();
+    const a = await h.tenant("a");
+    const b = await h.tenant("b");
+    await indexed(h, a, "The Acme renewal is priced.");
+    expect((await h.call(a.secret, "POST", "/v1/search", { query: "   " })).status).toBe(400);
+    expect((await h.call(a.secret, "POST", "/v1/search", { query: "x", limit: 0 })).status).toBe(
+      400,
+    );
+    expect((await h.call(null, "POST", "/v1/search", { query: "renewal" })).status).toBe(401);
+    expect((await search(h, b.secret, { query: "renewal" })).hits).toEqual([]);
+    expect((await search(h, a.secret, { query: "renewal" })).hits).toHaveLength(1);
+  });
+
+  it("with an embedding model, answers with the worker's hits read back here", async () => {
+    const h = await harness({ keyless: ["faux", "fake"] });
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.", {
+      externalUserId: "u1",
+    });
+    expect((await putModel(h, t, "fake/embed-1")).status).toBe(200);
+    const { rows } = await t.ctx.db.query<{ part: number }>(
+      "select min(part) as part from search_chunks where conversation_id = $1",
+      [renewal],
+    );
+    const part = rows[0]?.part ?? 0;
+
+    const seen: unknown[] = [];
+    const [found] = await Promise.all([
+      search(h, t.secret, { query: "what did the big customer cost", externalUserId: "u1" }),
+      answerSearch(t, async (params) => {
+        seen.push(params);
+        return {
+          mode: "hybrid",
+          notice: null,
+          hits: [{ conversationId: renewal, seq: 1, part, score: 0.5 }],
+        };
+      }),
+    ]);
+    expect(seen).toEqual([
+      {
+        query: "what did the big customer cost",
+        limit: 20,
+        externalUserId: "u1",
+        visibility: "tenant",
+      },
+    ]);
+    expect(found).toMatchObject({ mode: "hybrid", notice: null });
+    expect(found.hits).toHaveLength(1);
+    expect(found.hits[0]).toMatchObject({ conversationId: renewal, seq: 1, role: "user" });
+    expect(found.hits[0]?.snippet).not.toBe("");
+
+    // A worker that fails: keyword matches, and why.
+    const [failed] = await Promise.all([
+      search(h, t.secret, { query: "renewal" }),
+      answerSearch(t, async () => {
+        throw new Error("provider down");
+      }),
+    ]);
+    expect(failed).toMatchObject({ mode: "keyword", notice: expect.stringMatching(/failed/) });
+    expect(failed.hits.map((hit) => hit.conversationId)).toEqual([renewal]);
+  });
+
+  it("falls back to keyword matches with a notice when no worker answers in time", async () => {
+    const h = await harness({ keyless: ["faux", "fake"], searchWaitMs: 100 });
+    const t = await h.tenant("acme");
+    const renewal = await indexed(h, t, "We priced the Acme renewal at twelve thousand.");
+    expect((await putModel(h, t, "fake/embed-1")).status).toBe(200);
+    const found = await search(h, t.secret, { query: "renewal" });
+    expect(found).toMatchObject({ mode: "keyword", notice: expect.stringMatching(/timed out/) });
+    expect(found.hits.map((hit) => hit.conversationId)).toEqual([renewal]);
+  });
+
+  it("sets an embedding model the tenant holds a key for, backfills once per change, audits it and reports counts", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const errorOf = async (response: Response) => {
+      expect(response.status).toBe(400);
+      return z
+        .object({ error: z.object({ code: z.string(), message: z.string() }) })
+        .parse(await response.json()).error;
+    };
+    expect(await errorOf(await putModel(h, t, "mystery/embed"))).toMatchObject({
+      code: "invalid_model",
+      message: expect.stringContaining("not an embedding provider"),
+    });
+    expect(await errorOf(await putModel(h, t, "no-slash"))).toMatchObject({
+      code: "invalid_model",
+    });
+    expect(await errorOf(await putModel(h, t, "openai/text-embedding-3-small"))).toMatchObject({
+      code: "invalid_model",
+      message: expect.stringContaining("PUT /v1/model-keys/openai"),
+    });
+    expect(await backfills(t)).toBe(0);
+    // A new tenant has never set a model: no time to report (its row is a copy of the template's).
+    expect(await (await h.call(t.secret, "GET", "/v1/search/settings")).json()).toMatchObject({
+      embeddingModel: null,
+      updatedAt: null,
+    });
+
+    expect(
+      (
+        await h.call(t.secret, "PUT", "/v1/model-keys/openai", {
+          apiKey: "sk-test-0123456789abcdef",
+        })
+      ).status,
+    ).toBe(204);
+    const model = "openai/text-embedding-3-small";
+    const put = await putModel(h, t, model);
+    expect(put.status).toBe(200);
+    expect(await put.json()).toMatchObject({
+      embeddingModel: model,
+      lastError: null,
+      updatedAt: expect.any(String),
+    });
+    expect(await backfills(t)).toBe(1);
+    expect((await putModel(h, t, model)).status).toBe(200);
+    expect(await backfills(t)).toBe(1);
+    const audited = await h.control.db.query<{ actor: string; detail: unknown }>(
+      "select actor, detail from audit_log where tenant_id = $1 and action = 'search.settings.put'",
+      [t.id],
+    );
+    expect(audited.rows).toEqual([{ actor: `key:${t.key.id}`, detail: { embeddingModel: model } }]);
+
+    const conversation = await indexed(h, t, "We priced the Acme renewal at twelve thousand.");
+    const chunks = await t.ctx.db.query<{ seq: number; part: number }>(
+      "select seq, part from search_chunks where conversation_id = $1",
+      [conversation],
+    );
+    await writeEmbeddings(
+      t.ctx.db,
+      conversation,
+      model,
+      chunks.rows.map((chunk) => ({ ...chunk, vector: [1, 0, 0] })),
+    );
+    const settings = (await (
+      await h.call(t.secret, "GET", "/v1/search/settings")
+    ).json()) as Settings;
+    expect(settings).toMatchObject({ embeddingModel: model, chunks: chunks.rowCount });
+    expect(settings.chunks).toBeGreaterThan(0);
+    expect(settings.embedded).toBe(settings.chunks);
+
+    const off = await putModel(h, t, null);
+    expect(await off.json()).toMatchObject({ embeddingModel: null, embedded: 0 });
+    expect(await backfills(t)).toBe(1);
+  });
+});
+
+type EventsPage = {
+  events: {
+    id: string;
+    type: string;
+    integrationId: string | null;
+    data: { conversationId?: string };
+  }[];
+  next: string;
+};
+
+const codeOf = async (response: Response) =>
+  ((await response.json()) as { error: { code: string; message: string } }).error;
+
+/** `GET /v1/events` until at least `count` events arrived (each call long-polls), or fail after `ms`. */
+async function eventsUntil(
+  h: Harness,
+  secret: string,
+  count: number,
+  query = "",
+  ms = 10_000,
+): Promise<EventsPage> {
+  const events: EventsPage["events"] = [];
+  let next: string | undefined;
+  const deadline = Date.now() + ms;
+  while (events.length < count && Date.now() < deadline) {
+    const after = next === undefined ? "" : `&after=${next}`;
+    const response = await h.call(secret, "GET", `/v1/events?wait=1${query}${after}`);
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as EventsPage;
+    events.push(...page.events);
+    next = page.next;
+  }
+  return { events, next: next ?? expect.fail("no page read") };
+}
+
+describe("scopes", () => {
+  it("refuses a route whose scope the key's integration lacks, naming the scope", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const none = await h.integration(t.id, []);
+    const routes: [Scope, string, string, object?][] = [
+      ["conversations", "GET", "/v1/conversations"],
+      ["conversations", "POST", "/v1/conversations", {}],
+      ["judgments", "POST", "/v1/judgments", { state: "x", questions: {} }],
+      ["events", "GET", "/v1/events"],
+      ["admin", "GET", "/v1/model-keys"],
+      ["admin", "GET", "/v1/prompts"],
+      ["admin", "GET", "/v1/subscriptions"],
+    ];
+    for (const [scope, method, path, body] of routes) {
+      const refused = await h.call(none.secret, method, path, body);
+      expect(refused.status, `${method} ${path}`).toBe(403);
+      const error = await codeOf(refused);
+      expect(error.code).toBe("forbidden");
+      expect(error.message).toContain(`"${scope}"`);
+      expect(error.message).toContain("console");
+    }
+
+    // only what it holds
+    const reader = await h.integration(t.id, ["events"]);
+    expect((await h.call(reader.secret, "GET", "/v1/events")).status).toBe(200);
+    expect((await h.call(reader.secret, "GET", "/v1/conversations")).status).toBe(403);
+  });
+});
+
+describe("visibility between integrations", () => {
+  const KEY = "ts-key-0123456789abcdef";
+  const judgment = {
+    state: { ticket: "I was charged twice." },
+    questions: { billing: { type: "noul", instructions: "Is `ticket` about billing?" } },
+  };
+
+  it("an integration without tenant sees only its own work; a tenant key and the console see everything", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const own: Scope[] = ["conversations", "judgments", "events"];
+    const a = await h.integration(t.id, own);
+    const b = await h.integration(t.id, own);
+    await h.call(t.secret, "PUT", "/v1/model-keys/typesafe", { apiKey: KEY });
+
+    const { id } = await newConversation(h, a.secret);
+    expect(
+      (await h.call(a.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hi" }))
+        .status,
+    ).toBe(202);
+    const submitted = await h.call(a.secret, "POST", "/v1/judgments", judgment);
+    expect(submitted.status).toBe(202);
+    const judgmentId = ((await submitted.json()) as { id: string }).id;
+
+    // a tenant key sees a's events once they commit
+    const all = await eventsUntil(h, t.secret, 2);
+    expect(all.events.map((e) => e.integrationId)).toEqual([a.id, a.id]);
+
+    // b: every read of a's work is "not found", as for an id that does not exist
+    for (const path of [
+      `/v1/conversations/${id}`,
+      `/v1/conversations/${id}/events`,
+      `/v1/conversations/${id}/trace`,
+      `/v1/judgments/${judgmentId}`,
+    ])
+      expect((await h.call(b.secret, "GET", path)).status, path).toBe(404);
+    expect(
+      (await h.call(b.secret, "POST", `/v1/conversations/${id}/messages`, { content: "intrusion" }))
+        .status,
+    ).toBe(404);
+    expect(
+      (
+        (await (await h.call(b.secret, "GET", "/v1/conversations")).json()) as {
+          conversations: unknown[];
+        }
+      ).conversations,
+    ).toEqual([]);
+    expect(
+      ((await (await h.call(b.secret, "GET", "/v1/events")).json()) as EventsPage).events,
+    ).toEqual([]);
+
+    // a sees its own
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${id}`)).status).toBe(200);
+    expect((await h.call(a.secret, "GET", `/v1/judgments/${judgmentId}`)).status).toBe(200);
+    expect(
+      ((await (await h.call(a.secret, "GET", "/v1/events")).json()) as EventsPage).events,
+    ).toHaveLength(2);
+
+    // the tenant key and a console session see everything
+    const console = await h.signIn(t.id);
+    for (const secret of [t.secret, console]) {
+      expect((await h.call(secret, "GET", `/v1/conversations/${id}`)).status).toBe(200);
+      expect((await h.call(secret, "GET", `/v1/judgments/${judgmentId}`)).status).toBe(200);
+      expect(
+        ((await (await h.call(secret, "GET", "/v1/events")).json()) as EventsPage).events,
+      ).toHaveLength(2);
+    }
+
+    // what a person starts in the console belongs to no integration: a key without tenant cannot see it
+    const fromConsole = await newConversation(h, console);
+    expect(fromConsole.integrationId).toBeNull();
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${fromConsole.id}`)).status).toBe(404);
+    const consoleJudgment = await h.call(console, "POST", "/v1/judgments", judgment);
+    const consoleJudgmentId = ((await consoleJudgment.json()) as { id: string }).id;
+    expect((await h.call(a.secret, "GET", `/v1/judgments/${consoleJudgmentId}`)).status).toBe(404);
+    expect((await h.call(t.secret, "GET", `/v1/judgments/${consoleJudgmentId}`)).status).toBe(200);
+  });
+});
+
+describe("event log (GET /v1/events)", () => {
+  it("returns conversation.created then message.created, with a cursor that moves past a filter that matches nothing", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hi" });
+
+    const page = await eventsUntil(h, t.secret, 2);
+    expect(page.events.map((e) => [e.type, e.data.conversationId])).toEqual([
+      ["conversation.created", id],
+      ["message.created", id],
+    ]);
+    expect(page.events[0]?.integrationId).toBe(t.integration.id);
+
+    // nothing matches turn.*, yet the cursor moves past both events: reading on from it never sees them again
+    const quiet = (await (
+      await h.call(t.secret, "GET", "/v1/events?types=turn.*")
+    ).json()) as EventsPage;
+    expect(quiet.events).toEqual([]);
+    const after = (await (
+      await h.call(t.secret, "GET", `/v1/events?after=${quiet.next}`)
+    ).json()) as EventsPage;
+    expect(after.events).toEqual([]);
+
+    // by conversation
+    const other = await newConversation(h, t.secret);
+    const only = await eventsUntil(h, t.secret, 1, `&conversationId=${other.id}`);
+    expect(only.events.map((e) => e.data.conversationId)).toEqual([other.id]);
+  });
+
+  it("names the parameter it refuses", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    for (const [query, param] of [
+      ["limit=0", "limit"],
+      ["types=nope", "types"],
+      ["after=yesterday", "after"],
+      ["wait=31", "wait"],
+      ["conversationId=x", "conversationId"],
+    ]) {
+      const refused = await h.call(t.secret, "GET", `/v1/events?${query}`);
+      expect(refused.status, query).toBe(400);
+      expect((await codeOf(refused)).message).toMatch(new RegExp(`^${param}:`));
+    }
+  });
+
+  it("long-polls: answers as soon as an event commits, and empty once wait passes", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    // the log's present position
+    const start = (await (await h.call(t.secret, "GET", "/v1/events")).json()) as EventsPage;
+
+    const began = Date.now();
+    const polled = h.call(t.secret, "GET", `/v1/events?wait=20&after=${start.next}`);
+    await sleep(300);
+    const { id } = await newConversation(h, t.secret);
+    const page = (await (await polled).json()) as EventsPage;
+    expect(page.events.map((e) => [e.type, e.data.conversationId])).toEqual([
+      ["conversation.created", id],
+    ]);
+    expect(Date.now() - began).toBeLessThan(10_000);
+
+    const quietFrom = Date.now();
+    const quiet = (await (
+      await h.call(t.secret, "GET", `/v1/events?wait=1&after=${page.next}`)
+    ).json()) as EventsPage;
+    expect(quiet.events).toEqual([]);
+    expect(Date.now() - quietFrom).toBeGreaterThanOrEqual(900);
+  });
+
+  it("counts a long poll against the tenant's stream cap", async () => {
+    const h = await harness({ maxStreams: 1 });
+    const t = await h.tenant("acme");
+    const controller = new AbortController();
+    const held = fetch(`${h.base}/v1/events?wait=30`, {
+      headers: { authorization: `Bearer ${t.secret}` },
+      signal: controller.signal,
+    }).catch(() => undefined);
+    await sleep(300);
+    const refused = await h.call(t.secret, "GET", "/v1/events?wait=1");
+    expect(refused.status).toBe(429);
+    expect((await codeOf(refused)).code).toBe("too_many_streams");
+    // a poll that does not wait holds nothing
+    expect((await h.call(t.secret, "GET", "/v1/events")).status).toBe(200);
+    // the disconnect frees the slot
+    controller.abort();
+    await held;
+    let status = 0;
+    for (let i = 0; i < 50 && status !== 200; i++) {
+      await sleep(100);
+      status = (await h.call(t.secret, "GET", "/v1/events?wait=1")).status;
+    }
+    expect(status).toBe(200);
+  });
+});
+
+describe("subscriptions", () => {
+  const webhook = (url = "https://example.com/hooks/kerby") => ({
+    destination: { kind: "webhook", url },
+    types: ["turn.*"],
+  });
+  type Created = {
+    subscription: { id: string; integrationId: string; scope: string; state: string };
+    secret: string;
+  };
+
+  const create = async (h: Harness, secret: string, body: object = webhook()) => {
+    const response = await h.call(secret, "POST", "/v1/subscriptions", body);
+    return {
+      response,
+      created: response.status === 201 ? ((await response.json()) as Created) : undefined,
+    };
+  };
+
+  it("is for admin keys; shows the secret once, starts at now, and audits each change", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const user = await h.integration(t.id, ["conversations", "events"]);
+    expect((await create(h, user.secret)).response.status).toBe(403);
+
+    const { response, created } = await create(h, t.secret);
+    expect(response.status).toBe(201);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    expect(created?.secret).toMatch(/^whsec_/);
+    expect(created?.subscription).toMatchObject({
+      integrationId: t.integration.id,
+      scope: "own",
+      state: "active",
+    });
+    // its cursor is made at once, at the log's present position
+    expect(
+      (await t.ctx.db.query("select 1 from subscription_cursors where subscription_id = $1", [id]))
+        .rowCount,
+    ).toBe(1);
+
+    const listed = await (await h.call(t.secret, "GET", "/v1/subscriptions")).text();
+    const one = await (await h.call(t.secret, "GET", `/v1/subscriptions/${id}`)).text();
+    for (const text of [listed, one]) {
+      expect(text).toContain(id);
+      expect(text).not.toContain(created?.secret);
+      expect(text).not.toMatch(/secret/i);
+    }
+
+    const rotated = await h.call(t.secret, "POST", `/v1/subscriptions/${id}/secret`);
+    expect(rotated.status).toBe(200);
+    const rotation = (await rotated.json()) as { secret: string; previousExpiresAt: string };
+    expect(rotation.secret).toMatch(/^whsec_/);
+    expect(rotation.secret).not.toBe(created?.secret);
+    const overlap = Date.parse(rotation.previousExpiresAt) - Date.now();
+    expect(overlap).toBeGreaterThan(23 * 3_600_000);
+    expect(overlap).toBeLessThanOrEqual(24 * 3_600_000);
+
+    const patched = await h.call(t.secret, "PATCH", `/v1/subscriptions/${id}`, {
+      types: ["*"],
+      enabled: false,
+    });
+    expect(patched.status).toBe(200);
+    expect(await patched.json()).toMatchObject({ types: ["*"], state: "disabled" });
+
+    expect((await h.call(t.secret, "DELETE", `/v1/subscriptions/${id}`)).status).toBe(204);
+    expect((await h.call(t.secret, "GET", `/v1/subscriptions/${id}`)).status).toBe(404);
+    const audited = await h.control.db.query<{ action: string }>(
+      "select action from audit_log where tenant_id = $1 and action like 'subscription.%' order by id",
+      [t.id],
+    );
+    expect(audited.rows.map((row) => row.action)).toEqual([
+      "subscription.create",
+      "subscription.rotate_secret",
+      "subscription.update",
+      "subscription.delete",
+    ]);
+  });
+
+  it("refuses scope tenant for an integration without it, and a console session must name the integration", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const narrow = await h.integration(t.id, ["admin"]);
+
+    const refused = await create(h, narrow.secret, { ...webhook(), scope: "tenant" });
+    expect(refused.response.status).toBe(403);
+    expect((await codeOf(refused.response)).code).toBe("forbidden");
+    const own = await create(h, narrow.secret);
+    expect(own.created?.subscription).toMatchObject({ integrationId: narrow.id, scope: "own" });
+    const widened = await h.call(
+      t.secret,
+      "PATCH",
+      `/v1/subscriptions/${own.created?.subscription.id}`,
+      { scope: "tenant" },
+    );
+    expect(widened.status).toBe(403);
+    // the default integration holds tenant
+    expect((await create(h, t.secret, { ...webhook(), scope: "tenant" })).response.status).toBe(
+      201,
+    );
+
+    const console = await h.signIn(t.id);
+    const unnamed = await create(h, console);
+    expect(unnamed.response.status).toBe(400);
+    expect(
+      (await create(h, console, { ...webhook(), integrationId: narrow.id })).created?.subscription,
+    ).toMatchObject({ integrationId: narrow.id });
+    expect(
+      (await create(h, console, { ...webhook(), integrationId: crypto.randomUUID() })).response
+        .status,
+    ).toBe(404);
+  });
+
+  it("refuses a plain http URL unless local destinations are allowed", async () => {
+    const strict = await harness();
+    const t = await strict.tenant("acme");
+    const refused = await create(strict, t.secret, webhook("http://localhost:9999/hook"));
+    expect(refused.response.status).toBe(400);
+    expect(await codeOf(refused.response)).toMatchObject({
+      code: "invalid_destination",
+      message: expect.stringMatching(/https/),
+    });
+
+    const local = await harness({ allowLocalDestinations: true });
+    const u = await local.tenant("acme");
+    expect(
+      (await create(local, u.secret, webhook("http://localhost:9999/hook"))).response.status,
+    ).toBe(201);
+  });
+
+  it("holds a tenant to its subscription limit, and hides one tenant's subscriptions from another", async () => {
+    const h = await harness();
+    const a = await h.tenant("a", { subscriptions: 1 });
+    const b = await h.tenant("b");
+    const { created } = await create(h, a.secret);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    const over = await create(h, a.secret);
+    expect(over.response.status).toBe(409);
+    expect((await codeOf(over.response)).code).toBe("subscription_limit");
+
+    for (const [method, path] of [
+      ["GET", `/v1/subscriptions/${id}`],
+      ["PATCH", `/v1/subscriptions/${id}`],
+      ["DELETE", `/v1/subscriptions/${id}`],
+      ["POST", `/v1/subscriptions/${id}/secret`],
+      ["POST", `/v1/subscriptions/${id}/test`],
+      ["GET", `/v1/subscriptions/${id}/deliveries`],
+    ] as const)
+      expect(
+        (await h.call(b.secret, method, path, method === "PATCH" ? { types: ["*"] } : undefined))
+          .status,
+        `${method} ${path}`,
+      ).toBe(404);
+    expect(
+      (
+        (await (await h.call(b.secret, "GET", "/v1/subscriptions")).json()) as {
+          subscriptions: unknown[];
+        }
+      ).subscriptions,
+    ).toEqual([]);
+    expect((await h.call(a.secret, "GET", `/v1/subscriptions/${id}`)).status).toBe(200);
+  });
+
+  it("queues a test ping on the deliveries queue", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { created } = await create(h, t.secret);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    const queued = await h.call(t.secret, "POST", `/v1/subscriptions/${id}/test`);
+    expect(queued.status).toBe(202);
+    const { eventId } = (await queued.json()) as { eventId: string };
+    const tasks = await t.ctx.db.query<{ task_name: string; params: unknown }>(
+      "select task_name, params from absurd.t_deliveries",
+    );
+    expect(tasks.rows).toEqual([
+      {
+        task_name: "deliver-events",
+        params: { subscriptionId: id, ping: { id: eventId, createdAt: expect.any(String) } },
+      },
+    ]);
+    // nothing on the turns queue
+    expect((await t.ctx.db.query("select 1 from absurd.t_turns")).rowCount).toBe(0);
+    expect(
+      await (await h.call(t.secret, "GET", `/v1/subscriptions/${id}/deliveries`)).json(),
+    ).toEqual({
+      deliveries: [],
+      nextBefore: null,
+    });
+  });
+
+  it("without tenant, an admin key manages only its own integration's subscriptions", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const a = await h.integration(t.id, ["conversations", "admin"]);
+    const b = await h.integration(t.id, ["conversations", "admin"]);
+    const ofA = (await create(h, a.secret)).created?.subscription.id ?? expect.fail("not created");
+    const ofB = (await create(h, b.secret)).created?.subscription.id ?? expect.fail("not created");
+    await newConversation(h, a.secret);
+    const [event] = (await eventsUntil(h, t.secret, 1)).events;
+    const eventId = event?.id ?? expect.fail("no event");
+
+    for (const [method, path, body] of [
+      ["GET", `/v1/subscriptions/${ofA}`, undefined],
+      ["PATCH", `/v1/subscriptions/${ofA}`, { types: ["*"] }],
+      ["DELETE", `/v1/subscriptions/${ofA}`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/secret`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/test`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/redeliver`, { eventId }],
+      ["GET", `/v1/subscriptions/${ofA}/deliveries`, undefined],
+    ] as const)
+      expect((await h.call(b.secret, method, path, body)).status, `${method} ${path}`).toBe(404);
+    // creating one for a's integration, even scope own, is not found: b cannot point a's events anywhere
+    expect((await create(h, b.secret, { ...webhook(), integrationId: a.id })).response.status).toBe(
+      404,
+    );
+    const listedBy = async (secret: string) =>
+      (
+        (await (await h.call(secret, "GET", "/v1/subscriptions")).json()) as {
+          subscriptions: { id: string }[];
+        }
+      ).subscriptions.map((s) => s.id);
+    expect(await listedBy(b.secret)).toEqual([ofB]);
+    expect(await listedBy(a.secret)).toEqual([ofA]);
+    // nothing b tried changed a's subscription or queued a delivery to it
+    expect((await h.call(a.secret, "GET", `/v1/subscriptions/${ofA}`)).status).toBe(200);
+    expect((await t.ctx.db.query("select 1 from absurd.t_deliveries")).rowCount).toBe(0);
+
+    // a tenant-scoped admin key and the console see and manage all
+    const console = await h.signIn(t.id);
+    for (const secret of [t.secret, console]) {
+      expect(await listedBy(secret)).toEqual([ofA, ofB]);
+      expect(
+        (await h.call(secret, "PATCH", `/v1/subscriptions/${ofA}`, { description: "x" })).status,
+      ).toBe(200);
+      expect((await h.call(secret, "POST", `/v1/subscriptions/${ofB}/test`)).status).toBe(202);
+      expect((await h.call(secret, "GET", `/v1/subscriptions/${ofB}/deliveries`)).status).toBe(200);
+    }
+    expect((await create(h, console, { ...webhook(), integrationId: a.id })).response.status).toBe(
+      201,
+    );
+    expect((await h.call(t.secret, "DELETE", `/v1/subscriptions/${ofB}`)).status).toBe(204);
+  });
+
+  it("redelivers only an event both the caller and the subscription may see", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const scopes: Scope[] = ["conversations", "admin"];
+    const a = await h.integration(t.id, scopes);
+    const b = await h.integration(t.id, scopes);
+    const ofA = await newConversation(h, a.secret);
+    const ofB = await newConversation(h, b.secret);
+    const { events } = await eventsUntil(h, t.secret, 2);
+    const eventOf = (conversationId: string) =>
+      events.find((e) => e.data.conversationId === conversationId)?.id ?? expect.fail("no event");
+
+    const subscription = (await create(h, a.secret)).created?.subscription.id;
+    const redeliver = (secret: string, eventId: string) =>
+      h.call(secret, "POST", `/v1/subscriptions/${subscription}/redeliver`, { eventId });
+
+    // b's event: the subscription (a's, scope own) may not see it, whoever asks
+    expect((await redeliver(t.secret, eventOf(ofB.id))).status).toBe(404);
+    // a's event asked by b, who may not see it
+    expect((await redeliver(b.secret, eventOf(ofA.id))).status).toBe(404);
+    expect((await redeliver(a.secret, crypto.randomUUID())).status).toBe(404);
+    expect((await t.ctx.db.query("select 1 from absurd.t_deliveries")).rowCount).toBe(0);
+
+    const queued = await redeliver(a.secret, eventOf(ofA.id));
+    expect(queued.status).toBe(202);
+    expect(await queued.json()).toEqual({ eventId: eventOf(ofA.id) });
+    const tasks = await t.ctx.db.query<{ params: unknown }>(
+      "select params from absurd.t_deliveries",
+    );
+    expect(tasks.rows).toEqual([
+      { params: { subscriptionId: subscription, eventIds: [eventOf(ofA.id)] } },
+    ]);
+  });
+});
+
+describe("tools (ADR 0022)", () => {
   const ErrorBody = z.object({
     error: z.object({
       code: z.string(),
@@ -1739,11 +2573,19 @@ describe("tools (ADR 0019)", () => {
     return ToolServerSchema.parse(await response.json());
   }
 
-  async function restrictedKey(h: Harness, t: Tenant, tools: string[] = []) {
-    const integration = await createIntegration(h.control.db, {
-      tenantId: t.id,
+  /**
+   * A key of a new integration without `admin`, granted `tools`. It holds `tenant` by default, so it sees conversations
+   * others started and the grant check is what stops it.
+   */
+  async function grantedKey(
+    h: Harness,
+    t: Tenant,
+    tools: string[] = [],
+    scopes: Scope[] = ["conversations", "tenant"],
+  ) {
+    const integration = await createIntegration(h.control.db, t.id, {
       name: `bots-${crypto.randomUUID().slice(0, 8)}`,
-      role: "restricted",
+      scopes,
     });
     if (tools.length > 0) {
       const put = await h.call(t.secret, "PUT", `/v1/integrations/${integration.id}/tools`, {
@@ -2062,7 +2904,7 @@ describe("tools (ADR 0019)", () => {
   it("serves a tenant whose tool tables are not there yet (schema n-1), as long as no tools are named", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
-    const { secret } = await restrictedKey(h, t);
+    const { secret } = await grantedKey(h, t);
     await t.database.db.query(
       "drop table tool_oauth_flows, conversation_tools, integration_tools, tools, tool_servers",
     );
@@ -2083,15 +2925,15 @@ describe("tools (ADR 0019)", () => {
     const other = await h.tenant("globex");
     await addServer(h, t, "docs");
     await listed(t, "docs", ["search", "write"], ["search"]);
-    const { integration } = await restrictedKey(h, t);
+    const { integration } = await grantedKey(h, t);
 
     const integrations = ListIntegrationsResponseSchema.parse(
       await (await h.call(t.secret, "GET", "/v1/integrations")).json(),
     );
-    // by name
-    expect(integrations.integrations.map((i) => [i.name, i.role])).toEqual([
-      [integration.name, "restricted"],
-      ["default", "admin"],
+    // oldest first
+    expect(integrations.integrations.map((i) => [i.name, i.scopes])).toEqual([
+      ["default", [...SCOPES]],
+      [integration.name, ["conversations", "tenant"]],
     ]);
 
     const path = `/v1/integrations/${integration.id}/tools`;
@@ -2131,6 +2973,15 @@ describe("tools (ADR 0019)", () => {
     expect(audit.rows).toEqual([
       { detail: { integrationId: integration.id, tools: "kerby/* docs/search" } },
     ]);
+
+    // A deleted integration's grants stay, inert: it has no live key; they are no longer shown or changed.
+    expect(await deleteIntegration(h.control.db, t.id, integration.id)).toBe(true);
+    const after = ToolServerSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tool-servers/docs")).json(),
+    );
+    expect(after.grantedTo).toEqual([]);
+    expect((await h.call(t.secret, "GET", path)).status).toBe(404);
+    expect((await h.call(t.secret, "PUT", path, { tools: [] })).status).toBe(404);
   });
 
   it("deleting a server removes its credential, grants and conversations' use of it", async () => {
@@ -2141,7 +2992,7 @@ describe("tools (ADR 0019)", () => {
       credential: CREDENTIAL,
     });
     const record = await listed(t, "docs", ["search"], ["search"]);
-    const { integration } = await restrictedKey(h, t, ["docs/*"]);
+    const { integration } = await grantedKey(h, t, ["docs/*"]);
     const conversation = await newConversation(h, t.secret, { tools: ["docs/search"] });
     expect(conversation.tools).toEqual(["docs/search"]);
 
@@ -2157,12 +3008,12 @@ describe("tools (ADR 0019)", () => {
     expect((await h.call(t.secret, "DELETE", "/v1/tool-servers/docs")).status).toBe(404);
   });
 
-  it("refuses a restricted key every management route, and shows it only its granted tools", async () => {
+  it("refuses a key without admin every tool and grant management route, and shows it only its granted tools", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
     await addServer(h, t, "docs");
     await listed(t, "docs", ["search", "write"], ["search", "write"]);
-    const { integration, secret } = await restrictedKey(h, t, ["docs/search"]);
+    const { integration, secret } = await grantedKey(h, t, ["docs/search"]);
     for (const [method, path, body] of [
       ["GET", "/v1/tool-servers", undefined],
       ["POST", "/v1/tool-servers", { slug: "x", url: "https://x.example.com" }],
@@ -2178,7 +3029,10 @@ describe("tools (ADR 0019)", () => {
     ] as const) {
       const response = await h.call(secret, method, path, body);
       expect(response.status, `${method} ${path}`).toBe(403);
-      expect((await errorOf(response)).code).toBe("forbidden");
+      expect(await errorOf(response)).toMatchObject({
+        code: "forbidden",
+        message: expect.stringContaining('"admin"'),
+      });
     }
 
     const mine = ListAvailableToolsResponseSchema.parse(
@@ -2199,6 +3053,38 @@ describe("tools (ADR 0019)", () => {
     );
     // no echo (development only) and no judge (no typesafe key) here
     expect(all.tools.map((tool) => tool.pattern)).toEqual(["docs/search", "docs/write"]);
+    // a console session acts as the tenant: every enabled tool
+    const session = await h.signIn(t.id);
+    const console = ListAvailableToolsResponseSchema.parse(
+      await (await h.call(session, "GET", "/v1/tools")).json(),
+    );
+    expect(console.tools.map((tool) => tool.pattern)).toEqual(["docs/search", "docs/write"]);
+    // what a key may name is for keys that run conversations
+    const events = await grantedKey(h, t, [], ["events"]);
+    const refused = await h.call(events.secret, "GET", "/v1/tools");
+    expect(refused.status).toBe(403);
+    expect((await errorOf(refused)).message).toContain('"conversations"');
+  });
+
+  it("lets an integration holding admin name every enabled tool without grants", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search", "write"], ["search", "write"]);
+    const { secret } = await grantedKey(h, t, [], ["conversations", "admin"]);
+    const mine = ListAvailableToolsResponseSchema.parse(
+      await (await h.call(secret, "GET", "/v1/tools")).json(),
+    );
+    expect(mine.tools.map((tool) => tool.pattern)).toEqual(["docs/search", "docs/write"]);
+    const conversation = await newConversation(h, secret, { tools: ["docs/*"] });
+    expect(conversation.tools).toEqual(["docs/*"]);
+    expect(
+      (
+        await h.call(secret, "POST", `/v1/conversations/${conversation.id}/messages`, {
+          content: "hi",
+        })
+      ).status,
+    ).toBe(202);
   });
 
   it("lets a conversation name only tools its creator and every poster hold", async () => {
@@ -2206,7 +3092,7 @@ describe("tools (ADR 0019)", () => {
     const t = await h.tenant("acme");
     await addServer(h, t, "docs");
     await listed(t, "docs", ["search", "write"], ["search", "write"]);
-    const { secret } = await restrictedKey(h, t, ["docs/search"]);
+    const { secret } = await grantedKey(h, t, ["docs/search"]);
 
     const refused = await h.call(secret, "POST", "/v1/conversations", {
       tools: ["docs/search", "docs/write"],
@@ -2225,7 +3111,7 @@ describe("tools (ADR 0019)", () => {
         .status,
     ).toBe(202);
 
-    // an admin's conversation naming a tool the restricted key was not given: the key cannot post to it
+    // another's conversation it sees (it holds `tenant`) naming a tool it was not given: it cannot post to it
     const admins = await newConversation(h, t.secret, { tools: ["docs/write"] });
     const pushed = await h.call(secret, "POST", `/v1/conversations/${admins.id}/messages`, {
       content: "do it",
@@ -2300,7 +3186,7 @@ describe("tools (ADR 0019)", () => {
   });
 });
 
-describe("OAuth connections to tool servers (ADR 0019)", () => {
+describe("OAuth connections to tool servers (ADR 0022)", () => {
   const CALLBACK = "https://console.kerby.test/dashboard/tools/oauth/callback";
 
   async function oauthFixture(options: Parameters<typeof startOAuthFixture>[0] = {}) {
@@ -2548,11 +3434,10 @@ describe("OAuth connections to tool servers (ADR 0019)", () => {
     expect(put.status).toBe(400);
     expect((await errorOf(put)).message).toMatch(/oauth\/start/);
 
-    // Only an admin connects.
-    const integration = await createIntegration(h.control.db, {
-      tenantId: t.id,
+    // Only a key holding admin connects.
+    const integration = await createIntegration(h.control.db, t.id, {
       name: "bots",
-      role: "restricted",
+      scopes: ["conversations", "tenant"],
     });
     const restricted = (await createApiKey(h.control.db, t.id, integration.id)).secret;
     expect((await h.call(restricted, "POST", "/v1/tool-servers/crm/oauth/start")).status).toBe(403);

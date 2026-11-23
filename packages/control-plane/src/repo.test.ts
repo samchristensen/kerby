@@ -1,5 +1,5 @@
-import { createControlDb, migrate, readMigrations } from "@kerby/db";
-import { createTestDatabase } from "@kerby/db/testing";
+import { randomUUID } from "node:crypto";
+import type { ControlDb } from "@kerby/db";
 import {
   createOpener,
   createSealer,
@@ -10,62 +10,73 @@ import {
 } from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
-  archiveIntegration,
+  ApiKeyLimitError,
   audit,
   authenticateApiKey,
   authenticateConsoleSession,
-  controlMigrationsDir,
   createApiKey,
   createConsoleSession,
   createIntegration,
   deleteConsoleSession,
+  deleteIntegration,
   deleteModelKey,
+  deleteSubscription,
+  disableSubscription,
   EmailTakenError,
+  ensureDefaultIntegration,
   findConsoleUser,
-  findIntegrationByName,
-  getIntegration,
   getTenant,
   hasModelKey,
-  IntegrationNameTakenError,
-  IntegrationNotFoundError,
+  hintTenantWork,
   insertConsoleUser,
+  insertSubscription,
   insertTenant,
   listApiKeys,
+  listDeliverableSubscriptions,
+  listDueTenants,
   listIntegrations,
   listModelKeys,
+  listSubscriptions,
   listTenants,
   listTenantsWithoutDbPassword,
+  listTenantsWithSubscriptions,
+  MAX_API_KEYS_PER_TENANT,
   MAX_MODEL_KEYS_PER_TENANT,
   ModelKeyLimitError,
   newTenantDbPassword,
+  openSubscriptionForDelivery,
   parseApiKey,
   putModelKey,
   readConsoleSession,
   readModelKey,
   readTenantDbPassword,
+  readWakeupVersion,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
   recordUsage,
   resealTenantDbPasswords,
   resolveTenantDbUrl,
   revokeApiKey,
-  setRolePassword,
+  rotateSubscriptionSecret,
+  setIntegrationScopes,
   setTenantStatus,
+  settleTenantWakeup,
   storeTenantDbPassword,
   TenantNameTakenError,
-  updateIntegration,
+  updateSubscription,
 } from "./index.ts";
-import { createTestControlDb } from "./testing.ts";
+import { asServiceRole, createTestControlDb } from "./testing.ts";
 
 const newTenant = (name: string) => ({ name, dbHost: "db.local", dbPort: 5432 });
-
-type Queryable = Parameters<typeof createApiKey>[0];
-
-/** A key in the tenant's `default` admin integration, made on first use. */
-async function keyFor(db: Queryable, tenantId: string, label?: string) {
-  const integration =
-    (await findIntegrationByName(db, tenantId, "default")) ??
-    (await createIntegration(db, { tenantId, name: "default", role: "admin" }));
-  return createApiKey(db, tenantId, integration.id, label);
-}
+const newSubscription = (tenantId: string, integrationId: string) => ({
+  tenantId,
+  integrationId,
+  destination: { kind: "webhook" as const, url: "https://example.com/hook" },
+  types: ["*" as const],
+  scope: "own" as const,
+  description: "",
+  secret: "whsec-test",
+});
 
 describe("tenants", () => {
   it("inserts in provisioning state with names derived from the id, and refuses a duplicate name", async () => {
@@ -171,19 +182,25 @@ describe("api keys", () => {
   it("authenticates the key it created, to its tenant, and records use", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await keyFor(control.db, tenant.id, "ci");
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
+    const { key, secret } = await createApiKey(control.db, tenant.id, integration.id, "ci");
     expect(secret).toMatch(/^kb_[0-9a-f]{12}_/);
     expect(parseApiKey(secret)?.id).toBe(key.id);
     const found = await authenticateApiKey(control.db, secret);
     expect(found?.tenant.id).toBe(tenant.id);
     expect(found?.keyId).toBe(key.id);
+    expect(found?.integration).toEqual(integration);
     expect((await listApiKeys(control.db, tenant.id))[0]?.lastUsedAt).toBeInstanceOf(Date);
   });
 
   it("never stores the secret", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { secret } = await keyFor(control.db, tenant.id);
+    const { secret } = await createApiKey(
+      control.db,
+      tenant.id,
+      (await ensureDefaultIntegration(control.db, tenant.id)).id,
+    );
     const dump = JSON.stringify((await control.db.query("select * from api_keys")).rows);
     expect(dump).not.toContain(secret.slice(-20));
   });
@@ -191,7 +208,11 @@ describe("api keys", () => {
   it("refuses a wrong secret, a malformed key, an unknown id, and a revoked key", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const { key, secret } = await keyFor(control.db, tenant.id);
+    const { key, secret } = await createApiKey(
+      control.db,
+      tenant.id,
+      (await ensureDefaultIntegration(control.db, tenant.id)).id,
+    );
     const wrongSecret = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
     expect(await authenticateApiKey(control.db, wrongSecret)).toBeUndefined();
     expect(await authenticateApiKey(control.db, "garbage")).toBeUndefined();
@@ -207,166 +228,124 @@ describe("api keys", () => {
     await using control = await createTestControlDb();
     const a = await insertTenant(control.db, newTenant("a"));
     const b = await insertTenant(control.db, newTenant("b"));
-    const { key, secret } = await keyFor(control.db, a.id);
+    const { key, secret } = await createApiKey(
+      control.db,
+      a.id,
+      (await ensureDefaultIntegration(control.db, a.id)).id,
+    );
     expect(await revokeApiKey(control.db, b.id, key.id)).toBe(false);
     expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(a.id);
   });
-});
 
-describe("integrations", () => {
-  it("creates, lists live ones by name, renames, changes role, and frees an archived name", async () => {
+  it("caps a tenant's live keys, even created at once, and a key revoked in the same transaction frees its place", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, newTenant("acme"));
-    const zed = await createIntegration(control.db, {
-      tenantId: tenant.id,
-      name: "zed",
-      role: "admin",
-    });
-    const bots = await createIntegration(control.db, {
-      tenantId: tenant.id,
-      name: "bots",
-      role: "restricted",
-    });
-    expect((await listIntegrations(control.db, tenant.id)).map((i) => i.name)).toEqual([
-      "bots",
-      "zed",
-    ]);
-    await expect(
-      createIntegration(control.db, { tenantId: tenant.id, name: "bots", role: "admin" }),
-    ).rejects.toBeInstanceOf(IntegrationNameTakenError);
-    await expect(
-      updateIntegration(control.db, tenant.id, zed.id, { name: "bots" }),
-    ).rejects.toBeInstanceOf(IntegrationNameTakenError);
-    const changed = await updateIntegration(control.db, tenant.id, bots.id, { role: "admin" });
-    expect(changed).toMatchObject({ name: "bots", role: "admin" });
-    expect(await getIntegration(control.db, tenant.id, "not-a-uuid")).toBeUndefined();
-    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(true);
-    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(false);
-    expect(await getIntegration(control.db, tenant.id, bots.id)).toBeUndefined();
-    expect(
-      await updateIntegration(control.db, tenant.id, bots.id, { role: "restricted" }),
-    ).toBeUndefined();
-    expect(
-      (await createIntegration(control.db, { tenantId: tenant.id, name: "bots", role: "admin" }))
-        .name,
-    ).toBe("bots");
-  });
-
-  it("never touches another tenant's integration", async () => {
-    await using control = await createTestControlDb();
-    const a = await insertTenant(control.db, newTenant("a"));
-    const b = await insertTenant(control.db, newTenant("b"));
-    const ai = await createIntegration(control.db, { tenantId: a.id, name: "x", role: "admin" });
-    expect(await getIntegration(control.db, b.id, ai.id)).toBeUndefined();
-    expect(await findIntegrationByName(control.db, b.id, "x")).toBeUndefined();
-    expect(
-      await updateIntegration(control.db, b.id, ai.id, { role: "restricted" }),
-    ).toBeUndefined();
-    expect(await archiveIntegration(control.db, b.id, ai.id)).toBe(false);
-    await expect(createApiKey(control.db, b.id, ai.id)).rejects.toBeInstanceOf(
-      IntegrationNotFoundError,
-    );
-    // and the schema refuses it too, whatever the query
-    await expect(
-      control.db.query(
-        "insert into api_keys (id, tenant_id, integration_id, key_hash) values ('000000000001', $1, $2, '\\x00')",
-        [b.id, ai.id],
+    const other = await insertTenant(control.db, newTenant("other"));
+    const mine = await ensureDefaultIntegration(control.db, tenant.id);
+    const theirs = await ensureDefaultIntegration(control.db, other.id);
+    const settled = await Promise.allSettled(
+      Array.from({ length: MAX_API_KEYS_PER_TENANT + 5 }, () =>
+        createApiKey(control.db, tenant.id, mine.id),
       ),
-    ).rejects.toThrow(/api_keys_integration_fk/);
-  });
-
-  it("authenticates with the integration's role; archiving revokes its keys and refuses new ones", async () => {
-    await using control = await createTestControlDb();
-    const tenant = await insertTenant(control.db, newTenant("acme"));
-    const bots = await createIntegration(control.db, {
-      tenantId: tenant.id,
-      name: "bots",
-      role: "restricted",
-    });
-    const { key, secret } = await createApiKey(control.db, tenant.id, bots.id, "ci");
-    expect(key.integrationId).toBe(bots.id);
-    expect((await authenticateApiKey(control.db, secret))?.integration).toEqual({
-      id: bots.id,
-      name: "bots",
-      role: "restricted",
-    });
-    await updateIntegration(control.db, tenant.id, bots.id, { role: "admin" });
-    expect((await authenticateApiKey(control.db, secret))?.integration.role).toBe("admin");
-    expect(await archiveIntegration(control.db, tenant.id, bots.id)).toBe(true);
-    expect(await authenticateApiKey(control.db, secret)).toBeUndefined();
-    expect((await listApiKeys(control.db, tenant.id))[0]?.revokedAt).toBeInstanceOf(Date);
-    await expect(createApiKey(control.db, tenant.id, bots.id)).rejects.toBeInstanceOf(
-      IntegrationNotFoundError,
     );
-  });
+    const refused = settled.filter((result) => result.status === "rejected");
+    expect(refused).toHaveLength(5);
+    for (const result of refused) expect(result.reason).toBeInstanceOf(ApiKeyLimitError);
+    const live = await listApiKeys(control.db, tenant.id);
+    expect(live).toHaveLength(MAX_API_KEYS_PER_TENANT);
+    // Another tenant's cap is its own.
+    await createApiKey(control.db, other.id, theirs.id);
 
-  it("migration 0008 puts every existing key into an admin `default` integration of its tenant", async () => {
-    const database = await createTestDatabase();
-    const db = createControlDb(database.url, { max: 1 });
-    try {
-      const before = readMigrations([controlMigrationsDir]).filter(
-        (m) => m.name < "control-plane/0008",
-      );
-      expect(before.map((m) => m.name)).toContain("control-plane/0007_signup_allowlist.sql");
-      await db.query(
-        "create table schema_migrations (name text primary key, applied_at timestamptz not null default now())",
-      );
-      for (const m of before) {
-        await db.query(m.sql);
-        await db.query("insert into schema_migrations (name) values ($1)", [m.name]);
-      }
-      const ids: string[] = [];
-      for (const name of ["a", "b"]) {
-        const { rows } = await db.query<{ id: string }>(
-          "insert into tenants (name, db_host, db_port, db_name, db_role) values ($1, 'h', 1, $1, $1) returning id",
-          [name],
-        );
-        ids.push(rows[0]?.id ?? "");
-      }
-      await db.query(
-        "insert into api_keys (id, tenant_id, key_hash) values ('aaaaaaaaaaa1', $1, '\\x00'), ('aaaaaaaaaaa2', $1, '\\x00'), ('bbbbbbbbbbb1', $2, '\\x00')",
-        ids,
-      );
-      expect(await migrate(db, [controlMigrationsDir])).toContain(
-        "control-plane/0008_integrations.sql",
-      );
-      for (const [index, tenantId] of ids.entries()) {
-        const integrations = await listIntegrations(db, tenantId);
-        expect(integrations).toMatchObject([{ name: "default", role: "admin" }]);
-        const keys = await listApiKeys(db, tenantId);
-        expect(keys).toHaveLength(index === 0 ? 2 : 1);
-        expect(keys.every((k) => k.integrationId === integrations[0]?.id)).toBe(true);
-      }
-    } finally {
-      await db.close();
-      await database.drop();
-    }
+    // Rotation at the cap: revoke and create in one transaction.
+    const oldest = live[0] ?? expect.fail("no key");
+    const rotated = await control.db.transaction(async (tx) => {
+      expect(await revokeApiKey(tx, tenant.id, oldest.id)).toBe(true);
+      return createApiKey(tx, tenant.id, mine.id, "rotated");
+    });
+    expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
+    await expect(createApiKey(control.db, tenant.id, mine.id)).rejects.toBeInstanceOf(
+      ApiKeyLimitError,
+    );
+    // A revoked key no longer counts.
+    expect(await revokeApiKey(control.db, tenant.id, rotated.key.id)).toBe(true);
+    await createApiKey(control.db, tenant.id, mine.id);
   });
 });
 
-/**
- * A handle on the control database as one of the limited service roles, given a password the way control does. Roles
- * are cluster-wide and test files run in parallel, so every test uses `<role>-password-for-tests` (console.test.ts too).
- */
-async function asRole(controlUrl: string, role: "kerby_app" | "kerby_console") {
-  const admin = createControlDb(controlUrl, { max: 1 });
-  await setRolePassword(admin, role, `${role}-password-for-tests`);
-  await admin.close();
-  const url = new URL(controlUrl);
-  url.username = role;
-  url.password = `${role}-password-for-tests`;
-  return createControlDb(url.toString(), { max: 1 });
-}
+describe("tenant wakeups", () => {
+  const active = async (db: ControlDb, name: string) => {
+    const tenant = await insertTenant(db, newTenant(name));
+    await setTenantStatus(db, tenant.id, "active");
+    return tenant;
+  };
+  /** Sorted: two hints in the same instant have no order. */
+  const dueNames = async (db: ControlDb) => (await listDueTenants(db)).map((t) => t.name).sort();
+
+  it("lists active tenants that were hinted, until a worker settles them", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    const b = await active(control.db, "b");
+    const suspended = await active(control.db, "s");
+    expect(await dueNames(control.db)).toEqual([]);
+    await hintTenantWork(control.db, a.id);
+    await hintTenantWork(control.db, b.id);
+    await hintTenantWork(control.db, suspended.id);
+    await setTenantStatus(control.db, suspended.id, "suspended");
+    expect(await dueNames(control.db)).toEqual(["a", "b"]);
+
+    const version = await readWakeupVersion(control.db, a.id);
+    expect(await settleTenantWakeup(control.db, a.id, version, null)).toBe(true);
+    expect(await dueNames(control.db)).toEqual(["b"]);
+    // A due time in the future is not due yet; one in the past is.
+    const bVersion = await readWakeupVersion(control.db, b.id);
+    await settleTenantWakeup(control.db, b.id, bVersion, new Date(Date.now() + 60_000));
+    expect(await dueNames(control.db)).toEqual([]);
+    await settleTenantWakeup(control.db, b.id, bVersion, new Date(Date.now() - 1000));
+    expect(await dueNames(control.db)).toEqual(["b"]);
+  });
+
+  it("never lets a settle overwrite a hint that arrived after its version was read", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    await hintTenantWork(control.db, a.id);
+    const before = await readWakeupVersion(control.db, a.id);
+    await hintTenantWork(control.db, a.id); // arrives while the worker claims
+    expect(await settleTenantWakeup(control.db, a.id, before, null)).toBe(false);
+    expect(await dueNames(control.db)).toEqual(["a"]);
+  });
+
+  it("settles a tenant with no hint yet, and a hint racing that first settle still wins", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    const b = await active(control.db, "b");
+    expect(await readWakeupVersion(control.db, a.id)).toBe("0");
+    expect(await settleTenantWakeup(control.db, a.id, "0", new Date(Date.now() - 1000))).toBe(true);
+    expect(await dueNames(control.db)).toEqual(["a"]);
+
+    const none = await readWakeupVersion(control.db, b.id);
+    await hintTenantWork(control.db, b.id);
+    expect(await settleTenantWakeup(control.db, b.id, none, null)).toBe(false);
+    expect(await dueNames(control.db)).toEqual(["a", "b"]);
+  });
+
+  it("treats an id that is not a uuid as no tenant", async () => {
+    await using control = await createTestControlDb();
+    await hintTenantWork(control.db, "not-a-uuid");
+    expect(await readWakeupVersion(control.db, "not-a-uuid")).toBe("0");
+    expect(await settleTenantWakeup(control.db, "not-a-uuid", "0", null)).toBe(false);
+  });
+});
 
 describe("the limited app role (what api and worker connect as)", () => {
   it("does what the services need and nothing of the operator's", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
     await setTenantStatus(control.db, tenant.id, "active");
-    const { secret } = await keyFor(control.db, tenant.id);
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
+    const { secret } = await createApiKey(control.db, tenant.id, integration.id);
     const box = createSecretBox([generateBoxKey()]);
     await storeTenantDbPassword(control.db, box, tenant.id, "tenant-db-password");
-    const app = await asRole(control.url, "kerby_app");
+    const app = await asServiceRole(control.url, "kerby_app");
     try {
       // api: verify a key; worker: list and read tenants, record usage
       expect((await authenticateApiKey(app, secret))?.tenant.id).toBe(tenant.id);
@@ -381,11 +360,51 @@ describe("the limited app role (what api and worker connect as)", () => {
           outputTokens: 1,
         }),
       ).toBe(true);
-      await app.query("select pg_notify('tenant_work', 'x')");
+      // api: hint a tenant's work and ring the doorbell; worker: list due tenants, read and settle the hint
+      await hintTenantWork(app, tenant.id);
+      expect((await listDueTenants(app)).map((t) => t.name)).toEqual(["acme"]);
+      const version = await readWakeupVersion(app, tenant.id);
+      expect(await settleTenantWakeup(app, tenant.id, version, null)).toBe(true);
+      expect(await listDueTenants(app)).toEqual([]);
       // api and worker: open the tenant's database with its stored password
       expect(new URL(await resolveTenantDbUrl(app, box, tenant.id)).password).toBe(
         "tenant-db-password",
       );
+      // api: manage subscriptions; dispatcher: find, open and deliver to them, record their health
+      const keys = generateSecretsKeyPair();
+      const id = randomUUID();
+      await insertSubscription(
+        app,
+        createSealer(keys.publicKey),
+        { ...newSubscription(tenant.id, integration.id), id },
+        10,
+      );
+      expect(await listSubscriptions(app, tenant.id)).toHaveLength(1);
+      expect(await updateSubscription(app, tenant.id, id, { description: "x" })).toBeDefined();
+      expect(
+        await rotateSubscriptionSecret(
+          app,
+          createSealer(keys.publicKey),
+          tenant.id,
+          id,
+          "s2",
+          1000,
+        ),
+      ).toBeDefined();
+      expect(await listTenantsWithSubscriptions(app)).toEqual([tenant.id]);
+      expect(await listDeliverableSubscriptions(app, tenant.id)).toHaveLength(1);
+      const opened = await openSubscriptionForDelivery(
+        app,
+        createOpener([keys.privateKey]),
+        tenant.id,
+        id,
+      );
+      expect(opened?.secrets).toEqual(["s2", "whsec-test"]);
+      expect(await recordDeliveryFailure(app, id, 60_000)).toBe(false);
+      await recordDeliverySuccess(app, id);
+      await disableSubscription(app, id, "gone");
+      await app.query("select pg_notify('tenant_events', 'x')");
+      expect(await deleteSubscription(app, tenant.id, id)).toBe(true);
 
       // operator-only data and writes are refused
       for (const sql of [
@@ -393,14 +412,13 @@ describe("the limited app role (what api and worker connect as)", () => {
         "insert into tenants (name, db_host, db_port, db_name, db_role) values ('x', 'h', 1, 'd', 'r')",
         "update tenants set status = 'suspended'",
         "update api_keys set revoked_at = null",
-        "update integrations set role = 'admin'",
-        "insert into integrations (tenant_id, name, role) select id, 'x', 'admin' from tenants",
         "update api_keys set key_hash = '\\x00'",
         "delete from usage",
         "update audit_log set actor = 'x'",
         "delete from audit_log",
         "update tenant_db_credentials set ciphertext = '\\x00'",
         "delete from tenant_db_credentials",
+        "delete from tenant_wakeups",
       ]) {
         await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
       }
@@ -421,7 +439,7 @@ describe("the console role", () => {
       passwordHash: "scrypt$17$8$1$c2FsdA==$aGFzaA==",
     });
     const sealer = createSealer(generateSecretsKeyPair().publicKey);
-    const role = await asRole(control.url, "kerby_console");
+    const role = await asServiceRole(control.url, "kerby_console");
     try {
       // sign in: read the person, keep a session
       expect((await findConsoleUser(role, "ada@example.com"))?.id).toBe(user.id);
@@ -432,22 +450,33 @@ describe("the console role", () => {
       );
       expect((await readConsoleSession(role, token))?.tenantName).toBe("acme");
       await deleteConsoleSession(role, token);
-      // keys: create, list, revoke; the new key works at the api
-      const { key, secret } = await keyFor(role, tenant.id, "ci");
-      expect((await listApiKeys(role, tenant.id)).map((k) => k.label)).toEqual(["ci"]);
-      expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(tenant.id);
-      expect(await revokeApiKey(role, tenant.id, key.id)).toBe(true);
-      // integrations: create, rename, change role, archive
-      const bots = await createIntegration(role, {
-        tenantId: tenant.id,
-        name: "bots",
-        role: "restricted",
+      // integrations: make, re-scope; keys: create, list, revoke; the new key works at the api
+      const integration = await createIntegration(role, tenant.id, {
+        name: "crm",
+        scopes: ["conversations"],
       });
       expect(
-        (await updateIntegration(role, tenant.id, bots.id, { name: "robots", role: "admin" }))
-          ?.role,
-      ).toBe("admin");
-      expect(await archiveIntegration(role, tenant.id, bots.id)).toBe(true);
+        (await setIntegrationScopes(role, tenant.id, integration.id, ["events"]))?.scopes,
+      ).toEqual(["events"]);
+      expect((await listIntegrations(role, tenant.id)).map((i) => i.name)).toEqual(["crm"]);
+      const { key, secret } = await createApiKey(role, tenant.id, integration.id, "ci");
+      expect((await listApiKeys(role, tenant.id, integration.id)).map((k) => k.label)).toEqual([
+        "ci",
+      ]);
+      expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(tenant.id);
+      expect(await revokeApiKey(role, tenant.id, key.id)).toBe(true);
+      // deleting an integration revokes its keys and deletes its subscriptions
+      const { secret: other } = await createApiKey(role, tenant.id, integration.id);
+      await insertSubscription(
+        control.db,
+        sealer,
+        { ...newSubscription(tenant.id, integration.id), id: randomUUID() },
+        10,
+      );
+      expect((await role.query("select id from subscriptions")).rowCount).toBe(1);
+      expect(await deleteIntegration(role, tenant.id, integration.id)).toBe(true);
+      expect(await authenticateApiKey(control.db, other)).toBeUndefined();
+      expect(await listSubscriptions(control.db, tenant.id)).toEqual([]);
       // model keys, and the audit trail of both
       await putModelKey(role, sealer, tenant.id, "anthropic", "sk-test-1234");
       expect((await listModelKeys(role, tenant.id)).map((k) => k.provider)).toEqual(["anthropic"]);
@@ -458,9 +487,6 @@ describe("the console role", () => {
         "select key_hash from api_keys",
         "update api_keys set key_hash = '\\x00'",
         "update api_keys set tenant_id = gen_random_uuid()",
-        "update api_keys set integration_id = gen_random_uuid()",
-        "update integrations set tenant_id = gen_random_uuid()",
-        "delete from integrations",
         "insert into console_users (tenant_id, email, password_hash) values (gen_random_uuid(), 'x', 'y')",
         "update console_users set password_hash = 'x'",
         "update console_users set tenant_id = gen_random_uuid()",
@@ -510,7 +536,8 @@ describe("console people and sessions", () => {
     });
     const user = { id, tenantId: tenant.id };
     const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
-    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
+    // A minute back, not a millisecond: Postgres's clock (in Docker) may trail the test's.
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 60_000));
 
     expect(await readConsoleSession(control.db, live)).toMatchObject({
       userId: id,
@@ -550,8 +577,8 @@ describe("console people and sessions", () => {
     });
     const user = { id, tenantId: tenant.id };
     const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
-    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
-    const app = await asRole(control.url, "kerby_app");
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 60_000));
+    const app = await asServiceRole(control.url, "kerby_app");
     try {
       const found = await authenticateConsoleSession(app, live);
       expect(found?.userId).toBe(id);

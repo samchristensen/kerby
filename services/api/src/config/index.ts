@@ -25,6 +25,17 @@ const apiConfigSchema = z
     railwayEnvironmentName: z.string().min(1).optional(),
     /** Public key tenants' model keys are sealed to (base64); the private half stays with the workers. `make secrets-key` makes a pair. */
     secretsPublicKey: z.string().min(1),
+    /**
+     * Public key subscriptions' signing secrets are sealed to (base64, ADR 0019); only the dispatcher holds the private
+     * half. Not the model keys' pair.
+     */
+    deliverySecretsPublicKey: z.string().min(1),
+    /** Event subscriptions a tenant may hold when its limits do not say (`limits.subscriptions`). */
+    defaultSubscriptions: z.coerce.number().int().nonnegative().default(10),
+    /** `development` allows local destinations and `EGRESS_ALLOWED_HOSTS`; `production` (the default) refuses them. */
+    kerbyEnvironment: z.enum(["development", "production"]).default("production"),
+    /** Accept subscriptions to plain http URLs and private addresses, so a local receiver works (development only). */
+    allowLocalDestinations: z.stringbool().default(false),
     /** Model for a conversation whose request names none, `<provider>/<modelId>`. Optional: without it a request names its model. */
     defaultModel: z.string().min(1).optional(),
     /** Providers that need no tenant key, comma separated: only `fake`, in development. */
@@ -72,14 +83,12 @@ const apiConfigSchema = z
     enableEchoTool: z.stringbool().default(false),
     /**
      * The console's public address (`https://console.example.com`): Kerby's OAuth redirect URI and Client ID Metadata
-     * Document live there (ADR 0019). Only OAuth connections to tool servers need it; without it they are refused.
+     * Document live there (ADR 0022). Only OAuth connections to tool servers need it; without it they are refused.
      */
     consolePublicUrl: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.url({ protocol: /^https?$/ }).optional(),
     ),
-    /** `development` allows `EGRESS_ALLOWED_HOSTS`; `production` (the default) refuses it. */
-    kerbyEnvironment: z.enum(["development", "production"]).default("production"),
     /**
      * Host names the egress guard lets through although they resolve to private addresses, comma separated, and from
      * which OAuth accepts plain http: a local MCP server and its authorization server for the proof on the Compose
@@ -101,6 +110,13 @@ const apiConfigSchema = z
       message:
         "EGRESS_ALLOWED_HOSTS is only allowed with KERBY_ENVIRONMENT=development: in production every tenant URL must be public",
       path: ["egressAllowedHosts"],
+    },
+  )
+  .refine(
+    (config) => !(config.allowLocalDestinations && config.kerbyEnvironment === "production"),
+    {
+      message: "ALLOW_LOCAL_DESTINATIONS is only allowed with KERBY_ENVIRONMENT=development",
+      path: ["allowLocalDestinations"],
     },
   );
 

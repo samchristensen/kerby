@@ -1,5 +1,5 @@
 // Where an authorization server sends the person back after they approved (or refused) Kerby: Kerby's OAuth redirect
-// URI (ADR 0019). The person is signed in; the answer is handed to the api in their tenant, which finishes the
+// URI (ADR 0022). The person is signed in; the answer is handed to the api in their tenant, which finishes the
 // connection only if this tenant began it.
 import type { Metadata } from "next";
 import { PageHeader } from "../../../../_components/ui.tsx";

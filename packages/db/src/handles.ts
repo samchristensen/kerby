@@ -65,7 +65,19 @@ export type PoolOptions = {
    * pool (and whoever holds `rawPool`) without a new one. A login refused with 28P01 is retried once. `TenantPools` sets it.
    */
   refreshUrl?: () => Promise<string>;
+  /**
+   * The server ends a session left idle inside a transaction this long, releasing its locks. Unset: never (the control
+   * database's bucket backup holds a transaction, and its advisory lock, for the whole copy on purpose).
+   */
+  idleInTransactionTimeoutMillis?: number;
 };
+
+/**
+ * A tenant database's transactions are short and never wait on anything but the database. One left idle (a process
+ * stalled mid-claim, its socket still open) would otherwise hold its locks, the claim's advisory lock included, until
+ * TCP gives up, and every worker's claim for that tenant would wait behind it.
+ */
+const TENANT_IDLE_IN_TRANSACTION_MS = 60_000;
 
 // packages/durable needs the pool behind a TenantDb for the Absurd client. Nothing else may.
 const pools = new WeakMap<object, pg.Pool>();
@@ -100,6 +112,9 @@ function makeHandle(url: string, options: PoolOptions): Plain {
     idleTimeoutMillis: options.idleTimeoutMillis ?? 10_000,
     // A connect that hangs (a cluster resuming) fails after this and is retried by `withConnectRetry`.
     connectionTimeoutMillis: 30_000,
+    ...(options.idleInTransactionTimeoutMillis === undefined
+      ? {}
+      : { idle_in_transaction_session_timeout: options.idleInTransactionTimeoutMillis }),
   });
   // An idle client dying must not crash the process; the next query opens another.
   pool.on("error", (error: Error) =>
@@ -194,5 +209,8 @@ export function createControlDb(url: string, options: PoolOptions = {}): Closabl
  * `TenantPools`, resolved from a verified API key, and never builds one from a URL it was handed.
  */
 export function createTenantDb(url: string, options: PoolOptions = { max: 2 }): ClosableTenantDb {
-  return makeHandle(url, options) as unknown as ClosableTenantDb;
+  return makeHandle(url, {
+    idleInTransactionTimeoutMillis: TENANT_IDLE_IN_TRANSACTION_MS,
+    ...options,
+  }) as unknown as ClosableTenantDb;
 }

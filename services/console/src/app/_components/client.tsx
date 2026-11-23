@@ -30,8 +30,8 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
   );
 }
 
-/** A value shown once (an API key): monospace, copyable, with a warning. */
-export function SecretReveal({ secret }: { secret: string }) {
+/** A value shown once (an API key, a signing secret): monospace, copyable, with a warning that names it (`noun`). */
+export function SecretReveal({ secret, noun = "key" }: { secret: string; noun?: string }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 rounded-lg border border-line bg-page p-2 pl-3">
@@ -47,8 +47,8 @@ export function SecretReveal({ secret }: { secret: string }) {
         >
           <path d="M8.3 2.9a2 2 0 0 1 3.4 0l6.3 11a2 2 0 0 1-1.7 3H3.7A2 2 0 0 1 2 14l6.3-11ZM10 7a1 1 0 0 0-1 1v3a1 1 0 1 0 2 0V8a1 1 0 0 0-1-1Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" />
         </svg>
-        This key is shown only once. Copy it now and store it somewhere safe; Kerby cannot show it
-        again.
+        This {noun} is shown only once. Copy it now and store it somewhere safe; Kerby cannot show
+        it again.
       </p>
     </div>
   );

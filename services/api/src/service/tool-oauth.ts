@@ -1,4 +1,4 @@
-// Connecting a tool server with OAuth (ADR 0019; MCP authorization, revision 2026-07-28). The console starts a
+// Connecting a tool server with OAuth (ADR 0022; MCP authorization, revision 2026-07-28). The console starts a
 // connection here and sends the person's browser to the authorization server; the browser comes back to the console,
 // which hands the answer here to finish it. Every request to the tenant's server and its authorization server goes
 // through the egress guard. The api seals the tokens and never reads them back: only a worker opens and refreshes them.

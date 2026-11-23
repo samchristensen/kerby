@@ -10,6 +10,9 @@ import {
 } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { type BlockedRange, createEgressFetch } from "@kerby/egress";
+import { createFakeEmbeddings } from "@kerby/embeddings/fake";
+import { createOpenAiEmbeddings } from "@kerby/embeddings-openai";
+import { EMBEDDING_PROVIDERS } from "@kerby/embeddings-openai/providers";
 import { createSystemOneJudgments } from "@kerby/judgment-systemone";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
@@ -129,12 +132,19 @@ async function startWorker(config: WorkerConfig): Promise<{
           : { baseUrl: config.opencodeSystemoneBaseUrl },
       ),
     ],
+    // The development fake model's stack embeds with the fake too, keyless like it; real runs use the tenant's key.
+    embeddings: config.kerbyFakeModel
+      ? [createFakeEmbeddings()]
+      : EMBEDDING_PROVIDERS.map((id) => createOpenAiEmbeddings(id)),
     settings: {
       workerId: config.workerId,
       claimTimeoutSeconds: config.claimTimeoutSeconds,
       defaultMaxConcurrentTurns: config.defaultMaxConcurrentTurns,
       maxRunningTurns: config.maxRunningTurns,
+      maxRunningIndexTasks: config.maxRunningIndexTasks,
+      maxRunningSearches: config.maxRunningSearches,
       sweepIntervalMs: config.sweepIntervalSeconds * 1000,
+      fullSweepIntervalMs: config.fullSweepIntervalSeconds * 1000,
       enableEchoTool: config.enableEchoTool,
       toolCallTimeoutMs: config.toolCallTimeoutMs,
       historyBudgetBytes: config.historyBudgetBytes,

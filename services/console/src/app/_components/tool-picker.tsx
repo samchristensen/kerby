@@ -1,5 +1,5 @@
 "use client";
-// Choosing tools by pattern (ADR 0019), grouped by server: a whole server (`<server>/*`, every tool it enables, as it is
+// Choosing tools by pattern (ADR 0022), grouped by server: a whole server (`<server>/*`, every tool it enables, as it is
 // at each turn) or single tools (`<server>/<tool>`). In a form each checked pattern is a field `tool:<pattern>`.
 import type { AvailableTool } from "@kerby/contracts";
 import { useEffect, useRef, useState } from "react";

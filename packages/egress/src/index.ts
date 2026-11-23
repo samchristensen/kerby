@@ -99,7 +99,7 @@ export type EgressOptions = {
   readonly maxResponseBytes?: number;
   /**
    * Host names (exact, case-insensitive) whose addresses skip the range check: a local MCP server for the proof on the
-   * Compose stack. Development only; the services refuse it outside `KERBY_ENVIRONMENT=development` (ADR 0019). A
+   * Compose stack. Development only; the services refuse it outside `KERBY_ENVIRONMENT=development` (ADR 0022). A
    * redirect away from one is checked like any other hop.
    */
   readonly allowedHosts?: readonly string[];

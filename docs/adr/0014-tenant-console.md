@@ -50,7 +50,9 @@ routes in `src/app`, and its checker needs TypeScript's JavaScript API, which Ty
   (`@kerby/runtime-pi-durable/providers`, imported by `src/index.ts`).
 - **Before sign-in, bounded work**: sign-ups per address per hour (each makes a database; default 5), failed sign-ins
   per address per minute (10) and per account per hour (20). Per process, like the api's limits (`TokenBuckets`, now in
-  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist.
+  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist. Amended 2026-11-23:
+  sign-ins to one account take turns (an address checks four at once) and look at the limits when their turn comes, so
+  concurrent attempts cannot outrun them; a tenant holds at most 50 live API keys.
 - **Hosting.** A Railway service `console` with a generated domain, from the image CI builds (ADR 0011). Control listens on
   `::` so the console reaches it over the private network. `scripts/railway.ts secrets` creates `CONSOLE_TOKEN` and
   `CONSOLE_DATABASE_PASSWORD` once; `domains` adds the public domains; the release runs both.
@@ -106,13 +108,11 @@ call or console). The data is the tenant's, behind the api; the console never op
 
 ## Amendment: integrations and tools (2026-11-23)
 
-ADR 0019. The API keys pages became Integrations (`/dashboard/integrations`): a person names an integration, gives it a
-role (`admin`, or `restricted` to conversations and judgments with only the tools granted to it), makes and revokes its
-keys, renames or archives it (archiving revokes its keys). The console writes `integrations` and the keys' `integration_id`
-directly, as it did keys (`kerby_console` gained `select`, `insert` and `update (name, role, updated_at, archived_at)` on
-`integrations` and `integration_id` on `api_keys`). Tools live in the tenant's database, so the console reaches them through
+[ADR 0022](0022-tools.md). Integrations, their scopes, keys and subscriptions are ADR
+[0020](0020-integrations-and-scopes.md)'s pages; an integration's page gains a tools card: its tool grants, or, for an
+integration holding `admin`, a note that it may use every enabled tool. Tools live in the tenant's database, so the console reaches them through
 the api with the person's session token, like the Studio: `/dashboard/tools` (servers, their status and listing, the
-credential, enabling, effect, drift review, the integrations granted), a restricted integration's tool grants, and a tool
+credential, enabling, effect, drift review, the integrations granted), an integration's tool grants, and a tool
 picker on a new chat and in a chat prompt's draft. A credential is never shown back.
 
 ## Consequences

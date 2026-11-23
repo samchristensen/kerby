@@ -1,4 +1,4 @@
-// Kerby's own tools (ADR 0019): served from code by the reserved server `kerby`, so they have no `tools` rows and need
+// Kerby's own tools (ADR 0022): served from code by the reserved server `kerby`, so they have no `tools` rows and need
 // no enabling, but a grant and a conversation's pattern like any other. A worker runs them; it offers each only when it
 // can (`judge` needs the tenant's key for the default judgment provider, `echo` is for development).
 import { DEFAULT_JUDGMENT_MODEL, type ToolDefinition, type ToolEffect } from "@kerby/contracts";

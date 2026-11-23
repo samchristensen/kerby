@@ -39,7 +39,7 @@ const ChatPromptBodySchema = z.object({
   /** `<provider>/<model>`; without one, a conversation gets the deployment's default model. */
   model: ModelId.exactOptional(),
   guardrails: GuardrailsSchema.default([]),
-  /** The tools a conversation from it may call (ADR 0019); resolved when the conversation is made. */
+  /** The tools a conversation from it may call (ADR 0022); resolved when the conversation is made. */
   tools: ToolSelectionSchema.default([]),
   /** Every `{{name}}` in the text, declared once; a published version declares exactly the names its text uses. */
   variables: z

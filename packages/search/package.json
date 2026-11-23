@@ -1,0 +1,16 @@
+{
+  "name": "@kerby/search",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/agent": "workspace:*",
+    "@kerby/contracts": "workspace:*",
+    "@kerby/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@kerby/conversations": "workspace:*"
+  }
+}

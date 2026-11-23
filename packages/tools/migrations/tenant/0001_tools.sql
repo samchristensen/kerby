@@ -1,4 +1,4 @@
--- Tools (ADR 0019): the tenant's remote MCP servers, the tools each one lists, which integrations may use them, and the
+-- Tools (ADR 0022): the tenant's remote MCP servers, the tools each one lists, which integrations may use them, and the
 -- tools each conversation names. Grants and conversation tools hold server ids, never slugs, so a server deleted and
 -- made again under the same slug inherits neither. Integrations live in the control plane, so `integration_id` has no
 -- foreign key here; a server's deletion takes its grants and conversation tools with it.

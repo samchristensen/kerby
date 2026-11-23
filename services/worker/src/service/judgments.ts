@@ -4,9 +4,10 @@
 import { DEFAULT_JUDGMENT_MODEL, parseModelId } from "@kerby/contracts";
 import { hasModelKey, recordUsage } from "@kerby/control-plane";
 import type { TenantContext } from "@kerby/db";
-import type { RunContext, TaskParams } from "@kerby/durable";
+import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
+import { announceEvents, type NewEvent, notifyDispatchers, recordEvent } from "@kerby/events";
 import type { JudgmentOutcome, JudgmentRequest } from "@kerby/judgment";
-import { log } from "@kerby/observability";
+import { errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
 
 /** The agent's `judge` tool for one conversation: each call is its own judgment. */
@@ -86,9 +87,42 @@ export async function runJudgmentTask(
     state: params.state,
     questions: params.questions,
   };
-  const outcome = await run.step("judge", () =>
-    runJudgment(deps, ctx.tenantId, `judgment:${run.taskId}`, request, run.signal),
-  );
+  /** The judgment's one outcome event, fenced: a run that lost its task records nothing. */
+  const record = async (event: NewEvent): Promise<void> => {
+    const recorded = await ctx.db.transaction(
+      async (tx) => (await holdsRun(tx, run)) && (await recordEvent(tx, event)),
+    );
+    if (recorded) await announceEvents(ctx.db);
+    await notifyDispatchers(deps.control, ctx.tenantId);
+  };
+  const common = {
+    integrationId: params.integrationId,
+    dedupeKey: `judgment:${run.taskId}:outcome`,
+  };
+  let outcome: JudgmentOutcome;
+  try {
+    outcome = await run.step("judge", () =>
+      runJudgment(deps, ctx.tenantId, `judgment:${run.taskId}`, request, run.signal),
+    );
+  } catch (error) {
+    if (run.maxAttempts !== null && run.attempt >= run.maxAttempts) {
+      // runJudgment already scrubbed the key from what it throws; bounded: a provider's error can be long.
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+      await record({
+        ...common,
+        type: "judgment.failed",
+        data: { judgmentId: run.taskId, error: message },
+      }).catch((recordError: unknown) => {
+        log("warn", "could not record a failed judgment", errorFields(recordError));
+      });
+    }
+    throw error;
+  }
+  await record({
+    ...common,
+    type: "judgment.completed",
+    data: { judgmentId: run.taskId, status: outcome.type === "refused" ? "refused" : "answered" },
+  });
   log("info", "judgment completed", {
     outcome: outcome.type,
     questions: Object.keys(request.questions).length,

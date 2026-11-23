@@ -1,4 +1,4 @@
-// A turn's tools (ADR 0019): the tools its conversation names that are enabled, not removed and available now, each
+// A turn's tools (ADR 0022): the tools its conversation names that are enabled, not removed and available now, each
 // shown to the model with the definition an admin approved (the pinned one). Kerby's own run here; a tenant's remote
 // tools through its MCP server, one session per server per run, behind the egress guard.
 import type { ContentPart, ToolCall, ToolResult, ToolSpec } from "@kerby/agent";

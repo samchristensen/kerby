@@ -1,4 +1,4 @@
-// The tool registry (ADR 0019): servers, the tools they list, grants and the tools each conversation names. Everything
+// The tool registry (ADR 0022): servers, the tools they list, grants and the tools each conversation names. Everything
 // refers to a server by id; slugs appear only at the edges (patterns in, patterns out). The model only ever sees a
 // `pinned` definition, which an admin enabled or accepted: `recordSync` keeps that true for every listing.
 import { createHash } from "node:crypto";
@@ -357,7 +357,7 @@ function checkListing(
 }
 
 /**
- * Store what a worker found listing a server, in one transaction (ADR 0019). A new tool arrives disabled, pinned to
+ * Store what a worker found listing a server, in one transaction (ADR 0022). A new tool arrives disabled, pinned to
  * what was listed; a disabled tool's pinned definition follows the listing; an enabled tool whose definition changed
  * keeps its pinned one (drifted) until an admin accepts the new one; a tool missing from the listing is marked
  * removed, and a removed one that is listed again comes back with its settings. A listing of more than
@@ -474,7 +474,7 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** A tool's `listedHash` (ADR 0019): SHA-256, in hex, of the definition's canonical JSON. */
+/** A tool's `listedHash` (ADR 0022): SHA-256, in hex, of the definition's canonical JSON. */
 export function definitionHash(definition: ToolDefinition): string {
   return createHash("sha256").update(canonicalJson(definition)).digest("hex");
 }

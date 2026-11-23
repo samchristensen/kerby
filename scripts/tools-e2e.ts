@@ -1,7 +1,7 @@
-// The proof of ADR 0019 on the real Compose stack. An MCP server on this machine (the test fixture) is registered by an
+// The proof of ADR 0022 on the real Compose stack. An MCP server on this machine (the test fixture) is registered by an
 // admin key, listed by a worker through the egress guard (compose lets `host.docker.internal` through, development only),
-// one tool is enabled and granted to a restricted integration, and that integration's conversation calls it. A
-// conversation naming an ungranted tool is refused, as is the restricted key posting to an admin's conversation that
+// one tool is enabled and granted to an integration without `admin` (ADR 0020), and that integration's conversation
+// calls it. A conversation naming an ungranted tool is refused, as is that key posting to an admin's conversation that
 // names one. A tool whose definition changes keeps showing the model the pinned one until an admin accepts the change.
 // Run with `make tools-e2e`. On Linux the fixture must be reachable from containers at host.docker.internal (it listens
 // on 127.0.0.1, which Docker Desktop forwards; a Linux bridge does not).
@@ -112,14 +112,18 @@ async function main(): Promise<void> {
   const tenants = operator("GET", "/tenants").tenants as { id: string; name: string }[];
   const tenantId = tenants.find((t) => t.name === "default")?.id;
   check(tenantId, "found the default tenant");
-  const integration = operator("POST", `/tenants/${tenantId}/integrations`, {
-    name: `support bot ${Date.now()}`,
-    role: "restricted",
-  }).integration as { id: string };
+  // Made as the console does (the api has no route that makes one), with `tenant` so it sees an admin's conversation
+  // and the grant check is what stops it; its key through the operator API.
+  const sql = `insert into integrations (tenant_id, name, scopes)
+    values ('${tenantId}', 'support bot ${Date.now()}', array['conversations', 'tenant']) returning id`;
+  const integrationId = compose(
+    ...["exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "kerby_control", "-tAc", sql],
+  ).split("\n")[0];
+  check(integrationId, "made an integration with conversations and tenant (no admin)");
   const restricted = client(
-    String(operator("POST", `/tenants/${tenantId}/keys`, { integrationId: integration.id }).secret),
+    String(operator("POST", `/tenants/${tenantId}/keys`, { integrationId }).secret),
   );
-  check(true, "made a restricted integration and a key for it");
+  check(true, "made a key for it through the operator API");
 
   const slug = `crm${Date.now() % 100000}`;
   const created = await admin("POST", "/v1/tool-servers", { slug, url: serverUrl });
@@ -143,19 +147,16 @@ async function main(): Promise<void> {
         200,
       `an admin enabled ${name}`,
     );
-  const granted = await admin("PUT", `/v1/integrations/${integration.id}/tools`, {
+  const granted = await admin("PUT", `/v1/integrations/${integrationId}/tools`, {
     tools: [`${slug}/lookup`],
   });
-  check(
-    granted.status === 200,
-    `granted ${slug}/lookup, and only it, to the restricted integration`,
-  );
+  check(granted.status === 200, `granted ${slug}/lookup, and only it, to the integration`);
 
   const available = await restricted("GET", "/v1/tools");
   check(
     JSON.stringify((available.body.tools as { pattern: string }[]).map((t) => t.pattern)) ===
       JSON.stringify([`${slug}/lookup`]),
-    "the restricted key sees only the tool it was granted",
+    "the integration's key sees only the tool it was granted",
   );
   const refused = await restricted("POST", "/v1/conversations", { tools: [`${slug}/*`] });
   check(
@@ -169,12 +170,16 @@ async function main(): Promise<void> {
     { content: `call ${slug}__refund {}` },
   );
   check(
-    intruded.status === 403,
-    "the restricted key cannot post to an admin's conversation that names an ungranted tool",
+    intruded.status === 403 &&
+      (intruded.body.error as { code: string }).code === "tool_not_granted",
+    "the integration's key cannot post to an admin's conversation that names an ungranted tool",
   );
 
   const conversation = await restricted("POST", "/v1/conversations", { tools: [`${slug}/lookup`] });
-  check(conversation.status === 201, "the restricted key started a conversation naming its tool");
+  check(
+    conversation.status === 201,
+    "the integration's key started a conversation naming its tool",
+  );
   const conversationId = String(conversation.body.id);
   const answer = async (content: string, count: number) => {
     const posted = await restricted("POST", `/v1/conversations/${conversationId}/messages`, {

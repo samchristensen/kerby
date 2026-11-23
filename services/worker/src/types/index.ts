@@ -2,9 +2,10 @@ import type { AgentRuntime } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import type { ControlDb, TenantPools } from "@kerby/db";
 import type { EgressFetch } from "@kerby/egress";
+import type { EmbeddingProvider } from "@kerby/embeddings";
 import type { JudgmentProvider } from "@kerby/judgment";
 
-/** Tool servers' sealed credentials (ADR 0019), opened inside the step that uses them. */
+/** Tool servers' sealed credentials (ADR 0022), opened inside the step that uses them. */
 export type ToolCredentials = {
   read(tenantId: string, serverId: string): Promise<string | undefined>;
   /**
@@ -27,6 +28,8 @@ export type WorkerDeps = {
   runtime: AgentRuntime;
   /** The judgment providers behind the port (ADR 0015), by the provider id in a model id: only `src/index.ts` knows which. */
   judgments: readonly JudgmentProvider[];
+  /** The embedding providers behind the port (ADR 0021), by the provider id in a model id: only `src/index.ts` knows which. */
+  embeddings: readonly EmbeddingProvider[];
   /**
    * A tenant's own model key for a provider, opened (bring your own key). Undefined only for the development fake
    * model, which needs no key; every real run requires one.
@@ -47,7 +50,14 @@ export type WorkerDeps = {
     defaultMaxConcurrentTurns: number;
     /** Turns this worker runs at once across every tenant (`MAX_RUNNING_TURNS`); bounds its tenant pools. */
     maxRunningTurns: number;
+    /** Index tasks this worker runs at once across every tenant (`MAX_RUNNING_INDEX_TASKS`); 1 per tenant. */
+    maxRunningIndexTasks: number;
+    /** Searches this worker runs at once across every tenant (`MAX_RUNNING_SEARCHES`); 4 per tenant. */
+    maxRunningSearches: number;
+    /** Look at the tenants whose work is due (`SWEEP_INTERVAL_SECONDS`). */
     sweepIntervalMs: number;
+    /** Look at every active tenant, the backstop for a lost hint (`FULL_SWEEP_INTERVAL_SECONDS`). */
+    fullSweepIntervalMs: number;
     /** Offer the built-in `kerby/echo` to conversations that name it (development). */
     enableEchoTool: boolean;
     /** One call to a tenant's MCP tool, at most; past it the model reads an error result. */

@@ -1,4 +1,4 @@
--- OAuth connections to tool servers (ADR 0019, MCP's authorization spec). A server with `auth = 'oauth'` is connected
+-- OAuth connections to tool servers (ADR 0022, MCP's authorization spec). A server with `auth = 'oauth'` is connected
 -- once for the whole tenant from the console; its tokens are sealed in the control plane as `tool-credential/<id>`, like
 -- a header's value. `auth_scope` is the scope to ask for (null: what the server's challenge or metadata names).
 alter table tool_servers drop constraint tool_servers_auth_check;

@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   };
 
-  // Tools are never implied (ADR 0019): the conversation names the built-in echo the fake model asks for.
+  // Tools are never implied (ADR 0022): the conversation names the built-in echo the fake model asks for.
   const created = await call("POST", "/v1/conversations", { tools: ["kerby/echo"] });
   check(created.status === 201, "created a conversation that names kerby/echo");
   check(

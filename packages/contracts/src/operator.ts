@@ -1,6 +1,5 @@
 // The operator API (services/control), behind the operator token. Never exposed to tenants.
 import { z } from "zod";
-import { type Integration, IntegrationNameSchema, IntegrationRoleSchema } from "./integrations.ts";
 
 /**
  * Per-tenant limits. An absent key takes the deployment default (the worker's or the api's config); the numbers are
@@ -19,6 +18,10 @@ export const LimitsSchema = z.object({
    * `DEFAULT_STORAGE_BYTES`, 1 GiB). A turn already admitted finishes even if its answer goes over.
    */
   storageBytes: z.number().int().positive().optional(),
+  /** Event subscriptions the tenant may hold (default the api's `DEFAULT_SUBSCRIPTIONS`, 10; ADR 0019). */
+  subscriptions: z.number().int().nonnegative().optional(),
+  /** Deliveries in flight at once for this tenant (default the dispatcher's `DEFAULT_CONCURRENT_DELIVERIES`, 4). */
+  concurrentDeliveries: z.number().int().positive().optional(),
 });
 export type Limits = z.infer<typeof LimitsSchema>;
 
@@ -38,7 +41,7 @@ export type Tenant = z.infer<typeof TenantSchema>;
 
 const ApiKeySchema = z.object({
   id: z.string(),
-  /** The integration the key belongs to; the key may do what its role allows (ADR 0019). */
+  /** The integration the key acts for (ADR 0020). */
   integrationId: z.uuid(),
   label: z.string(),
   createdAt: z.iso.datetime(),
@@ -68,18 +71,11 @@ const CreateTenantResponseSchema = z.object({
 });
 export type CreateTenantResponse = z.infer<typeof CreateTenantResponseSchema>;
 
+/** A key for `integrationId`, or for the tenant's `default` integration. */
 export const CreateKeyRequestSchema = z.object({
   label: z.string().max(100).optional(),
-  /** One of the tenant's live integrations (default: its `default` integration). */
   integrationId: z.uuid().optional(),
 });
-
-/** `POST /v1/operator/tenants/:id/integrations`. */
-export const CreateIntegrationRequestSchema = z.object({
-  name: IntegrationNameSchema,
-  role: IntegrationRoleSchema,
-});
-export type CreateIntegrationResponse = { integration: Integration };
 
 const CreateKeyResponseSchema = z.object({ apiKey: ApiKeySchema, secret: z.string() });
 export type CreateKeyResponse = z.infer<typeof CreateKeyResponseSchema>;

@@ -1,4 +1,4 @@
-// Tools (ADR 0019): the tenant's tool servers, their tools, integrations' grants, and what a caller may name. Every
+// Tools (ADR 0022): the tenant's tool servers, their tools, integrations' grants, and what a caller may name. Every
 // change that could alter what a server lists enqueues a `sync-tool-server` task in the same tenant transaction; only
 // a worker lists tools. A credential is sealed into the control plane before that transaction commits, so the worker
 // never lists without it, and never comes back out.
@@ -31,6 +31,7 @@ import {
   getIntegration,
   hasModelKey,
   hasToolCredential,
+  hintTenantWork,
   listIntegrations,
   putToolCredential,
 } from "@kerby/control-plane";
@@ -112,10 +113,18 @@ async function withoutUnavailable(
   return kept;
 }
 
-/** What the caller holds: every tool for an admin (and a console session), its grants for a restricted key. */
+/**
+ * Whether the caller may name every enabled tool: an integration with `admin`, or a console session (which acts as the
+ * tenant, ADR 0020). Any other integration holds only its grants.
+ */
+export const holdsEveryTool = (principal: Principal): boolean =>
+  principal.integrationId === null || principal.scopes.has("admin");
+
+/** What the caller holds: every tool, or its integration's grants. */
 async function holdings(db: TenantQueryable, principal: Principal): Promise<ToolRef[] | "all"> {
-  if (principal.role === "admin") return "all";
-  return principal.integrationId === null ? [] : getGrants(db, principal.integrationId);
+  const { integrationId } = principal;
+  if (integrationId === null || principal.scopes.has("admin")) return "all";
+  return getGrants(db, integrationId);
 }
 
 /** Refuse when the caller's grants do not cover every one of `refs`. No refs: nothing to hold, and no query. */
@@ -252,12 +261,15 @@ export async function serverResource(
   ctx: TenantContext,
   server: ToolServerRecord,
 ): Promise<ToolServer> {
-  const [tools, grants, hasCredential] = await Promise.all([
+  const [tools, grants, hasCredential, integrations] = await Promise.all([
     listTools(ctx.db, server.id),
     listServerGrants(ctx.db, server.id),
     credentialOf(deps, ctx.tenantId, server),
+    listIntegrations(deps.control, ctx.tenantId),
   ]);
   const live = tools.filter((tool) => tool.removedAt === null);
+  // A deleted integration's grants stay behind, inert (it has no live key): they are not shown.
+  const liveIntegrations = new Set(integrations.map((integration) => integration.id));
   return {
     ...summary(
       server,
@@ -269,10 +281,12 @@ export async function serverResource(
       hasCredential,
     ),
     tools: tools.map((tool) => toolResource(server.slug, tool)),
-    grantedTo: grants.map((grant) => ({
-      integrationId: grant.integrationId,
-      pattern: toolPattern(server.slug, grant.tool),
-    })),
+    grantedTo: grants
+      .filter((grant) => liveIntegrations.has(grant.integrationId))
+      .map((grant) => ({
+        integrationId: grant.integrationId,
+        pattern: toolPattern(server.slug, grant.tool),
+      })),
   };
 }
 
@@ -304,14 +318,11 @@ export async function getTenantToolServer(
 export const enqueueSync = (tx: TenantTx, serverId: string) =>
   spawnInTx(tx, "sync-tool-server", { serverId }, { idempotencyKey: `sync:${randomUUID()}` });
 
-/** Tell the workers there is work for this tenant; the sweep finds it if this is lost. */
+/** Mark the tenant due and ring the workers (ADR 0004's wake-ups); the full sweep finds the sync if this is lost. */
 export const notifyWorkers = (deps: ApiDeps, tenantId: string) =>
-  deps.control
-    .query("select pg_notify('tenant_work', $1)", [tenantId])
-    .then(() => undefined)
-    .catch((error: unknown) => {
-      log("warn", "could not notify workers; the sweep will find the sync", errorFields(error));
-    });
+  hintTenantWork(deps.control, tenantId).catch((error: unknown) => {
+    log("warn", "could not hint workers; the full sweep will find the sync", errorFields(error));
+  });
 
 const authDetail = (auth: ToolServerAuth) => ({
   auth: auth.kind,
@@ -550,7 +561,7 @@ export async function listTenantIntegrations(
     integrations: integrations.map((integration) => ({
       id: integration.id,
       name: integration.name,
-      role: integration.role,
+      scopes: integration.scopes,
       createdAt: integration.createdAt.toISOString(),
     })),
   };

@@ -99,7 +99,7 @@ as TypeSafe's, with the tenant's OpenCode key and its own model ids: `jev-1.14`,
 
 ## Amendment: `judge` is offered only when named (2026-11-23)
 
-Tools are never implied (ADR 0019): the agent's tool is `kerby/judge`, a built-in of the reserved server `kerby`, offered
+Tools are never implied (ADR 0022): the agent's tool is `kerby/judge`, a built-in of the reserved server `kerby`, offered
 only to a conversation (or chat prompt) that names it, and still only when the tenant holds a key for the default judgment
-provider. Naming it without that key is 400 `unknown_tool` at creation; a key removed since leaves it out of the turn. A
-restricted integration needs it granted like any tool. The model calls it `kerby__judge`.
+provider. Naming it without that key is 400 `unknown_tool` at creation; a key removed since leaves it out of the turn. An
+integration without `admin` needs it granted like any tool. The model calls it `kerby__judge`.

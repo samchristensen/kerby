@@ -20,11 +20,23 @@ export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun
   );
   // Roles made before connection limits existed get theirs now (idempotent).
   for (const tenant of tenants) await deps.cluster.limitRoleConnections(tenant.dbRole);
-  const result = await migrateTenants(
-    deps.pools,
-    tenants.map((t) => t.id),
-    tenantMigrationDirs,
-  );
+  // A tenant role may not create pgvector's `vector` (not a trusted extension, ADR 0021): install it as the admin
+  // first. A database that cannot take it is reported with the failed migrations and not migrated.
+  const ready: string[] = [];
+  const unprepared: { tenantId: string; error: Error }[] = [];
+  for (const tenant of tenants) {
+    try {
+      await deps.cluster.ensureExtension(tenant.dbName, "vector");
+      ready.push(tenant.id);
+    } catch (error) {
+      unprepared.push({
+        tenantId: tenant.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+  const fanOut = await migrateTenants(deps.pools, ready, tenantMigrationDirs);
+  const result = { migrated: fanOut.migrated, failed: [...unprepared, ...fanOut.failed] };
   const version = currentSchemaVersion();
   for (const tenantId of result.migrated) await setSchemaVersion(deps.control, tenantId, version);
   await audit(deps.control, {

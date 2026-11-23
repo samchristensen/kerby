@@ -1,4 +1,4 @@
-// Tools (ADR 0019): the tenant's remote MCP servers, the tools each lists, which integrations may use them, and the
+// Tools (ADR 0022): the tenant's remote MCP servers, the tools each lists, which integrations may use them, and the
 // patterns conversations and prompts name them by. A pattern is `<server>/<tool>` or `<server>/*`; the model sees a
 // tool as `<server>__<tool>`. The server `kerby` is reserved: Kerby's own tools, served from code.
 import { z } from "zod";
