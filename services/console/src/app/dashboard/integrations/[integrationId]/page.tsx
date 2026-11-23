@@ -40,7 +40,6 @@ export default async function IntegrationPage({
       <div className="space-y-6">
         <Card title="Settings">
           <IntegrationSettingsForm
-            key={integration.updatedAt}
             action={updateIntegrationAction.bind(null, integration.id)}
             name={integration.name}
             role={integration.role}
