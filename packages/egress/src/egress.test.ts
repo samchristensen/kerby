@@ -224,6 +224,21 @@ describe("egress guard: refusals", () => {
     });
   });
 
+  it("lets a named host through, and only that host, even when it redirects", async () => {
+    const named = createEgressFetch({
+      allowedHosts: ["MCP-Fixture"],
+      resolve: async () => [{ address: "127.0.0.1", family: 4 }],
+    });
+    expect(await (await named(`http://mcp-fixture:${port}/hello`)).text()).toBe("hello");
+    await expect(named(`http://other.invalid:${port}/hello`)).rejects.toMatchObject({
+      reason: "blocked_address",
+    });
+    const to = encodeURIComponent("http://169.254.169.254/latest/meta-data/");
+    await expect(named(`http://mcp-fixture:${port}/redirect?to=${to}`)).rejects.toMatchObject({
+      reason: "blocked_address",
+    });
+  });
+
   it("refuses endless redirects and redirect: error", async () => {
     await expect(local({ maxRedirects: 3 })(`${origin}/loop`)).rejects.toMatchObject({
       reason: "too_many_redirects",
