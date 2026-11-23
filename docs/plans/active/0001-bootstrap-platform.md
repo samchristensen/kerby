@@ -8,6 +8,7 @@ Decisions: ADRs 0001-0004.
 
 - Pricing model and billing provider. Blocks M9.
 - ~~Hosted deployment target~~ Decided: Railway, ADR 0007, `scripts/railway.ts`; deployed and smoke-tested. Still open: Postgres backups and `max_connections` (tech debt), and a real model turn once a provider key is set.
+- How M7's proof on the real stack reaches an MCP server the egress guard lets through: a public test server, or a development-only allowance refused elsewhere (like `KERBY_FAKE_MODEL`). Blocks M7's proof (ADR 0019).
 
 ## Milestones
 
@@ -62,10 +63,17 @@ Decisions: ADRs 0001-0004.
 - [x] Fair scheduling: a noisy tenant at its limit does not delay another (test); N-tenant load run against S4/S5 numbers
 - [x] Suspended tenant is refused within the auth cache TTL
 
-### M7 Tools
+### M7 Tools (ADR 0019)
 
-- [ ] Per-tenant tool registry (MCP URL plus auth) with credentials in `secrets`; every call through `egress`
-- [ ] `executeTool` as a keyed step; the interrupted-write rule from lochmoore
+- [ ] Integrations: `integrations` in the control plane owns every key (`admin` or `restricted`); existing keys move to an `admin` integration `default`; provisioning, operator, console and rotation make keys inside one; the api refuses `restricted` on configuration routes (403)
+- [ ] Interrupted-write rule: a `write` tool whose step finds an earlier execution reports the interruption instead of running again; `ToolSpec.readOnly` from the tool's effect
+- [ ] Registry: `packages/tools` (tenant `tool_servers`, `tools`, `integration_tools`), credentials sealed as `tool-credential/<serverId>`, routes `/v1/tool-servers`, `/v1/integrations/:id/tools`, `/v1/tools`, audit
+- [ ] `packages/mcp` over the egress `fetch` (client chosen with an ADR 0005 line) and the `sync-tool-server` task: new tools disabled, enabled definitions pinned, drift flagged and accepted by an admin
+- [ ] Explicit tools: `tools` on conversations and chat prompts, none by default, resolved to server ids; creating or posting needs a grant for every one (403 `tool_not_granted`); built-ins as `kerby/judge` and `kerby/echo`, no implicit offer
+- [ ] The worker calls remote tools: the turn's tools (at most 64), egress with a per-call deadline, result cap, no client capabilities, credential scrubbed from errors
+- [ ] Console: Integrations in place of API keys (role, keys, grants); Tools pages (servers, credential, sync, enable, effect, drift review); a tool picker in chat and the Studio
+- [ ] Proof on the real stack: a restricted integration's conversation calls a registered MCP server; a post naming an ungranted tool is refused; a drifted definition never reaches the model
+- [ ] OAuth (tenant-wide) per MCP authorization: console callback, PKCE, `resource`, issuer check, Client ID Metadata Document with dynamic registration as fallback; the worker refreshes under a row lock
 
 ### M8 Limits and operations
 
@@ -77,7 +85,7 @@ Decisions: ADRs 0001-0004.
 - [ ] Plans and limits as data; billing integration; usage visible to the tenant
 - [x] Tenant console: sign-up, sign-in, API keys, model keys (BYO), on Railway with a public domain (`services/console`, ADR 0014)
 - [x] Tenant console: chat in the browser and every conversation of the tenant browsable, API-made ones included (ADR 0014, amendment)
-- [ ] Tenant console: tools (after M7), usage; email verification and password reset (tech debt)
+- [ ] Tenant console: usage; email verification and password reset (tech debt). Tools are in M7.
 - [ ] Audit log, including operator access to a tenant; verified export and deletion; optional per-tenant bucket
 - [ ] Not code, but required before selling: terms, DPA, security posture page, incident process
 
@@ -121,3 +129,4 @@ Decisions: ADRs 0001-0004.
 - 2026-11-22 Judgments (ADR 0015, proposed): a provider-agnostic port for TypeSafe's Jev-style typed decisions. `packages/judgment` (types: `Question` noul/choice/score, `Answer` with probabilities, `JudgmentProvider`, `JudgmentOutcome` answered/refused), `packages/judgment-typesafe` (`fetch` to `POST /v1/systemone`; refuses 4xx on the merits, throws 408/409/429/5xx and transport errors, never follows a redirect, clamps probabilities), zod mirrors in `contracts` (bounds: 32 questions, 10 score levels, 255 options, depth 32, no `__proto__`). Tenant BYOK: `typesafe` is a key provider next to the chat ones (`judgmentProviders` beside `modelProviders` in api and console; a judgment provider cannot be a conversation's model). `POST /v1/judgments` (202) enqueues a `run-judgment` task on the `turns` queue (counts against `maxConcurrentTurns`), a worker opens the key and stores the outcome as the task's result (`TaskHandlers` may now return one; `readTask` reads it), `GET /v1/judgments/:id`. The agent gets a `judge` tool when the tenant has a key. Usage rows `judgment:<taskId>`. No table, no dev fake (`TYPESAFE_BASE_URL` for stand-ins). Open: a queue of its own if judgments starve turns; sync answers.
 - 2026-11-22 Guardrails and OpenCode decision models (ADR 0016, ADR 0015 amendment, both proposed). Guardrails: `guardrails` on `POST /v1/conversations` (yes/no conditions on a user message or a tool call, `blockAt` 0.8, optional `model`; tenant migration `0004_guardrails.sql`), checked in the worker before the model runs (user message: step `guardrail:user_message`, flagged refusal persisted, `readHistory` skips flagged rows; tool call: inside its step, never runs when blocked); fail closed. OpenCode: `packages/judgment-typesafe` became `packages/judgment-systemone` (`createSystemOneJudgments("typesafe" | "opencode")`, same wire format, OpenCode's gateway `opencode.ai/inference/systemone`); `opencode` is both a chat and a decision provider and one key serves both (console shows chat/decisions per key, lists it once; api refuses only judgment-only providers as a conversation's model); choose it by model id (`opencode/jev-1.14`) per request, guardrail or `judge` call. Not verified against the live OpenCode gateway (no key): endpoint and wire format are from its docs.
 - 2026-11-23 The trace (ADR 0018, proposed): every complete event a run reports is kept beside the messages. `AgentEvent` gains `thinking_delta` (live only) and `thinking_end` (a complete block, `redacted` when withheld); the Pi adapter maps Pi's `thinking_*` changes (`ThinkingForwarder`). The worker's `TraceRecorder` buffers `run_start`, `message_start`, `thinking_end`, `tool_start`, `tool_end`, `run_end` plus a pointer per persisted message and a `run_error`, and stores a segment (S3 object, kind `trace`, and a `trace_segments` row; tenant migration `conversations/0006_trace.sql`) after each persisted message, at `tool_start`, `tool_end` and `run_end`; a failed write fails the turn, it is not fenced and never read to resume. Owner's calls: completed blocks only (no deltas stored), S3 segments plus Postgres index, fail the step, reasoning hidden from the live stream unless `?include=thinking`. `GET /v1/conversations/:id/trace?after&limit`. The dev fake model takes `[think:<text>]`. Smoke on a separate Compose project (`kerby-smoke`): the default stream has no reasoning, `include=thinking` adds `thinking_delta` and `thinking_end`, the trace holds one ordered run, and `docker kill` of the worker mid-turn leaves attempt 1's entries and attempt 2's apart. The smoke found a bug the tests missed: `select id::text ... order by id` sorts by the text output column, so past ten segments the trace came back as 1, 10, 11, 12, 2 ...; fixed (output column renamed, `order by trace_segments.id`) with a twelve-segment regression test. Not built: a console view of the trace, a per-tenant or per-conversation default for `include`.
+- 2026-11-23 Tools designed (ADR 0019, proposed); nothing built. Owner's calls: an integration holds grants and owns keys, so rotation stays inside it; a conversation gets only the tools it names; an enabled tool whose definition changes stays pinned and is flagged; one credential per server for the tenant, header auth first, OAuth next, an MCP gateway later under its own ADR. Found on the way: every key can do everything, any key may post to any conversation, the api cannot open a credential to list tools, and a crashed tool step runs the tool again (`recordToolExecution`'s count is ignored in `turn.ts`). M7 rewritten from it; console tools moved from M9 into M7.
