@@ -10,6 +10,7 @@ export const SUPPORTED_PROVIDERS = [
   "groq",
   "mistral",
   "openai",
+  "opencode",
   "openrouter",
   "together",
   "xai",
