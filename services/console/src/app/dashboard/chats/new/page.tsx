@@ -10,9 +10,10 @@ export const metadata: Metadata = { title: "New chat" };
 export default async function NewChatPage() {
   const access = await requireChatAccess();
   const service = consoleService();
-  const [providers, prompts] = await Promise.all([
+  const [providers, prompts, tools] = await Promise.all([
     service.providers(access.session),
     service.prompts(access, "chat"),
+    service.availableTools(access),
   ]);
   return (
     <Workspace>
@@ -21,6 +22,7 @@ export default async function NewChatPage() {
         providers={providers.filter((p) => p.configured && p.chat).map((p) => p.id)}
         // Only a published prompt can start a chat: a draft is tried in the Studio's playground.
         prompts={prompts.filter((p) => p.latestVersion !== null)}
+        tools={tools}
       />
     </Workspace>
   );

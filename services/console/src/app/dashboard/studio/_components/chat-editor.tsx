@@ -1,9 +1,10 @@
 "use client";
-// A chat prompt's draft: its markdown text, model, guardrails, and a variables table kept in step with the text's
+// A chat prompt's draft: its markdown text, model, guardrails, tools, and a variables table kept in step with the text's
 // `{{names}}` (the server parses them, as it will when the prompt is used).
-import type { ChatPromptBody } from "@kerby/contracts";
+import type { AvailableTool, ChatPromptBody } from "@kerby/contracts";
 import { useEffect, useRef, useState } from "react";
 import { MarkdownEditor } from "../../../_components/markdown-editor.tsx";
+import { ToolPicker } from "../../../_components/tool-picker.tsx";
 import { buttonStyles, Card } from "../../../_components/ui.tsx";
 import { templateVariablesAction } from "../actions.ts";
 import { DraftBar } from "./draft-bar.tsx";
@@ -48,14 +49,18 @@ export function ChatDraftEditor({
   revision,
   draft,
   providers,
+  tools,
 }: {
   name: string;
   revision: number;
   draft: ChatPromptBody;
   providers: string[];
+  /** The enabled tools the draft may name. */
+  tools: AvailableTool[];
 }) {
   const [text, setText] = useState(draft.text);
   const [model, setModel] = useState(draft.model ?? "");
+  const [toolPatterns, setToolPatterns] = useState(draft.tools);
   const [guardrails, setGuardrails] = useState(() => draft.guardrails.map(toRow));
   const [names, setNames] = useState(() => draft.variables.map((v) => v.name));
   // By name, so a variable's description survives the text dropping it for a moment.
@@ -117,7 +122,12 @@ export function ChatDraftEditor({
           ...(row.criteria ? { criteria: row.criteria } : {}),
         };
       }),
-      tools: draft.tools,
+      // A tool under a whole server picked too is covered by it.
+      tools: toolPatterns.filter(
+        (pattern) =>
+          pattern.endsWith("/*") ||
+          !toolPatterns.includes(`${pattern.slice(0, pattern.indexOf("/"))}/*`),
+      ),
       variables: current.map((variable) => {
         const row = variables[variable];
         return {
@@ -224,6 +234,21 @@ export function ChatDraftEditor({
             ? `Keys on file for: ${providers.join(", ")}. Leave blank for the workspace default.`
             : "You have no model keys yet: add one under Model providers. Leave blank for the workspace default."}
         </p>
+      </Card>
+
+      <Card title="Tools">
+        <p className="mb-3 text-sm text-zinc-500">
+          The tools a conversation from this prompt may call. None checked, none offered. A client
+          using it must be granted each one.
+        </p>
+        <ToolPicker
+          available={tools}
+          selected={draft.tools}
+          onChange={(patterns) => {
+            setToolPatterns(patterns);
+            changed();
+          }}
+        />
       </Card>
 
       <Card

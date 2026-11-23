@@ -4,16 +4,18 @@ import { ConfirmAction } from "../../../_components/client.tsx";
 import { formatDateTime } from "../../../_components/format.ts";
 import { Badge, Card, PageHeader } from "../../../_components/ui.tsx";
 import { consoleService } from "../../../_lib/console.ts";
-import { requireSession } from "../../../_lib/session.ts";
+import { requireChatAccess } from "../../../_lib/session.ts";
 import { Workspace } from "../../_components/panes.tsx";
 import {
   archiveIntegrationAction,
   createApiKeyAction,
   revokeApiKeyAction,
+  setIntegrationToolsAction,
   updateIntegrationAction,
 } from "../actions.ts";
 import { NewKeyForm } from "./key-form.tsx";
 import { IntegrationSettingsForm } from "./settings-form.tsx";
+import { ToolGrantsForm } from "./tools-form.tsx";
 
 export const metadata: Metadata = { title: "Integration" };
 
@@ -22,10 +24,20 @@ export default async function IntegrationPage({
 }: {
   params: Promise<{ integrationId: string }>;
 }) {
-  const session = await requireSession();
+  const access = await requireChatAccess();
   const { integrationId } = await params;
-  const integration = await consoleService().integration(session, integrationId);
+  const service = consoleService();
+  const integration = await service.integration(access.session, integrationId);
   if (!integration) notFound();
+  // Only a restricted integration's grants matter; an admin holds every tool.
+  const tools =
+    integration.role === "restricted"
+      ? await Promise.all([
+          service.availableTools(access),
+          service.toolServers(access),
+          service.integrationTools(access, integration.id),
+        ])
+      : undefined;
   return (
     <Workspace>
       <PageHeader
@@ -44,6 +56,26 @@ export default async function IntegrationPage({
             name={integration.name}
             role={integration.role}
           />
+        </Card>
+        <Card title="Tools">
+          {tools ? (
+            <>
+              <p className="mb-4 text-sm text-zinc-500">
+                The tools its keys may name on a conversation. A conversation naming any other tool
+                is refused.
+              </p>
+              <ToolGrantsForm
+                action={setIntegrationToolsAction.bind(null, integration.id)}
+                available={tools[0]}
+                servers={tools[1].map((server) => server.slug)}
+                granted={tools[2] ?? []}
+              />
+            </>
+          ) : (
+            <p className="text-sm text-zinc-500">
+              An admin integration holds every tool: its keys may name any enabled tool.
+            </p>
+          )}
         </Card>
         <Card title="API keys">
           {integration.keys.length === 0 ? (

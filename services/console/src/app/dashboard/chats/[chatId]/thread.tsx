@@ -286,6 +286,19 @@ export function ChatThread({ chat }: { chat: ChatView }) {
               </p>
             </details>
           ) : null}
+          <p className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+            <span className="font-medium">Tools:</span>
+            {chat.tools.length === 0
+              ? "none"
+              : chat.tools.map((pattern) => (
+                  <code
+                    key={pattern}
+                    className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-zinc-700"
+                  >
+                    {pattern}
+                  </code>
+                ))}
+          </p>
           {messages.length === 0 && !busy ? (
             <p className="py-12 text-center text-sm text-zinc-500">
               No messages yet. Say something.

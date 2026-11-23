@@ -24,6 +24,12 @@ const nav = [
     icon: "M4 3.5h8l4 4V16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Zm8 0v4h4M6.5 11h7M6.5 14h4.5",
   },
   {
+    href: "/dashboard/tools",
+    label: "Tools",
+    exact: false,
+    icon: "M13.5 3.5a3.5 3.5 0 0 0-3.3 4.6L3.5 14.8a1.5 1.5 0 0 0 2.1 2.1l6.7-6.7a3.5 3.5 0 0 0 4.4-4.5l-2 2-2-.4-.4-2 2-2a3.5 3.5 0 0 0-.8-.1Z",
+  },
+  {
     href: "/dashboard/integrations",
     label: "Integrations",
     exact: false,

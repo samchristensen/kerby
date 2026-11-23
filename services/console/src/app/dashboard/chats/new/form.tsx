@@ -1,8 +1,9 @@
 "use client";
-import type { PromptSummary } from "@kerby/contracts";
+import type { AvailableTool, PromptSummary } from "@kerby/contracts";
 import { useActionState, useState } from "react";
 import { SubmitButton } from "../../../_components/client.tsx";
 import { Field } from "../../../_components/field.tsx";
+import { ToolPicker } from "../../../_components/tool-picker.tsx";
 import { Alert, ButtonLink, Card } from "../../../_components/ui.tsx";
 import { versionChoices } from "../../studio/_components/shared.ts";
 import { PromptVariableFields } from "../../studio/_components/variable-fields.tsx";
@@ -16,9 +17,11 @@ const selectClass = `${textareaClass} border-zinc-300 focus:outline-indigo-500`;
 export function NewChatForm({
   providers,
   prompts,
+  tools,
 }: {
   providers: string[];
   prompts: PromptSummary[];
+  tools: AvailableTool[];
 }) {
   const [state, action] = useActionState<CreateChatState, FormData>(createChatAction, undefined);
   const [promptName, setPromptName] = useState(state?.values.promptName ?? "");
@@ -129,6 +132,21 @@ export function NewChatForm({
                 <p className="text-sm text-red-600">{state.fields.system}</p>
               ) : null}
             </div>
+            <fieldset className="space-y-1.5">
+              <legend className="block text-sm font-medium text-zinc-800">Tools</legend>
+              <p className="text-sm text-zinc-500">
+                The tools the assistant may call in this chat. None checked, none offered.
+              </p>
+              <ToolPicker
+                available={tools}
+                selected={Object.keys(state?.values ?? {})
+                  .filter((field) => field.startsWith("tool:"))
+                  .map((field) => field.slice("tool:".length))}
+              />
+              {state?.fields?.tools ? (
+                <p className="text-sm text-red-600">{state.fields.tools}</p>
+              ) : null}
+            </fieldset>
           </>
         )}
         <div className="space-y-1.5">

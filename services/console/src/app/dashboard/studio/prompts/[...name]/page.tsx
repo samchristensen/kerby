@@ -183,6 +183,7 @@ export default async function PromptPage({
             revision={prompt.draftRevision}
             draft={prompt.draft}
             providers={providers}
+            tools={await service.availableTools(access)}
           />
         ) : (
           <DecisionDraftEditor

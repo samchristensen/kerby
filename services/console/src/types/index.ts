@@ -1,4 +1,5 @@
 import type {
+  AvailableTool,
   ConversationSummary,
   GetConversationResponse,
   IntegrationRole,
@@ -12,6 +13,9 @@ import type {
   PromptVariable,
   PromptVersion,
   PromptVersionSummary,
+  ToolServer,
+  ToolServerSummary,
+  UpdateToolRequest,
 } from "@kerby/contracts";
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
@@ -161,6 +165,8 @@ export type ChatView = ChatStatus & {
   updatedAt: string;
   /** The chat prompt version it was started from; null when it was given its own system prompt. */
   prompt: PinnedPrompt | null;
+  /** The tools it may call, as patterns (`<server>/<tool>`, `<server>/*`); empty for none. */
+  tools: string[];
   /** Every message, oldest first. */
   messages: GetConversationResponse["messages"];
 };
@@ -170,6 +176,11 @@ export type ChatView = ChatStatus & {
  * cookie the token comes from: never a prop of a client component.
  */
 export type ChatAccess = { session: Session; token: string };
+
+/** A tool server with every tool it listed, and the integrations granted some of it, by name. */
+export type ToolServerView = Omit<ToolServer, "grantedTo"> & {
+  grantedTo: { integrationId: string; integrationName: string; pattern: string }[];
+};
 
 /**
  * The console's operations, bound to their dependencies in `src/index.ts`. Next.js bundles `src/app`, so pages and
@@ -320,6 +331,48 @@ export type ConsoleService = {
   ): Promise<{ ok: true; id: string } | FormFailure>;
   /** A judgment as the api reports it; undefined when there is none by that id. */
   judgment(access: ChatAccess, id: string): Promise<Judgment | undefined>;
+
+  // Tools (ADR 0019): servers, their tools, grants, through the api with the person's session token.
+  /** Every server of the tenant, the built-in `kerby` first. */
+  toolServers(access: ChatAccess): Promise<ToolServerSummary[]>;
+  /** One server with its tools and grants; undefined when there is none by that name. */
+  toolServer(access: ChatAccess, slug: string): Promise<ToolServerView | undefined>;
+  /** Register a server: form fields `slug`, `url`, `auth` (`none`/`header`), `header`, `credential`. */
+  createToolServer(
+    access: ChatAccess,
+    form: FormInput,
+  ): Promise<{ ok: true; slug: string } | FormFailure>;
+  /** A new URL or auth (`url`, `auth`, `header`, `credential`; a blank credential keeps the stored one). */
+  updateToolServer(
+    access: ChatAccess,
+    slug: string,
+    form: FormInput,
+  ): Promise<{ ok: true } | FormFailure>;
+  /** Replace the header's value: form field `value`. */
+  replaceToolCredential(
+    access: ChatAccess,
+    slug: string,
+    form: FormInput,
+  ): Promise<{ ok: true } | FormFailure>;
+  /** List the server's tools again. */
+  syncToolServer(access: ChatAccess, slug: string): Promise<{ ok: true } | FormFailure>;
+  deleteToolServer(access: ChatAccess, slug: string): Promise<{ ok: true } | FormFailure>;
+  updateTool(
+    access: ChatAccess,
+    slug: string,
+    name: string,
+    change: UpdateToolRequest,
+  ): Promise<{ ok: true } | FormFailure>;
+  /** The enabled tools a chat may name. */
+  availableTools(access: ChatAccess): Promise<AvailableTool[]>;
+  /** The patterns an integration is granted; undefined when there is no such integration. */
+  integrationTools(access: ChatAccess, id: string): Promise<string[] | undefined>;
+  /** Replace an integration's grants with the checked `tool:<pattern>` fields. */
+  setIntegrationTools(
+    access: ChatAccess,
+    id: string,
+    form: FormInput,
+  ): Promise<{ ok: true } | FormFailure>;
 };
 
 /** A refused Studio save or publish; `conflict` when the draft changed elsewhere since the editor loaded it. */

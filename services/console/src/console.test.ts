@@ -765,3 +765,325 @@ describe("studio", () => {
     expect(h.calls).toEqual([]);
   });
 });
+
+describe("tools", () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const error = (status: number, code: string, message = code) =>
+    json(status, { error: { code, message } });
+  const AT = "2026-11-22T00:00:00.000Z";
+  const INTEGRATION_ID = "0b9f7c1e-2a4d-4e6b-8c1d-3f5a7b9c1d2e";
+  const ARCHIVED_ID = "5f0f3b8e-6d1f-4a39-9d3e-0c5a6f0b7a11";
+  const CONVERSATION_ID = "7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b";
+  const server = {
+    slug: "github",
+    kind: "mcp",
+    url: "https://mcp.example.com/mcp",
+    auth: { kind: "header", header: "Authorization" },
+    hasCredential: true,
+    status: "ready",
+    lastError: null,
+    syncedAt: AT,
+    toolCount: 1,
+    enabledCount: 1,
+    driftedCount: 0,
+    createdAt: AT,
+    updatedAt: AT,
+  };
+
+  async function toolsHarness(answer: (request: Parameters<ApiClient>[0]) => Response) {
+    const calls: Parameters<ApiClient>[0][] = [];
+    const h = await harness({}, async (request) => {
+      calls.push(request);
+      return answer(request);
+    });
+    const user = await h.signUp("acme");
+    return { ...h, calls, access: { session: user.session, token: user.token } };
+  }
+
+  it("registers a server with its credential as the api expects, and names the bad field before asking it", async () => {
+    let reply = () => json(201, { ...server, status: "syncing" });
+    const h = await toolsHarness(() => reply());
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: "github",
+        url: "http://mcp.example.com/mcp",
+        auth: "header",
+        header: "Authorization",
+        credential: "Bearer secret-token",
+      }),
+    ).toEqual({ ok: false, fields: { url: "A server with a credential must use https" } });
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: "kerby",
+        url: "https://x.example.com",
+        auth: "none",
+      }),
+    ).toMatchObject({ ok: false, fields: { slug: expect.stringContaining("Kerby's own") } });
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: "github",
+        url: "https://mcp.example.com/mcp",
+        auth: "header",
+        header: "Content-Type",
+        credential: "x",
+      }),
+    ).toMatchObject({ ok: false, fields: { header: expect.stringContaining("transport") } });
+    expect(h.calls).toEqual([]);
+
+    expect(
+      await h.service.createToolServer(h.access, {
+        slug: " github ",
+        url: "https://mcp.example.com/mcp",
+        auth: "header",
+        header: "Authorization",
+        credential: "Bearer secret-token",
+      }),
+    ).toEqual({ ok: true, slug: "github" });
+    // With no auth, a credential typed in a hidden field is not sent.
+    await h.service.createToolServer(h.access, {
+      slug: "open",
+      url: "http://open.example.com/mcp",
+      auth: "none",
+      header: "Authorization",
+      credential: "left over",
+    });
+    expect(h.calls.map((call) => [call.method, call.path, call.token, call.body])).toEqual([
+      [
+        "POST",
+        "/v1/tool-servers",
+        h.access.token,
+        {
+          slug: "github",
+          url: "https://mcp.example.com/mcp",
+          auth: { kind: "header", header: "Authorization" },
+          credential: "Bearer secret-token",
+        },
+      ],
+      [
+        "POST",
+        "/v1/tool-servers",
+        h.access.token,
+        { slug: "open", url: "http://open.example.com/mcp", auth: { kind: "none" } },
+      ],
+    ]);
+
+    reply = () => error(409, "tool_server_exists");
+    expect(
+      await h.service.createToolServer(h.access, { slug: "github", url: "https://a.example.com" }),
+    ).toEqual({ ok: false, fields: { slug: "A server already has this name. Choose another." } });
+    reply = () => error(409, "tool_server_limit", "at most 20 tool servers: delete one first");
+    expect(
+      await h.service.createToolServer(h.access, { slug: "more", url: "https://a.example.com" }),
+    ).toEqual({ ok: false, error: "at most 20 tool servers: delete one first" });
+    reply = () => error(500, "internal");
+    await expect(
+      h.service.createToolServer(h.access, { slug: "more", url: "https://a.example.com" }),
+    ).rejects.toThrow(/500 internal/);
+  });
+
+  it("changes, syncs, deletes and switches tools by path, keeps a blank credential, and says why the api refused", async () => {
+    let reply = () => json(200, server);
+    const h = await toolsHarness(() => reply());
+    expect(
+      await h.service.updateToolServer(h.access, "github", {
+        url: "https://mcp2.example.com/mcp",
+        auth: "header",
+        header: "Authorization",
+        credential: "",
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      await h.service.replaceToolCredential(h.access, "github", { value: "Bearer new" }),
+    ).toEqual({ ok: true });
+    expect(await h.service.syncToolServer(h.access, "github")).toEqual({ ok: true });
+    expect(
+      await h.service.updateTool(h.access, "github", "search.issues", { enabled: true }),
+    ).toEqual({ ok: true });
+    expect(await h.service.deleteToolServer(h.access, "github")).toEqual({ ok: true });
+    expect(h.calls.map((call) => [call.method, call.path, call.body])).toEqual([
+      [
+        "PATCH",
+        "/v1/tool-servers/github",
+        { url: "https://mcp2.example.com/mcp", auth: { kind: "header", header: "Authorization" } },
+      ],
+      ["PUT", "/v1/tool-servers/github/credential", { value: "Bearer new" }],
+      ["POST", "/v1/tool-servers/github/sync", undefined],
+      ["PATCH", "/v1/tool-servers/github/tools/search.issues", { enabled: true }],
+      ["DELETE", "/v1/tool-servers/github", undefined],
+    ]);
+
+    // Nothing that is not a server's or a tool's name goes into a path.
+    h.calls.length = 0;
+    expect(await h.service.syncToolServer(h.access, "../keys")).toMatchObject({ ok: false });
+    expect(await h.service.updateTool(h.access, "github", "a/b", { enabled: true })).toMatchObject({
+      ok: false,
+    });
+    expect(await h.service.toolServer(h.access, "Not A Slug")).toBeUndefined();
+    expect(h.calls).toEqual([]);
+
+    reply = () =>
+      error(400, "builtin_tool_server", "kerby is Kerby's own server: it cannot be changed");
+    expect(await h.service.deleteToolServer(h.access, "kerby")).toEqual({
+      ok: false,
+      error: "kerby is Kerby's own server: it cannot be changed",
+    });
+    reply = () =>
+      error(400, "tool_not_usable", "github/x.y cannot be enabled: providers refuse its name");
+    expect(await h.service.updateTool(h.access, "github", "x.y", { enabled: true })).toEqual({
+      ok: false,
+      error: "github/x.y cannot be enabled: providers refuse its name",
+    });
+    reply = () => error(404, "not_found");
+    expect(await h.service.syncToolServer(h.access, "gone")).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("no longer exists"),
+    });
+  });
+
+  it("reads a server with the names of the integrations granted it, and leaves out one no longer live", async () => {
+    const h = await toolsHarness((request) =>
+      request.path === "/v1/integrations"
+        ? json(200, {
+            integrations: [
+              { id: INTEGRATION_ID, name: "support bot", role: "restricted", createdAt: AT },
+            ],
+          })
+        : request.path === "/v1/tool-servers/github"
+          ? json(200, {
+              ...server,
+              tools: [
+                {
+                  name: "search",
+                  pattern: "github/search",
+                  exposedName: "github__search",
+                  enabled: true,
+                  effect: "read",
+                  drifted: false,
+                  removed: false,
+                  definition: { description: "Search", inputSchema: { type: "object" } },
+                  listed: null,
+                },
+              ],
+              grantedTo: [
+                { integrationId: INTEGRATION_ID, pattern: "github/*" },
+                { integrationId: ARCHIVED_ID, pattern: "github/search" },
+              ],
+            })
+          : error(404, "not_found"),
+    );
+    const view = await h.service.toolServer(h.access, "github");
+    expect(view?.grantedTo).toEqual([
+      { integrationId: INTEGRATION_ID, integrationName: "support bot", pattern: "github/*" },
+    ]);
+    expect(view?.tools.map((tool) => tool.exposedName)).toEqual(["github__search"]);
+    expect(await h.service.toolServer(h.access, "nope")).toBeUndefined();
+  });
+
+  it("saves an integration's grants from the checked tools, a tool under a checked server left out", async () => {
+    let reply = () => json(200, { tools: ["github/*", "kerby/echo"] });
+    const h = await toolsHarness(() => reply());
+    expect(await h.service.integrationTools(h.access, INTEGRATION_ID)).toEqual([
+      "github/*",
+      "kerby/echo",
+    ]);
+    expect(
+      await h.service.setIntegrationTools(h.access, INTEGRATION_ID, {
+        "tool:github/*": "on",
+        "tool:github/search": "on",
+        "tool:kerby/echo": "on",
+        "tool:not a pattern": "on",
+        name: "ignored",
+      }),
+    ).toEqual({ ok: true });
+    expect(h.calls.at(-1)).toEqual({
+      method: "PUT",
+      path: `/v1/integrations/${INTEGRATION_ID}/tools`,
+      token: h.access.token,
+      body: { tools: ["github/*", "kerby/echo"] },
+    });
+    reply = () => error(400, "unknown_tool", "github/nope: no such tool on github");
+    expect(
+      await h.service.setIntegrationTools(h.access, INTEGRATION_ID, { "tool:github/nope": "on" }),
+    ).toEqual({ ok: false, error: "github/nope: no such tool on github" });
+    reply = () => error(404, "not_found");
+    expect(await h.service.integrationTools(h.access, ARCHIVED_ID)).toBeUndefined();
+    h.calls.length = 0;
+    expect(await h.service.integrationTools(h.access, "../keys")).toBeUndefined();
+    expect(h.calls).toEqual([]);
+  });
+
+  it("starts a chat with the tools picked, and puts a refused tool on the tools field", async () => {
+    let reply = () => json(201, { id: CONVERSATION_ID });
+    const h = await toolsHarness((request) =>
+      request.path === "/v1/conversations" ? reply() : json(202, { seq: 1 }),
+    );
+    expect(
+      await h.service.createChat(h.access, {
+        message: "hi",
+        "tool:github/search": "on",
+        "tool:kerby/echo": "on",
+      }),
+    ).toEqual({ ok: true, id: CONVERSATION_ID });
+    expect(h.calls[0]?.body).toEqual({
+      externalUserId: `console:${h.access.session.userId}`,
+      tools: ["github/search", "kerby/echo"],
+    });
+
+    reply = () =>
+      error(
+        403,
+        "tool_not_granted",
+        "github/search is not granted to this integration: an admin grants it on the integration",
+      );
+    expect(
+      await h.service.createChat(h.access, { message: "hi", "tool:github/search": "on" }),
+    ).toEqual({
+      ok: false,
+      fields: {
+        tools:
+          "github/search is not granted to this integration: an admin grants it on the integration",
+      },
+    });
+    reply = () => error(400, "unknown_tool", "kerby/echo: a development tool, not offered here");
+    expect(
+      await h.service.createChat(h.access, { message: "hi", "tool:kerby/echo": "on" }),
+    ).toEqual({
+      ok: false,
+      fields: { tools: "kerby/echo: a development tool, not offered here" },
+    });
+
+    h.calls.length = 0;
+    const tooMany = Object.fromEntries(
+      Array.from({ length: 65 }, (_, i) => [`tool:github/t${i}`, "on"]),
+    );
+    expect(await h.service.createChat(h.access, { message: "hi", ...tooMany })).toEqual({
+      ok: false,
+      fields: { tools: "Choose at most 64 tools." },
+    });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("lists the tools a chat may name and the servers, parsed at the boundary", async () => {
+    const h = await toolsHarness((request) =>
+      request.path === "/v1/tools"
+        ? json(200, {
+            tools: [
+              {
+                pattern: "kerby/echo",
+                exposedName: "kerby__echo",
+                title: null,
+                description: "Echo",
+                inputSchema: { type: "object" },
+                effect: "read",
+              },
+            ],
+          })
+        : json(200, { servers: [server] }),
+    );
+    expect((await h.service.availableTools(h.access)).map((tool) => tool.pattern)).toEqual([
+      "kerby/echo",
+    ]);
+    expect((await h.service.toolServers(h.access)).map((s) => s.slug)).toEqual(["github"]);
+  });
+});

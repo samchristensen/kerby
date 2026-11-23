@@ -96,6 +96,9 @@ async function refusal(response: Response): Promise<StudioFailure> {
     case "wrong_kind":
     case "invalid_model":
     case "storage_quota_exceeded":
+    case "unknown_tool":
+    case "too_many_tools":
+    case "tool_not_granted":
       return refuse(message ?? "The request was refused.");
   }
   throw apiFault("studio", response.status, code);
@@ -313,6 +316,7 @@ export function createStudio(deps: ConsoleDeps): Studio {
           ...(system.trim() ? { system } : {}),
           ...(draft.model ? { model: draft.model } : {}),
           ...(draft.guardrails.length > 0 ? { guardrails: draft.guardrails } : {}),
+          ...(draft.tools.length > 0 ? { tools: draft.tools } : {}),
         };
       } else {
         const ref = z

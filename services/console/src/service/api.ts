@@ -1,6 +1,7 @@
-// What the chat and Studio services share about talking to the api: reading its error body, the end-user names the
-// console gives the conversations it starts, the model-key check before a model is used, and variables typed in a form.
-import { PromptVariableNameSchema, parseModelId } from "@kerby/contracts";
+// What the chat, Studio and tools services share about talking to the api: reading its error body, the end-user names
+// the console gives the conversations it starts, the model-key check before a model is used, and variables and tools
+// picked in a form.
+import { PromptVariableNameSchema, parseModelId, ToolPatternSchema } from "@kerby/contracts";
 import { hasModelKey } from "@kerby/control-plane";
 import { z } from "zod";
 import type { ConsoleDeps, FormInput } from "../types/index.ts";
@@ -58,4 +59,23 @@ export function variableValues(form: FormInput): Record<string, string> {
     if (PromptVariableNameSchema.safeParse(name).success) values[name] = value;
   }
   return values;
+}
+
+/** Form field `tool:<pattern>` is a checked tool. */
+const TOOL_FIELD_PREFIX = "tool:";
+
+/**
+ * The tool patterns checked in a form (fields `tool:<pattern>`), in form order; a tool of a server whose `<server>/*`
+ * is checked too is covered by it and left out. Anything that is not a pattern is ignored.
+ */
+export function toolsOf(form: FormInput): string[] {
+  const picked = Object.keys(form)
+    .filter((field) => field.startsWith(TOOL_FIELD_PREFIX))
+    .map((field) => field.slice(TOOL_FIELD_PREFIX.length))
+    .filter((pattern) => ToolPatternSchema.safeParse(pattern).success);
+  const wholeServers = new Set(picked.filter((p) => p.endsWith("/*")).map((p) => p.slice(0, -2)));
+  return picked.filter(
+    (pattern) =>
+      pattern.endsWith("/*") || !wholeServers.has(pattern.slice(0, pattern.indexOf("/"))),
+  );
 }

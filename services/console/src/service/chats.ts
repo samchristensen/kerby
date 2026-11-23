@@ -5,8 +5,10 @@ import {
   CreateConversationRequestSchema,
   GetConversationResponseSchema,
   ListConversationsResponseSchema,
+  MAX_CONVERSATION_TOOLS,
   PromptNameSchema,
   PromptVersionParamSchema,
+  ToolSelectionSchema,
 } from "@kerby/contracts";
 import { z } from "zod";
 import type {
@@ -25,6 +27,7 @@ import {
   CONSOLE_USER_PREFIX,
   missingModelKey,
   STUDIO_USER_PREFIX,
+  toolsOf,
   variableValues,
 } from "./api.ts";
 import { parseForm, refuse } from "./forms.ts";
@@ -79,6 +82,10 @@ async function refusal(response: Response): Promise<FormFailure> {
     case "storage_quota_exceeded":
     case "invalid_model":
       return refuse(message ?? "The request was refused.");
+    case "unknown_tool":
+    case "too_many_tools":
+    case "tool_not_granted":
+      return { ok: false, fields: { tools: message ?? "A tool was refused." } };
   }
   throw apiFault("chat", response.status, code);
 }
@@ -100,6 +107,10 @@ async function promptRefusal(response: Response): Promise<FormFailure> {
     case "invalid_variables":
     case "invalid_model":
     case "storage_quota_exceeded":
+    case "unknown_tool":
+    case "too_many_tools":
+    case "tool_not_granted":
+      // A prompt's own tools: the person cannot change them here, only in the Studio.
       return refuse(message ?? "The request was refused.");
     case "rate_limited":
       return refuse("Too many requests. Try again in a moment.");
@@ -176,6 +187,7 @@ export function createChats(deps: ConsoleDeps) {
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
         prompt: conversation.prompt,
+        tools: conversation.tools,
         messages,
         busy: page.busy,
         lastError: page.lastError,
@@ -202,7 +214,7 @@ export function createChats(deps: ConsoleDeps) {
       const { message, model, system, promptName, promptVersion } = parsed.data;
       let request: z.input<typeof CreateConversationRequestSchema>;
       if (promptName) {
-        // The prompt sets the system prompt, model and guardrails: the free fields are ignored.
+        // The prompt sets the system prompt, model, guardrails and tools: the free fields are ignored.
         const name = PromptNameSchema.safeParse(promptName);
         if (!name.success) return { ok: false, fields: { promptName: "Choose a chat prompt." } };
         const version = PromptVersionParamSchema.safeParse(promptVersion);
@@ -220,10 +232,18 @@ export function createChats(deps: ConsoleDeps) {
         // A provider with no key would fail at the first turn: say so in the form's words, not the API's.
         const noKey = await missingModelKey(deps, access.session.tenantId, model);
         if (noKey) return { ok: false, fields: { model: noKey } };
+        const tools = ToolSelectionSchema.safeParse(toolsOf(form));
+        if (!tools.success) {
+          return {
+            ok: false,
+            fields: { tools: `Choose at most ${MAX_CONVERSATION_TOOLS} tools.` },
+          };
+        }
         request = {
           externalUserId: `${CONSOLE_USER_PREFIX}${access.session.userId}`,
           ...(model ? { model } : {}),
           ...(system.trim() ? { system } : {}),
+          ...(tools.data.length > 0 ? { tools: tools.data } : {}),
         };
       }
       const created = await api({
@@ -235,8 +255,8 @@ export function createChats(deps: ConsoleDeps) {
       if (created.status !== 201) {
         if (promptName) return promptRefusal(created);
         const failure = await refusal(created);
-        // The only 400 the api returns for these fields is a model it cannot use.
-        return created.status === 400
+        // A 400 is a model it cannot use, unless it named a tool.
+        return created.status === 400 && !failure.fields
           ? { ok: false, fields: { model: failure.error ?? "The model was refused." } }
           : failure;
       }

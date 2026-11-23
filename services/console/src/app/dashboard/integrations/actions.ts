@@ -3,7 +3,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import type { ApiKeyView, FormFailure, IntegrationView } from "../../../types/index.ts";
 import { consoleService } from "../../_lib/console.ts";
-import { requireSession } from "../../_lib/session.ts";
+import { requireChatAccess, requireSession } from "../../_lib/session.ts";
 
 export type IntegrationFormState =
   | { ok: true; integration: IntegrationView }
@@ -66,4 +66,23 @@ export async function revokeApiKeyAction(keyId: string): Promise<void> {
   const session = await requireSession();
   await consoleService().revokeApiKey(session, keyId);
   revalidatePath("/dashboard/integrations", "layout");
+}
+
+export type ToolGrantsState = { ok: true } | FormFailure | undefined;
+
+/** Replace the tools a restricted integration may use with the checked ones. */
+export async function setIntegrationToolsAction(
+  integrationId: string,
+  _previous: ToolGrantsState,
+  formData: FormData,
+): Promise<ToolGrantsState> {
+  const access = await requireChatAccess();
+  const result = await consoleService().setIntegrationTools(
+    access,
+    integrationId,
+    Object.fromEntries(formData),
+  );
+  revalidatePath("/dashboard/integrations", "layout");
+  revalidatePath("/dashboard/tools", "layout");
+  return result;
 }
