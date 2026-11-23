@@ -10,13 +10,25 @@ import type {
   PostMessageResponse,
 } from "@kerby/contracts";
 import {
+  ListAvailableToolsResponseSchema,
+  ListIntegrationsResponseSchema,
+  ListToolServersResponseSchema,
+  MAX_CONVERSATION_TOOLS,
+  MAX_TOOL_SERVERS,
+  ToolGrantsSchema,
+  ToolSchema,
+  ToolServerSchema,
+} from "@kerby/contracts";
+import {
   archiveIntegration,
   createApiKey,
   createConsoleSession,
   createIntegration,
+  hasToolCredential,
   insertConsoleUser,
   insertTenant,
   readModelKey,
+  readToolCredential,
   revokeApiKey,
   setTenantStatus,
   updateIntegration,
@@ -28,6 +40,7 @@ import { LISTEN_APPLICATION_NAME, TenantPools } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
+import { findToolServer, recordSync, updateTool } from "@kerby/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createApiApp } from "./index.ts";
@@ -50,6 +63,7 @@ async function harness(
     providers?: string[];
     failedAuthPerMinute?: number;
     trustProxy?: boolean;
+    enableEchoTool?: boolean;
     maxStreamsPerProcess?: number;
   } = {},
 ) {
@@ -81,6 +95,7 @@ async function harness(
       defaultStorageBytes: 1024 ** 3,
       failedAuthPerMinute: options.failedAuthPerMinute ?? 1000,
       trustProxy: options.trustProxy ?? false,
+      enableEchoTool: options.enableEchoTool ?? false,
     },
   };
   const server = await serve(createApiApp(deps), { host: "127.0.0.1", port: 0 });
@@ -1670,5 +1685,525 @@ describe("prompts", () => {
       prompt: { name: "triage/billing", version: 1 },
     });
     expect(mixed.status).toBe(400);
+  });
+});
+
+describe("tools (ADR 0019)", () => {
+  const ErrorBody = z.object({
+    error: z.object({
+      code: z.string(),
+      message: z.string(),
+      problems: z.array(z.object({ pattern: z.string(), reason: z.string() })).optional(),
+    }),
+  });
+  const errorOf = async (response: Response) => ErrorBody.parse(await response.json()).error;
+  const CREDENTIAL = "Bearer tool-secret-0123456789";
+
+  /** A worker's listing of the server, as the sync task would store it. */
+  async function listed(t: Tenant, slug: string, names: string[], enable: string[] = []) {
+    const server = await findToolServer(t.ctx.db, slug);
+    if (!server) throw new Error(`no server ${slug}`);
+    await recordSync(t.ctx.db, server.id, {
+      tools: names.map((name) => ({
+        name,
+        definition: {
+          description: `the ${name} tool`,
+          inputSchema: { type: "object", properties: {} },
+        },
+      })),
+    });
+    for (const name of enable) await updateTool(t.ctx.db, server.id, name, { enabled: true });
+    return server;
+  }
+
+  async function addServer(h: Harness, t: Tenant, slug: string, body: object = {}) {
+    const response = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug,
+      url: `https://${slug}.example.com/mcp`,
+      ...body,
+    });
+    expect(response.status).toBe(201);
+    return ToolServerSchema.parse(await response.json());
+  }
+
+  async function restrictedKey(h: Harness, t: Tenant, tools: string[] = []) {
+    const integration = await createIntegration(h.control.db, {
+      tenantId: t.id,
+      name: `bots-${crypto.randomUUID().slice(0, 8)}`,
+      role: "restricted",
+    });
+    if (tools.length > 0) {
+      const put = await h.call(t.secret, "PUT", `/v1/integrations/${integration.id}/tools`, {
+        tools,
+      });
+      expect(put.status).toBe(200);
+    }
+    const { secret } = await createApiKey(h.control.db, t.id, integration.id);
+    return { integration, secret };
+  }
+
+  const syncTasks = async (t: Tenant) =>
+    (
+      await t.ctx.db.query<{ params: { serverId: string } }>(
+        "select params from absurd.t_turns where task_name = 'sync-tool-server' order by enqueue_at",
+      )
+    ).rows.map((row) => row.params.serverId);
+
+  it("makes a server with a sealed credential and enqueues its listing in the same transaction", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const response = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "docs",
+      url: "https://docs.example.com/mcp",
+      auth: { kind: "header", header: "Authorization" },
+      credential: CREDENTIAL,
+    });
+    expect(response.status).toBe(201);
+    const raw = await response.text();
+    expect(raw).not.toContain(CREDENTIAL);
+    const server = ToolServerSchema.parse(JSON.parse(raw));
+    expect(server).toMatchObject({
+      slug: "docs",
+      kind: "mcp",
+      status: "syncing",
+      hasCredential: true,
+      auth: { kind: "header", header: "Authorization" },
+      tools: [],
+      grantedTo: [],
+    });
+    const record = await findToolServer(t.ctx.db, "docs");
+    expect(await syncTasks(t)).toEqual([record?.id]);
+
+    const stored = await h.control.db.query<{ name: string; ciphertext: Buffer }>(
+      "select name, ciphertext from tenant_secrets where tenant_id = $1",
+      [t.id],
+    );
+    expect(stored.rows.map((row) => row.name)).toEqual([`tool-credential/${record?.id}`]);
+    expect(stored.rows[0]?.ciphertext.includes(Buffer.from(CREDENTIAL))).toBe(false);
+    const opener = createOpener([h.keys.privateKey]);
+    expect(await readToolCredential(h.control.db, opener, t.id, record?.id ?? "")).toBe(CREDENTIAL);
+
+    // The built-in server first; never the credential, in a response or the audit log.
+    const list = await h.call(t.secret, "GET", "/v1/tool-servers");
+    const listText = await list.text();
+    expect(listText).not.toContain(CREDENTIAL);
+    const servers = ListToolServersResponseSchema.parse(JSON.parse(listText)).servers;
+    expect(servers.map((s) => s.slug)).toEqual(["kerby", "docs"]);
+    // exactly the contract's fields: no internal ids
+    expect(JSON.parse(listText)).toEqual({ servers });
+    const audit = await h.control.db.query<{ action: string; detail: object }>(
+      "select action, detail from audit_log where action like 'tool%'",
+    );
+    expect(audit.rows).toEqual([
+      {
+        action: "tool_server.create",
+        detail: {
+          serverId: record?.id,
+          slug: "docs",
+          url: "https://docs.example.com/mcp",
+          auth: "header",
+          header: "Authorization",
+        },
+      },
+    ]);
+    expect(JSON.stringify(audit.rows)).not.toContain(CREDENTIAL);
+
+    const taken = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "docs",
+      url: "https://other.example.com/mcp",
+    });
+    expect(taken.status).toBe(409);
+    expect((await errorOf(taken)).code).toBe("tool_server_exists");
+    const reserved = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "kerby",
+      url: "https://other.example.com/mcp",
+    });
+    expect(reserved.status).toBe(400);
+    const plain = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "plain",
+      url: "http://plain.example.com/mcp",
+      auth: { kind: "header", header: "Authorization" },
+      credential: CREDENTIAL,
+    });
+    expect(plain.status).toBe(400);
+  });
+
+  it("refuses more than MAX_TOOL_SERVERS servers", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    for (let i = 0; i < MAX_TOOL_SERVERS; i++) await addServer(h, t, `s${i}`);
+    const over = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "over",
+      url: "https://over.example.com/mcp",
+    });
+    expect(over.status).toBe(409);
+    expect((await errorOf(over)).code).toBe("tool_server_limit");
+  });
+
+  it("changes a server's url, auth and credential, each time listing it again", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search"]);
+    const record = await findToolServer(t.ctx.db, "docs");
+    const id = record?.id ?? "";
+
+    const noCredential = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs", {
+      auth: { kind: "header", header: "X-Api-Key" },
+    });
+    expect(noCredential.status).toBe(400);
+    expect((await errorOf(noCredential)).message).toMatch(/credential/);
+    const notHeader = await h.call(t.secret, "PUT", "/v1/tool-servers/docs/credential", {
+      value: CREDENTIAL,
+    });
+    expect(notHeader.status).toBe(400);
+
+    const patched = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs", {
+      auth: { kind: "header", header: "X-Api-Key" },
+      credential: CREDENTIAL,
+    });
+    expect(patched.status).toBe(202);
+    expect(ToolServerSchema.parse(await patched.json())).toMatchObject({
+      status: "syncing",
+      hasCredential: true,
+      auth: { kind: "header", header: "X-Api-Key" },
+      tools: [expect.objectContaining({ name: "search" })],
+    });
+    // header auth with a stored credential: a new URL keeps it
+    const moved = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs", {
+      url: "https://moved.example.com/mcp",
+    });
+    expect(moved.status).toBe(202);
+    expect(ToolServerSchema.parse(await moved.json()).hasCredential).toBe(true);
+    const replaced = await h.call(t.secret, "PUT", "/v1/tool-servers/docs/credential", {
+      value: "Bearer second-secret-value",
+    });
+    expect(replaced.status).toBe(202);
+    expect(
+      await readToolCredential(h.control.db, createOpener([h.keys.privateKey]), t.id, id),
+    ).toBe("Bearer second-secret-value");
+    const sync = await h.call(t.secret, "POST", "/v1/tool-servers/docs/sync");
+    expect(sync.status).toBe(202);
+    expect(ToolServerSchema.parse(await sync.json()).status).toBe("syncing");
+    expect(await syncTasks(t)).toEqual([id, id, id, id, id]);
+
+    const none = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs", {
+      auth: { kind: "none" },
+    });
+    expect(none.status).toBe(202);
+    expect(ToolServerSchema.parse(await none.json()).hasCredential).toBe(false);
+    expect(await hasToolCredential(h.control.db, t.id, id)).toBe(false);
+
+    const actions = await h.control.db.query<{ action: string }>(
+      "select action from audit_log where action like 'tool%' order by id",
+    );
+    expect(actions.rows.map((row) => row.action)).toEqual([
+      "tool_server.create",
+      "tool_server.update",
+      "tool_server.update",
+      "tool_server.credential",
+      "tool_server.sync",
+      "tool_server.update",
+    ]);
+    expect(
+      (
+        await h.call(t.secret, "PATCH", "/v1/tool-servers/missing", {
+          url: "https://x.example.com",
+        })
+      ).status,
+    ).toBe(404);
+  });
+
+  it("enables tools, accepts definitions, and keeps the built-in server read-only", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search", "a.b"]);
+
+    const enabled = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/search", {
+      enabled: true,
+      effect: "read",
+    });
+    expect(enabled.status).toBe(200);
+    expect(ToolSchema.parse(await enabled.json())).toMatchObject({
+      name: "search",
+      pattern: "docs/search",
+      exposedName: "docs__search",
+      enabled: true,
+      effect: "read",
+      drifted: false,
+      listed: null,
+    });
+    const unusable = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/a.b", {
+      enabled: true,
+    });
+    expect(unusable.status).toBe(400);
+    expect((await errorOf(unusable)).code).toBe("tool_not_usable");
+    const missing = await h.call(t.secret, "PATCH", "/v1/tool-servers/docs/tools/nope", {
+      enabled: true,
+    });
+    expect(missing.status).toBe(404);
+
+    const server = ToolServerSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tool-servers/docs")).json(),
+    );
+    expect(server).toMatchObject({ toolCount: 2, enabledCount: 1, driftedCount: 0 });
+    expect(server.tools.find((tool) => tool.name === "a.b")?.exposedName).toBeNull();
+
+    const builtin = ToolServerSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tool-servers/kerby")).json(),
+    );
+    expect(builtin).toMatchObject({ kind: "builtin", url: null, status: "ready" });
+    expect(builtin.tools.map((tool) => [tool.name, tool.enabled, tool.effect])).toEqual([
+      ["echo", true, "read"],
+      ["judge", true, "read"],
+    ]);
+    for (const [method, path, body] of [
+      ["PATCH", "/v1/tool-servers/kerby", { url: "https://x.example.com" }],
+      ["DELETE", "/v1/tool-servers/kerby", undefined],
+      ["POST", "/v1/tool-servers/kerby/sync", undefined],
+      ["PUT", "/v1/tool-servers/kerby/credential", { value: CREDENTIAL }],
+      ["PATCH", "/v1/tool-servers/kerby/tools/echo", { enabled: false }],
+    ] as const) {
+      const refused = await h.call(t.secret, method, path, body);
+      expect(refused.status, `${method} ${path}`).toBe(400);
+      expect((await errorOf(refused)).code).toBe("builtin_tool_server");
+    }
+    expect((await h.call(t.secret, "GET", "/v1/tool-servers/nope")).status).toBe(404);
+    const audit = await h.control.db.query<{ detail: object }>(
+      "select detail from audit_log where action = 'tool.update'",
+    );
+    expect(audit.rows).toEqual([
+      {
+        detail: expect.objectContaining({
+          slug: "docs",
+          tool: "search",
+          enabled: true,
+          effect: "read",
+        }),
+      },
+    ]);
+  });
+
+  it("grants tools to an integration of the tenant, and only of the tenant", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const other = await h.tenant("globex");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search", "write"], ["search"]);
+    const { integration } = await restrictedKey(h, t);
+
+    const integrations = ListIntegrationsResponseSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/integrations")).json(),
+    );
+    // by name
+    expect(integrations.integrations.map((i) => [i.name, i.role])).toEqual([
+      [integration.name, "restricted"],
+      ["default", "admin"],
+    ]);
+
+    const path = `/v1/integrations/${integration.id}/tools`;
+    const put = await h.call(t.secret, "PUT", path, { tools: ["docs/search", "kerby/*"] });
+    expect(put.status).toBe(200);
+    expect(ToolGrantsSchema.parse(await put.json())).toEqual({
+      tools: ["kerby/*", "docs/search"],
+    });
+    expect(ToolGrantsSchema.parse(await (await h.call(t.secret, "GET", path)).json())).toEqual({
+      tools: ["kerby/*", "docs/search"],
+    });
+    const server = ToolServerSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tool-servers/docs")).json(),
+    );
+    expect(server.grantedTo).toEqual([{ integrationId: integration.id, pattern: "docs/search" }]);
+
+    const unknown = await h.call(t.secret, "PUT", path, { tools: ["docs/write", "nope/*"] });
+    expect(unknown.status).toBe(400);
+    expect(await errorOf(unknown)).toMatchObject({
+      code: "unknown_tool",
+      problems: [
+        { pattern: "docs/write", reason: expect.stringContaining("not enabled") },
+        { pattern: "nope/*", reason: expect.stringContaining("no tool server") },
+      ],
+    });
+
+    // another tenant's integration, a made-up one, and a non-uuid are all simply not found
+    for (const id of [integration.id, crypto.randomUUID(), "nope"]) {
+      expect((await h.call(other.secret, "GET", `/v1/integrations/${id}/tools`)).status).toBe(404);
+      expect(
+        (await h.call(other.secret, "PUT", `/v1/integrations/${id}/tools`, { tools: [] })).status,
+      ).toBe(404);
+    }
+    const audit = await h.control.db.query<{ detail: object }>(
+      "select detail from audit_log where action = 'integration.tools'",
+    );
+    expect(audit.rows).toEqual([
+      { detail: { integrationId: integration.id, tools: "kerby/* docs/search" } },
+    ]);
+  });
+
+  it("deleting a server removes its credential, grants and conversations' use of it", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs", {
+      auth: { kind: "header", header: "Authorization" },
+      credential: CREDENTIAL,
+    });
+    const record = await listed(t, "docs", ["search"], ["search"]);
+    const { integration } = await restrictedKey(h, t, ["docs/*"]);
+    const conversation = await newConversation(h, t.secret, { tools: ["docs/search"] });
+    expect(conversation.tools).toEqual(["docs/search"]);
+
+    expect((await h.call(t.secret, "DELETE", "/v1/tool-servers/docs")).status).toBe(204);
+    expect(await hasToolCredential(h.control.db, t.id, record.id)).toBe(false);
+    expect(
+      await (await h.call(t.secret, "GET", `/v1/integrations/${integration.id}/tools`)).json(),
+    ).toEqual({ tools: [] });
+    const after = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${conversation.id}`)
+    ).json()) as GetConversationResponse;
+    expect(after.conversation.tools).toEqual([]);
+    expect((await h.call(t.secret, "DELETE", "/v1/tool-servers/docs")).status).toBe(404);
+  });
+
+  it("refuses a restricted key every management route, and shows it only its granted tools", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search", "write"], ["search", "write"]);
+    const { integration, secret } = await restrictedKey(h, t, ["docs/search"]);
+    for (const [method, path, body] of [
+      ["GET", "/v1/tool-servers", undefined],
+      ["POST", "/v1/tool-servers", { slug: "x", url: "https://x.example.com" }],
+      ["GET", "/v1/tool-servers/docs", undefined],
+      ["PATCH", "/v1/tool-servers/docs", { url: "https://x.example.com" }],
+      ["DELETE", "/v1/tool-servers/docs", undefined],
+      ["PUT", "/v1/tool-servers/docs/credential", { value: CREDENTIAL }],
+      ["POST", "/v1/tool-servers/docs/sync", undefined],
+      ["PATCH", "/v1/tool-servers/docs/tools/search", { enabled: false }],
+      ["GET", "/v1/integrations", undefined],
+      ["GET", `/v1/integrations/${integration.id}/tools`, undefined],
+      ["PUT", `/v1/integrations/${integration.id}/tools`, { tools: ["docs/*"] }],
+    ] as const) {
+      const response = await h.call(secret, method, path, body);
+      expect(response.status, `${method} ${path}`).toBe(403);
+      expect((await errorOf(response)).code).toBe("forbidden");
+    }
+
+    const mine = ListAvailableToolsResponseSchema.parse(
+      await (await h.call(secret, "GET", "/v1/tools")).json(),
+    );
+    expect(mine.tools).toEqual([
+      {
+        pattern: "docs/search",
+        exposedName: "docs__search",
+        title: null,
+        description: "the search tool",
+        inputSchema: { type: "object", properties: {} },
+        effect: "write",
+      },
+    ]);
+    const all = ListAvailableToolsResponseSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tools")).json(),
+    );
+    // no echo (development only) and no judge (no typesafe key) here
+    expect(all.tools.map((tool) => tool.pattern)).toEqual(["docs/search", "docs/write"]);
+  });
+
+  it("lets a conversation name only tools its creator and every poster hold", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await addServer(h, t, "docs");
+    await listed(t, "docs", ["search", "write"], ["search", "write"]);
+    const { secret } = await restrictedKey(h, t, ["docs/search"]);
+
+    const refused = await h.call(secret, "POST", "/v1/conversations", {
+      tools: ["docs/search", "docs/write"],
+    });
+    expect(refused.status).toBe(403);
+    expect(await errorOf(refused)).toMatchObject({
+      code: "tool_not_granted",
+      message: expect.stringMatching(/docs\/write.*admin grants/),
+    });
+    const wholeServer = await h.call(secret, "POST", "/v1/conversations", { tools: ["docs/*"] });
+    expect(wholeServer.status).toBe(403);
+    const granted = await newConversation(h, secret, { tools: ["docs/search"] });
+    expect(granted.tools).toEqual(["docs/search"]);
+    expect(
+      (await h.call(secret, "POST", `/v1/conversations/${granted.id}/messages`, { content: "hi" }))
+        .status,
+    ).toBe(202);
+
+    // an admin's conversation naming a tool the restricted key was not given: the key cannot post to it
+    const admins = await newConversation(h, t.secret, { tools: ["docs/write"] });
+    const pushed = await h.call(secret, "POST", `/v1/conversations/${admins.id}/messages`, {
+      content: "do it",
+    });
+    expect(pushed.status).toBe(403);
+    expect((await errorOf(pushed)).code).toBe("tool_not_granted");
+    const read = (await (
+      await h.call(t.secret, "GET", `/v1/conversations/${admins.id}`)
+    ).json()) as GetConversationResponse;
+    expect(read.messages).toEqual([]);
+    expect(read.conversation.tools).toEqual(["docs/write"]);
+    expect(
+      (await t.ctx.db.query("select 1 from absurd.t_turns where task_name = 'run-turn'")).rowCount,
+    ).toBe(1);
+
+    const unknown = await h.call(t.secret, "POST", "/v1/conversations", {
+      tools: ["docs/nope", "ghost/*"],
+    });
+    expect(unknown.status).toBe(400);
+    expect((await errorOf(unknown)).problems?.map((p) => p.pattern)).toEqual([
+      "docs/nope",
+      "ghost/*",
+    ]);
+  });
+
+  it("refuses built-ins unavailable here, and more than MAX_CONVERSATION_TOOLS tools", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const echo = await h.call(t.secret, "POST", "/v1/conversations", { tools: ["kerby/echo"] });
+    expect(echo.status).toBe(400);
+    expect(await errorOf(echo)).toMatchObject({
+      code: "unknown_tool",
+      problems: [{ pattern: "kerby/echo", reason: "a development tool, not offered here" }],
+    });
+    const judge = await h.call(t.secret, "POST", "/v1/conversations", { tools: ["kerby/judge"] });
+    expect(judge.status).toBe(400);
+    expect((await errorOf(judge)).problems).toEqual([
+      { pattern: "kerby/judge", reason: "needs a key for typesafe: PUT /v1/model-keys/typesafe" },
+    ]);
+    expect(
+      (await h.call(t.secret, "PUT", "/v1/model-keys/typesafe", { apiKey: "ts-test-1234567890" }))
+        .status,
+    ).toBe(204);
+    expect((await newConversation(h, t.secret, { tools: ["kerby/judge"] })).tools).toEqual([
+      "kerby/judge",
+    ]);
+    // `kerby/*` stands for what is available
+    expect((await newConversation(h, t.secret, { tools: ["kerby/*"] })).tools).toEqual(["kerby/*"]);
+
+    await addServer(h, t, "big");
+    const names = Array.from({ length: MAX_CONVERSATION_TOOLS }, (_, i) => `t${i}`);
+    await listed(t, "big", names, names);
+    // 64 of big's plus judge: one too many
+    const over = await h.call(t.secret, "POST", "/v1/conversations", {
+      tools: ["big/*", "kerby/judge"],
+    });
+    expect(over.status).toBe(400);
+    expect((await errorOf(over)).code).toBe("too_many_tools");
+    expect((await newConversation(h, t.secret, { tools: ["big/*"] })).tools).toEqual(["big/*"]);
+  });
+
+  it("offers kerby/echo where it is enabled", async () => {
+    const h = await harness({ enableEchoTool: true });
+    const t = await h.tenant("acme");
+    expect((await newConversation(h, t.secret, { tools: ["kerby/echo"] })).tools).toEqual([
+      "kerby/echo",
+    ]);
+    const available = ListAvailableToolsResponseSchema.parse(
+      await (await h.call(t.secret, "GET", "/v1/tools")).json(),
+    );
+    expect(available.tools.map((tool) => tool.pattern)).toEqual(["kerby/echo"]);
   });
 });

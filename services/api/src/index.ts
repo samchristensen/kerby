@@ -51,6 +51,7 @@ async function startApi(config: ApiConfig) {
       defaultStorageBytes: config.defaultStorageBytes,
       failedAuthPerMinute: config.failedAuthPerMinute,
       trustProxy: config.trustProxy,
+      enableEchoTool: config.enableEchoTool,
     },
   };
   const server = await serve(createApiApp(deps), { host: config.host, port: config.port });

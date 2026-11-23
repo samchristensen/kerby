@@ -3,6 +3,7 @@
 import {
   CreateConversationRequestSchema,
   CreatePromptRequestSchema,
+  CreateToolServerRequestSchema,
   GetConversationQuerySchema,
   GetTraceQuerySchema,
   type IntegrationRole,
@@ -15,6 +16,7 @@ import {
   PromptVersionParamSchema,
   PublishPromptRequestSchema,
   PutModelKeyRequestSchema,
+  PutToolCredentialRequestSchema,
   RenamePromptRequestSchema,
   RenderPromptRequestSchema,
   SaveDraftRequestSchema,
@@ -22,6 +24,11 @@ import {
   STREAM_INCLUDES,
   StreamIncludeSchema,
   SubmitJudgmentRequestSchema,
+  ToolGrantsSchema,
+  ToolNameSchema,
+  ToolServerSlugSchema,
+  UpdateToolRequestSchema,
+  UpdateToolServerRequestSchema,
 } from "@kerby/contracts";
 import { ModelKeyLimitError } from "@kerby/control-plane";
 import {
@@ -57,6 +64,15 @@ import {
   readJson,
   TokenBuckets,
 } from "@kerby/serve";
+import {
+  BuiltinToolServerError,
+  ToolNotFoundError,
+  ToolNotUsableError,
+  ToolServerLimitError,
+  ToolServerNotFoundError,
+  ToolServerTakenError,
+  UnknownToolError,
+} from "@kerby/tools";
 import { z } from "zod";
 import { createAuthenticator } from "../service/auth.ts";
 import {
@@ -84,6 +100,23 @@ import {
   saveTenantDraft,
   setTenantPromptLabel,
 } from "../service/prompts.ts";
+import {
+  createTenantToolServer,
+  deleteTenantToolServer,
+  getIntegrationTools,
+  getTenantToolServer,
+  listAvailableTools,
+  listTenantIntegrations,
+  listTenantToolServers,
+  putTenantToolCredential,
+  setIntegrationTools,
+  syncTenantToolServer,
+  ToolNotGrantedError,
+  ToolServerRequestError,
+  TooManyToolsError,
+  updateTenantTool,
+  updateTenantToolServer,
+} from "../service/tools.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -161,7 +194,7 @@ const ADMIN_ONLY: Access = ["admin"];
 /** What each role may do, for the message that refuses it. */
 const ROLE_SCOPE: Record<IntegrationRole, string> = {
   admin: "may call every route",
-  restricted: "may call only /v1/conversations* and /v1/judgments*",
+  restricted: "may call only /v1/conversations*, /v1/judgments* and GET /v1/tools",
 };
 
 export function createApiApp(deps: ApiDeps): FetchHandler {
@@ -267,6 +300,29 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(400, "not_publishable", error.message);
             if (error instanceof InvalidVariablesError)
               throw new HttpError(400, "invalid_variables", error.message);
+            if (error instanceof UnknownToolError) {
+              // Each bad pattern with why, so a client can show them next to what it sent.
+              status = 400;
+              return json(400, {
+                error: { code: "unknown_tool", message: error.message, problems: error.problems },
+              });
+            }
+            if (error instanceof ToolNotGrantedError)
+              throw new HttpError(403, "tool_not_granted", error.message);
+            if (error instanceof TooManyToolsError)
+              throw new HttpError(400, "too_many_tools", error.message);
+            if (error instanceof ToolServerTakenError)
+              throw new HttpError(409, "tool_server_exists", error.message);
+            if (error instanceof ToolServerLimitError)
+              throw new HttpError(409, "tool_server_limit", error.message);
+            if (error instanceof BuiltinToolServerError)
+              throw new HttpError(400, "builtin_tool_server", error.message);
+            if (error instanceof ToolServerNotFoundError || error instanceof ToolNotFoundError)
+              throw new HttpError(404, "not_found", error.message);
+            if (error instanceof ToolNotUsableError)
+              throw new HttpError(400, "tool_not_usable", error.message);
+            if (error instanceof ToolServerRequestError)
+              throw new HttpError(400, "invalid_request", error.message);
             throw error;
           }
         });
@@ -333,6 +389,25 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     return parsed.data;
   };
 
+  /** A slug that cannot exist is simply not found. */
+  const serverSlug = (params: Record<string, string>): string => {
+    const parsed = ToolServerSlugSchema.safeParse(params.slug);
+    if (!parsed.success)
+      throw new HttpError(
+        404,
+        "not_found",
+        "no tool server by that name: list them with GET /v1/tool-servers",
+      );
+    return parsed.data;
+  };
+
+  const toolName = (params: Record<string, string>): string => {
+    const parsed = ToolNameSchema.safeParse(params.name);
+    if (!parsed.success)
+      throw new HttpError(404, "not_found", "the server lists no tool of that name");
+    return parsed.data;
+  };
+
   const routes: Route[] = [
     ["GET", "/healthz", () => json(200, { ok: true })],
     [
@@ -376,7 +451,10 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       "/v1/conversations",
       authed("POST /v1/conversations", ANYONE, async (request, _params, principal) => {
         const body = await readJson(request, CreateConversationRequestSchema);
-        return json(201, await inTenant(principal, (ctx) => createConversation(deps, ctx, body)));
+        return json(
+          201,
+          await inTenant(principal, (ctx) => createConversation(deps, ctx, principal, body)),
+        );
       }),
     ],
     [
@@ -409,7 +487,9 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
         const storageBytes = principal.limits.storageBytes ?? deps.settings.defaultStorageBytes;
         return json(
           202,
-          await inTenant(principal, (ctx) => postMessage(deps, ctx, id, body, storageBytes)),
+          await inTenant(principal, (ctx) =>
+            postMessage(deps, ctx, principal, id, body, storageBytes),
+          ),
         );
       }),
     ],
@@ -689,6 +769,143 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           return new Response(null, { status: 204 });
         },
       ),
+    ],
+    [
+      "GET",
+      "/v1/tools",
+      authed("GET /v1/tools", ANYONE, async (_request, _params, principal) =>
+        json(200, await inTenant(principal, (ctx) => listAvailableTools(deps, ctx, principal))),
+      ),
+    ],
+    [
+      "GET",
+      "/v1/tool-servers",
+      authed("GET /v1/tool-servers", ADMIN_ONLY, async (_request, _params, principal) =>
+        json(200, await inTenant(principal, (ctx) => listTenantToolServers(deps, ctx))),
+      ),
+    ],
+    [
+      "POST",
+      "/v1/tool-servers",
+      authed("POST /v1/tool-servers", ADMIN_ONLY, async (request, _params, principal) => {
+        const body = await readJson(request, CreateToolServerRequestSchema, { maxBytes: 16_384 });
+        return json(
+          201,
+          await inTenant(principal, (ctx) => createTenantToolServer(deps, principal, ctx, body)),
+        );
+      }),
+    ],
+    [
+      "GET",
+      "/v1/tool-servers/:slug",
+      authed("GET /v1/tool-servers/:slug", ADMIN_ONLY, async (_request, params, principal) => {
+        const slug = serverSlug(params);
+        return json(200, await inTenant(principal, (ctx) => getTenantToolServer(deps, ctx, slug)));
+      }),
+    ],
+    [
+      "PATCH",
+      "/v1/tool-servers/:slug",
+      authed("PATCH /v1/tool-servers/:slug", ADMIN_ONLY, async (request, params, principal) => {
+        const slug = serverSlug(params);
+        const body = await readJson(request, UpdateToolServerRequestSchema, { maxBytes: 16_384 });
+        return json(
+          202,
+          await inTenant(principal, (ctx) =>
+            updateTenantToolServer(deps, principal, ctx, slug, body),
+          ),
+        );
+      }),
+    ],
+    [
+      "DELETE",
+      "/v1/tool-servers/:slug",
+      authed("DELETE /v1/tool-servers/:slug", ADMIN_ONLY, async (_request, params, principal) => {
+        const slug = serverSlug(params);
+        await inTenant(principal, (ctx) => deleteTenantToolServer(deps, principal, ctx, slug));
+        return new Response(null, { status: 204 });
+      }),
+    ],
+    [
+      "PUT",
+      "/v1/tool-servers/:slug/credential",
+      authed(
+        "PUT /v1/tool-servers/:slug/credential",
+        ADMIN_ONLY,
+        async (request, params, principal) => {
+          const slug = serverSlug(params);
+          const body = await readJson(request, PutToolCredentialRequestSchema, {
+            maxBytes: 16_384,
+          });
+          return json(
+            202,
+            await inTenant(principal, (ctx) =>
+              putTenantToolCredential(deps, principal, ctx, slug, body.value),
+            ),
+          );
+        },
+      ),
+    ],
+    [
+      "POST",
+      "/v1/tool-servers/:slug/sync",
+      authed(
+        "POST /v1/tool-servers/:slug/sync",
+        ADMIN_ONLY,
+        async (_request, params, principal) => {
+          const slug = serverSlug(params);
+          return json(
+            202,
+            await inTenant(principal, (ctx) => syncTenantToolServer(deps, principal, ctx, slug)),
+          );
+        },
+      ),
+    ],
+    [
+      "PATCH",
+      "/v1/tool-servers/:slug/tools/:name",
+      authed(
+        "PATCH /v1/tool-servers/:slug/tools/:name",
+        ADMIN_ONLY,
+        async (request, params, principal) => {
+          const slug = serverSlug(params);
+          const name = toolName(params);
+          const body = await readJson(request, UpdateToolRequestSchema);
+          return json(
+            200,
+            await inTenant(principal, (ctx) =>
+              updateTenantTool(deps, principal, ctx, slug, name, body),
+            ),
+          );
+        },
+      ),
+    ],
+    [
+      "GET",
+      "/v1/integrations",
+      authed("GET /v1/integrations", ADMIN_ONLY, async (_request, _params, principal) =>
+        json(200, await listTenantIntegrations(deps, principal)),
+      ),
+    ],
+    [
+      "GET",
+      "/v1/integrations/:id/tools",
+      authed("GET /v1/integrations/:id/tools", ADMIN_ONLY, async (_request, params, principal) => {
+        const id = params.id ?? "";
+        return json(200, await inTenant(principal, (ctx) => getIntegrationTools(deps, ctx, id)));
+      }),
+    ],
+    [
+      "PUT",
+      "/v1/integrations/:id/tools",
+      authed("PUT /v1/integrations/:id/tools", ADMIN_ONLY, async (request, params, principal) => {
+        const id = params.id ?? "";
+        const body = await readJson(request, ToolGrantsSchema);
+        return json(
+          200,
+          await inTenant(principal, (ctx) => setIntegrationTools(deps, principal, ctx, id, body)),
+        );
+      }),
     ],
   ];
   return createRouter(routes);

@@ -67,6 +67,8 @@ const apiConfigSchema = z.object({
    * entry. Off (the default), the socket's address is the client and the header is ignored, since anyone can send it.
    */
   trustProxy: z.stringbool().default(false),
+  /** Let conversations name the built-in `kerby/echo` tool (development); the worker has the same setting. */
+  enableEchoTool: z.stringbool().default(false),
 });
 
 export type ApiConfig = z.output<typeof apiConfigSchema>;
