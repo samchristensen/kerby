@@ -1,6 +1,7 @@
 import type { AgentRuntime } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import type { ControlDb, TenantPools } from "@kerby/db";
+import type { EgressFetch } from "@kerby/egress";
 import type { JudgmentProvider } from "@kerby/judgment";
 
 export type WorkerDeps = {
@@ -16,6 +17,12 @@ export type WorkerDeps = {
    * model, which needs no key; every real run requires one.
    */
   modelKeys: ((tenantId: string, provider: string) => Promise<string | undefined>) | undefined;
+  /** A tool server's sealed credential (ADR 0019), opened; undefined without the secrets private key. */
+  toolCredentials:
+    | ((tenantId: string, serverId: string) => Promise<string | undefined>)
+    | undefined;
+  /** The only `fetch` that reaches a tenant's MCP server: the egress guard's. */
+  toolFetch: EgressFetch;
   settings: {
     workerId: string;
     claimTimeoutSeconds: number;

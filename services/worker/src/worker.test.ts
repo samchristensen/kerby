@@ -24,14 +24,17 @@ import {
 import { createTestTenant } from "@kerby/conversations/testing";
 import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
 import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
+import { createEgressFetch } from "@kerby/egress";
 import type {
   JudgmentOutcome,
   JudgmentProvider,
   JudgmentRequest,
   JudgmentRun,
 } from "@kerby/judgment";
+import { startMcpFixture } from "@kerby/mcp/testing";
 import { configureLogging } from "@kerby/observability";
 import { createSealer, generateSecretsKeyPair } from "@kerby/secrets";
+import { createToolServer, findToolServerById, listTools } from "@kerby/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerConfigSchema } from "./config/index.ts";
 import {
@@ -75,6 +78,7 @@ type Options = {
   settings?: Partial<WorkerDeps["settings"]>;
   modelKeys?: WorkerDeps["modelKeys"];
   judgments?: WorkerDeps["judgments"];
+  toolCredentials?: WorkerDeps["toolCredentials"];
   /** Wrap the object store the worker and the test share, to make part of it fail. */
   wrapBlobs?: (blobs: Blobs) => Blobs;
 };
@@ -97,6 +101,9 @@ async function harness(options: Options = {}) {
     runtime,
     modelKeys: options.modelKeys,
     judgments: options.judgments ?? [],
+    toolCredentials: options.toolCredentials,
+    // The egress guard as production builds it, but letting the loopback test server through.
+    toolFetch: createEgressFetch({ blockedRanges: [] }),
     settings: {
       workerId: "test-worker",
       claimTimeoutSeconds: 30,
@@ -189,6 +196,113 @@ async function harness(options: Options = {}) {
 
 const textOf = (message: AgentMessage | undefined): string =>
   message ? message.content.map((part) => ("text" in part ? part.text : "")).join("") : "";
+
+describe("listing a tool server (sync-tool-server)", () => {
+  type Harness = Awaited<ReturnType<typeof harness>>;
+  type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
+
+  async function synced(h: Harness, t: Tenant, serverId: string) {
+    await t.ctx.db.transaction((tx) =>
+      spawnInTx(
+        tx,
+        "sync-tool-server",
+        { serverId },
+        { idempotencyKey: `sync:${crypto.randomUUID()}` },
+      ),
+    );
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    return eventually("the listing", async () => {
+      const server = await findToolServerById(t.ctx.db, serverId);
+      return server?.status !== "syncing" && server;
+    });
+  }
+
+  const searchTool = {
+    name: "search",
+    description: "Find a customer.",
+    inputSchema: { type: "object", properties: { q: { type: "string" } } },
+    annotations: { readOnlyHint: true },
+  };
+
+  it("lists the tools with the server's credential and leaves new ones disabled", async () => {
+    await using fixture = await startMcpFixture({
+      mode: "session",
+      requiredHeader: { name: "x-api-key", value: "s3cret-value" },
+      tools: [searchTool],
+    });
+    const credentials = new Map<string, string>();
+    const h = await harness({ toolCredentials: async (_t, id) => credentials.get(id) });
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "crm",
+      url: fixture.url,
+      auth: { kind: "header", header: "X-Api-Key" },
+    });
+    credentials.set(server.id, "s3cret-value");
+
+    const after = await synced(h, t, server.id);
+    expect(after).toMatchObject({ status: "ready", lastError: null });
+    const tools = await listTools(t.ctx.db, server.id);
+    expect(tools).toEqual([
+      expect.objectContaining({
+        name: "search",
+        enabled: false,
+        effect: "write",
+        pinned: expect.objectContaining({ description: "Find a customer." }),
+      }),
+    ]);
+  });
+
+  it("records why a listing failed, never the credential", async () => {
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      requiredHeader: { name: "authorization", value: "Bearer right" },
+      tools: [searchTool],
+    });
+    const secret = "Bearer wrong-0123456789";
+    const h = await harness({ toolCredentials: async () => secret });
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "crm",
+      url: fixture.url,
+      auth: { kind: "header", header: "Authorization" },
+    });
+    const after = await synced(h, t, server.id);
+    expect(after.status).toBe("error");
+    expect(after.lastError).toContain("refused the credential");
+    expect(after.lastError).not.toContain("wrong-0123456789");
+    expect(await listTools(t.ctx.db, server.id)).toEqual([]);
+  });
+
+  it("says a credential is missing instead of calling the server without one", async () => {
+    await using fixture = await startMcpFixture({ mode: "stateless", tools: [searchTool] });
+    const h = await harness({ toolCredentials: async () => undefined });
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "crm",
+      url: fixture.url,
+      auth: { kind: "header", header: "Authorization" },
+    });
+    const after = await synced(h, t, server.id);
+    expect(after).toMatchObject({ status: "error" });
+    expect(after.lastError).toContain("PUT /v1/tool-servers/crm/credential");
+    expect(fixture.requests).toEqual([]);
+  });
+
+  it("refuses a private address through the egress guard", async () => {
+    const h = await harness();
+    h.deps.toolFetch = createEgressFetch();
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "internal",
+      url: "http://127.0.0.1:9/mcp",
+      auth: { kind: "none" },
+    });
+    const after = await synced(h, t, server.id);
+    expect(after.status).toBe("error");
+    expect(after.lastError).toContain("blocked_address");
+  });
+});
 
 describe("a turn", () => {
   it("answers a message, records usage, and streams live events", async () => {

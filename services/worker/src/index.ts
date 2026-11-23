@@ -2,8 +2,9 @@
 // the real adapters, including the agent harness behind the AgentRuntime port.
 import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
-import { readModelKey, resolveTenantDbUrl } from "@kerby/control-plane";
+import { readModelKey, readToolCredential, resolveTenantDbUrl } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
+import { createEgressFetch } from "@kerby/egress";
 import { createSystemOneJudgments } from "@kerby/judgment-systemone";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
@@ -25,6 +26,9 @@ export type { WorkerDeps } from "./types/index.ts";
 /** The development runtime: Pi Durable over the scripted fake model. Tests use it; production never does. */
 export const createDevelopmentRuntime = (): AgentRuntime =>
   createPiDurableRuntime({ models: createFakeModels() });
+
+/** One MCP exchange, listing or call, from the first byte sent to the last read (ADR 0019). */
+const TOOL_CALL_TIMEOUT_MS = 60_000;
 
 async function startWorker(config: WorkerConfig): Promise<{
   scheduler: Scheduler;
@@ -48,18 +52,25 @@ async function startWorker(config: WorkerConfig): Promise<{
     resolveUrl: (tenantId) =>
       resolveTenantDbUrl(control, tenantDbBox, tenantId, config.tenantDbSslmode),
   });
+  // Sealed tenant secrets open only here (ADR 0008). Tool credentials need the key even with the fake model, which
+  // only stands in for the model.
+  const opener = config.secretsPrivateKeys
+    ? createOpener(splitKeys(config.secretsPrivateKeys))
+    : undefined;
   // Real runs use the tenant's own key for the model's provider; only the development fake model needs none.
-  const opener =
-    !config.kerbyFakeModel && config.secretsPrivateKeys
-      ? createOpener(splitKeys(config.secretsPrivateKeys))
-      : undefined;
+  const modelOpener = config.kerbyFakeModel ? undefined : opener;
   const deps: WorkerDeps = {
     control,
     pools,
     blobs,
-    modelKeys: opener
-      ? (tenantId, provider) => readModelKey(control, opener, tenantId, provider)
+    modelKeys: modelOpener
+      ? (tenantId, provider) => readModelKey(control, modelOpener, tenantId, provider)
       : undefined,
+    toolCredentials: opener
+      ? (tenantId, serverId) => readToolCredential(control, opener, tenantId, serverId)
+      : undefined,
+    // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only.
+    toolFetch: createEgressFetch({ timeoutMs: TOOL_CALL_TIMEOUT_MS }),
     runtime: createPiDurableRuntime({
       models: config.kerbyFakeModel ? createFakeModels() : createTenantModels,
       onReport: (type) => log("debug", "harness report", { type }),

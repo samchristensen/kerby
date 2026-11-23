@@ -11,6 +11,8 @@ export const TASKS = {
   "run-turn": { queue: "turns" },
   /** Shares the `turns` queue, so a judgment counts against the tenant's concurrent turns (ADR 0015). */
   "run-judgment": { queue: "turns" },
+  /** List a remote MCP server's tools (ADR 0019): only a worker can open its credential. On `turns`, the queue workers claim. */
+  "sync-tool-server": { queue: "turns" },
 } as const satisfies Record<string, { queue: Queue }>;
 
 export type TaskName = keyof typeof TASKS;
@@ -23,6 +25,8 @@ export type TaskParams = {
    * and model came from (`PinnedPrompt`, ADR 0017), for `GET /v1/judgments/:id`; tasks from before prompts lack it.
    */
   "run-judgment": JudgmentRequest & { prompt?: { name: string; version: number } };
+  /** The tool server (`tool_servers.id`) whose tools to list; a server deleted since is nothing to do. */
+  "sync-tool-server": { serverId: string };
 };
 
 /** What a task's handler returns: Absurd stores it as the task's result, readable with `readTask`. Small JSON. */
@@ -30,6 +34,8 @@ export type TaskResults = {
   // biome-ignore lint/suspicious/noConfusingVoidType: an async handler with no `return` is `Promise<void>`, which `Promise<undefined>` would refuse.
   "run-turn": void;
   "run-judgment": JudgmentOutcome;
+  // biome-ignore lint/suspicious/noConfusingVoidType: as for run-turn.
+  "sync-tool-server": void;
 };
 
 /** Retry for infrastructure failures (not for refused requests, which end the run normally). */
