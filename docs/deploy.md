@@ -80,10 +80,29 @@ fan-out failed` alert). Code must tolerate schema versions n and n-1 while it ru
 
 ## The console
 
-People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)): each sign-up provisions a tenant exactly
+People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)), but only with an email on the allowlist
+(`signup_allowlist`; anything else is refused before a tenant is made). Each sign-up provisions a tenant exactly
 as `POST /v1/operator/tenants` does (audited with actor `console`, default limits) and stores its first person, who sees
 the tenant's first API key once. An operator can still provision by hand; such a tenant has no person and cannot be
 signed in to. Suspending or deleting a tenant ends its console sessions at once (deleting also removes its people).
+
+**Admins and the allowlist.** The release that added the list put every existing account's email on it. An admin edits it
+in the console under Sign-ups (`/dashboard/admin`). The first admin is made by the operator, inside the control container
+as above (the email must already have an account; `admin: false` undoes it; each call is audited):
+
+```sh
+railway ssh --service control -- node --input-type=module -e '
+const r = await fetch("http://127.0.0.1:8081/v1/operator/console-admins", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
+  body: JSON.stringify({ email: "you@example.com", admin: true }),
+});
+console.log(r.status, await r.text());'
+```
+
+The console's own database role can read the flag and never write it. Removing an address from the list stops a future
+sign-up; it does not delete or lock an account that exists.
+
 Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-ins per address and per account
 (`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. There is no email
 verification, password reset or second person per tenant yet (tech debt). To see who signed up:

@@ -37,6 +37,14 @@ const nav = [
   },
 ];
 
+/** Only an admin sees this (the page itself refuses everyone else). */
+const adminNav = {
+  href: "/dashboard/admin",
+  label: "Sign-ups",
+  exact: false,
+  icon: "M10 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6 7a6 6 0 0 1 12 0M15.5 5v4M13.5 7h4",
+};
+
 function NavIcon({ d }: { d: string }) {
   return (
     <svg
@@ -66,6 +74,7 @@ function SignOut({ compact }: { compact: boolean }) {
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   const session = await requireSession();
+  const items = session.isAdmin ? [...nav, adminNav] : nav;
   return (
     <div className="flex h-screen flex-col bg-zinc-50 lg:flex-row">
       <aside className="hidden w-60 shrink-0 flex-col border-r border-zinc-200 bg-white lg:flex">
@@ -77,7 +86,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           <p className="truncate text-xs text-zinc-500">{session.email}</p>
         </div>
         <nav aria-label="Dashboard" className="mt-5 flex flex-1 flex-col gap-0.5 px-3">
-          {nav.map((item) => (
+          {items.map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
@@ -104,7 +113,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           </div>
         </div>
         <nav aria-label="Dashboard" className="flex gap-1 overflow-x-auto px-3 pb-2">
-          {nav.map((item) => (
+          {items.map((item) => (
             <NavLink
               key={item.href}
               href={item.href}

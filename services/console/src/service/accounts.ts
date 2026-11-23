@@ -60,6 +60,14 @@ export function createAccounts(deps: ConsoleDeps) {
         passwordHash: await hashPassword(password, settings.passwordCost),
       });
       if (!created.ok) {
+        if (created.code === "not_invited") {
+          return {
+            ok: false,
+            fields: {
+              email: "Sign-up is by invitation for now, and this email is not on the list.",
+            },
+          };
+        }
         return created.code === "name_taken"
           ? { ok: false, fields: { name: "This workspace name is taken" } }
           : { ok: false, fields: { email: "An account with this email exists. Sign in instead." } };
@@ -115,6 +123,7 @@ export function createAccounts(deps: ConsoleDeps) {
         email: found.email,
         tenantId: found.tenantId,
         tenantName: found.tenantName,
+        isAdmin: found.isAdmin,
       };
     },
   };
