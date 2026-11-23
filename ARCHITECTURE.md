@@ -278,8 +278,10 @@ then provisions a `default` tenant through the operator API and prints its key. 
   worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
   `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
   `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
-  key pair; `make secrets-key` makes a real one. The worker's egress guard lets `host.docker.internal` through
-  (`EGRESS_ALLOWED_HOSTS`, development only), so an MCP server on this machine can be registered as a tool server.
+  key pair; `make secrets-key` makes a real one. The worker's and the api's egress guards let `host.docker.internal`
+  through (`EGRESS_ALLOWED_HOSTS`, development only), so an MCP server on this machine can be registered as a tool server
+  (with OAuth too: `startOAuthFixture` from `@kerby/mcp/testing`, `urlHost: "host.docker.internal"`, `browserHost:
+  "127.0.0.1"`; sign in to the console at `127.0.0.1`, not `localhost`, so the callback carries the session cookie).
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts

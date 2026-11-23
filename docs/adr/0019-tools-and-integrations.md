@@ -130,9 +130,11 @@ session id); servers on 2025-11-25 and older still expect a session.
   refused request ran nothing, so a write is never repeated by the fallback. `tools/list` stops at 50 pages, one message
   at 4 Mi characters. `@kerby/mcp/testing` is a real MCP server for tests, in both revisions.
 - **The development stack reaches a local MCP server.** `createEgressFetch({ allowedHosts })` lets named hosts through
-  although they resolve to private addresses (a redirect away from one is checked as usual). The worker takes them from
-  `EGRESS_ALLOWED_HOSTS` and refuses it unless `KERBY_ENVIRONMENT=development`; compose names `host.docker.internal`.
-  `make tools-e2e` proves the path on the real stack.
+  although they resolve to private addresses (a redirect away from one is checked as usual). The worker and the api take
+  them from `EGRESS_ALLOWED_HOSTS` and refuse it unless `KERBY_ENVIRONMENT=development`; compose names
+  `host.docker.internal` (and, on the api, `127.0.0.1`, where the browser opens a test authorization server's authorize
+  endpoint). `make tools-e2e` proves the path on the real stack; the OAuth Connect flow was walked by hand in the console
+  against `startOAuthFixture` on the host.
 - Rejected:
   - Grants on keys (restricted keys): rotation makes a new key here (`rotateKey`), so every rotation would have to copy
     them, and one client with two keys could hold two policies. (owner's call)

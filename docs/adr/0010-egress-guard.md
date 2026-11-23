@@ -58,5 +58,6 @@ responses would tie up a worker or its memory.
   `timeoutMs` from `TOOL_CALL_TIMEOUT_MS` (60 s).
 - `allowedHosts`: host names (exact, case-insensitive) whose addresses skip the range check, so the Compose stack can reach
   an MCP server on the developer's machine (`host.docker.internal`, `make tools-e2e`). A redirect away from one is checked
-  like any hop. The worker takes them from `EGRESS_ALLOWED_HOSTS` and refuses to start with any unless
-  `KERBY_ENVIRONMENT=development`, so production has none.
+  like any hop. The worker and the api (OAuth discovery and code exchange, ADR 0019) take them from `EGRESS_ALLOWED_HOSTS`
+  and refuse to start with any unless `KERBY_ENVIRONMENT=development`, so production has none. On the api they are also
+  the hosts from which OAuth accepts plain http.
