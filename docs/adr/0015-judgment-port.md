@@ -96,3 +96,10 @@ as TypeSafe's, with the tenant's OpenCode key and its own model ids: `jev-1.14`,
   server; no OpenCode key was used. OpenCode's decision models also accept images, audio, video and PDFs in `state`; the
   port's `state` is JSON, so Kerby does not use that.
 - `OPENCODE_SYSTEMONE_BASE_URL` (worker) overrides the gateway, as `TYPESAFE_BASE_URL` does TypeSafe's.
+
+## Amendment: `judge` is offered only when named (2026-11-23)
+
+Tools are never implied (ADR 0019): the agent's tool is `kerby/judge`, a built-in of the reserved server `kerby`, offered
+only to a conversation (or chat prompt) that names it, and still only when the tenant holds a key for the default judgment
+provider. Naming it without that key is 400 `unknown_tool` at creation; a key removed since leaves it out of the turn. A
+restricted integration needs it granted like any tool. The model calls it `kerby__judge`.

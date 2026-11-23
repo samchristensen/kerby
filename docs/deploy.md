@@ -8,16 +8,16 @@ deployed and smoke-tested on a real project (plan 0001 log, 2026-11-22).
 
 One Railway project, `kerby`. Per environment (`production` is the standing one):
 
-| Service                | What                                                                                                                           | Reachable from                                                                     |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                           | the other services, privately                                                      |
-| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                   | the other services, by endpoint and keys                                           |
-| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                      | `control` only, by its keys; presigned URLs                                        |
-| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                   | `control` only, by its keys                                                        |
-| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                              | `railway ssh --service control`; the console, privately, on its sign-up route only |
-| `api`                  | tenant API (`:8080`), public Railway domain; listens on `::` for the private network                                           | the internet; the console, privately, with a person's session token                |
-| `worker`               | runs turns, health on `:8082`, no public domain                                                                                | nothing                                                                            |
-| `console`              | tenant console (`:3000`): sign-up, sign-in, API keys, model keys, chat ([ADR 0014](adr/0014-tenant-console.md)); public domain | the internet                                                                       |
+| Service                | What                                                                                                                                                     | Reachable from                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `Postgres`             | Railway's PostgreSQL template (18) on a volume; holds the control database and every tenant database                                                     | the other services, privately                                                      |
+| bucket `kerby`         | Railway bucket (S3-compatible, `iad`); every object is under `t/<tenantId>/`                                                                             | the other services, by endpoint and keys                                           |
+| bucket `kerby-exports` | tenant exports (`<tenantId>/<stamp>.dump`, `.objects.json`), kept 30 days                                                                                | `control` only, by its keys; presigned URLs                                        |
+| bucket `kerby-backup`  | nightly copy of `kerby`'s `t/`, in `sjc` ([ADR 0013](adr/0013-exports-and-bucket-backup.md))                                                             | `control` only, by its keys                                                        |
+| `control`              | operator API (`:8081`), no public domain; listens on `::` for the private network                                                                        | `railway ssh --service control`; the console, privately, on its sign-up route only |
+| `api`                  | tenant API (`:8080`), public Railway domain; listens on `::` for the private network                                                                     | the internet; the console, privately, with a person's session token                |
+| `worker`               | runs turns, health on `:8082`, no public domain                                                                                                          | nothing                                                                            |
+| `console`              | tenant console (`:3000`): sign-up, sign-in, integrations and their keys, model keys, tools, chat ([ADR 0014](adr/0014-tenant-console.md)); public domain | the internet                                                                       |
 
 `control`, `api`, `worker` and `console` run the images CI builds from `services/<name>/Dockerfile` (stage `prod`) and pushes to GHCR
 (`ghcr.io/samchristensen/kerby-<name>`); Railway builds nothing. Each environment runs the tag named after it
@@ -93,7 +93,7 @@ verification, password reset or second person per tenant yet (tech debt). To see
 
 [ADR 0015](adr/0015-judgment-port.md), [ADR 0016](adr/0016-guardrails.md). A tenant stores a key for a judgment provider
 (`PUT /v1/model-keys/typesafe` or `/opencode`, or the console's Model providers, which says what each key is for) and calls
-`POST /v1/judgments`, or its agent calls the `judge` tool, or a conversation created with `guardrails` checks every message and
+`POST /v1/judgments`, or its agent calls the `judge` tool (when the conversation names `kerby/judge`), or a conversation created with `guardrails` checks every message and
 tool call. Only a `worker` calls a provider, so it needs outbound HTTPS to `api.typesafe.ai` and `opencode.ai`;
 `TYPESAFE_BASE_URL` and `OPENCODE_SYSTEMONE_BASE_URL` on the worker point it elsewhere (stand-ins for local runs; unset in
 production). An OpenCode key is the one key a tenant already uses for OpenCode chat models. A judgment is a task on the `turns`
@@ -103,6 +103,18 @@ and outcome in the tenant's database for 30 days. Usage lands in the `usage` tab
 key stops answers on those conversations: it shows as `the turn failed after 5 attempts` or `a guardrail could not be checked`
 in the conversation's `lastError`. There is no alert; judgments `failed` after five attempts are
 `select state, count(*) from absurd.t_turns where task_name = 'run-judgment' group by 1` in a tenant database.
+
+## Tools
+
+[ADR 0019](adr/0019-tools-and-integrations.md). A tenant's admin registers remote MCP servers (`/v1/tool-servers`, or the
+console's Tools) and grants their tools to restricted integrations; conversations name the tools they may call. Only a
+`worker` talks to an MCP server, through the egress guard, so it needs outbound HTTP(S) to whatever public hosts tenants
+register, and nothing private: never set `EGRESS_ALLOWED_HOSTS` here (the worker refuses it outside development).
+`TOOL_CALL_TIMEOUT_MS` (worker, default 60000) bounds one listing or call. Listing a server is a `sync-tool-server` task on
+the `turns` queue (it counts against `maxConcurrentTurns`); a server that failed shows `status: error` and why in
+`lastError` (`GET /v1/tool-servers/<slug>`). Credentials are sealed like model keys (`tool-credential/<serverId>` in
+`tenant_secrets`). Keys made before integrations sit in each tenant's `admin` integration `default` and keep full access;
+an integration's role and archiving take effect within the api's auth cache (30 s). `make tools-e2e` is the local proof.
 
 ## Export a tenant
 

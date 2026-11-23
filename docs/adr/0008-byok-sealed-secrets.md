@@ -42,3 +42,5 @@ leak of the control database, of the internet-facing api, and of any log.
 - A worker compromise exposes keys of the tenants it runs while it runs them, as any design that must use the key does.
 - A tenant with no key gets a 400 at conversation creation, or a conversation `lastError` when a turn finds the key gone.
 - Local development uses a committed dev key pair in `compose.yaml` (the same status as its other dev secrets).
+- Tool credentials take the same path (ADR 0019): a tool server's header value is sealed by the api as
+  `tool-credential/<serverId>` and opened only by a worker; they do not count against the 32 model keys.

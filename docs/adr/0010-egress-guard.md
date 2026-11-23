@@ -43,10 +43,20 @@ responses would tie up a worker or its memory.
 
 ## Consequences
 
-- Wiring is per caller: M7's MCP client and any custom base URL pass this `fetch`. Until then nothing calls it.
+- Wiring is per caller: the MCP client (ADR 0019: the worker's listings and tool calls) and any custom base URL pass this
+  `fetch`.
 - A tenant cannot reach a service on Railway's private network or the metadata endpoint, even through a public redirect
   or a rebinding DNS server. It can still make Kerby call any public host on any port; per-tenant rate limits (G2)
   bound that.
 - No outbound proxy: the guard runs in the process. If Kerby ever runs tenant-chosen networking outside Node's `http`
   (raw sockets, another client), that path needs its own check or an egress proxy.
 - Streaming responses (SSE) live within the deadline; a long-lived MCP stream needs a caller-chosen `timeoutMs`.
+
+## Amendment: the first caller, and named hosts for the development stack (2026-11-23)
+
+- The worker passes this `fetch` to `packages/mcp` for every listing and call of a tenant's MCP server (ADR 0019), with
+  `timeoutMs` from `TOOL_CALL_TIMEOUT_MS` (60 s).
+- `allowedHosts`: host names (exact, case-insensitive) whose addresses skip the range check, so the Compose stack can reach
+  an MCP server on the developer's machine (`host.docker.internal`, `make tools-e2e`). A redirect away from one is checked
+  like any hop. The worker takes them from `EGRESS_ALLOWED_HOSTS` and refuses to start with any unless
+  `KERBY_ENVIRONMENT=development`, so production has none.

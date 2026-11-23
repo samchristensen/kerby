@@ -96,3 +96,14 @@ call or console). The data is the tenant's, behind the api; the console never op
   export.
 - Next.js and React are in the catalog; their versions move with the rest (`minimumReleaseAge`).
 - The console's image is larger than the others (Next.js and the compiled pages) and takes a build step in CI.
+
+## Amendment: integrations and tools (2026-11-23)
+
+ADR 0019. The API keys pages became Integrations (`/dashboard/integrations`): a person names an integration, gives it a
+role (`admin`, or `restricted` to conversations and judgments with only the tools granted to it), makes and revokes its
+keys, renames or archives it (archiving revokes its keys). The console writes `integrations` and the keys' `integration_id`
+directly, as it did keys (`kerby_console` gained `select`, `insert` and `update (name, role, updated_at, archived_at)` on
+`integrations` and `integration_id` on `api_keys`). Tools live in the tenant's database, so the console reaches them through
+the api with the person's session token, like the Studio: `/dashboard/tools` (servers, their status and listing, the
+credential, enabling, effect, drift review, the integrations granted), a restricted integration's tool grants, and a tool
+picker on a new chat and in a chat prompt's draft. A credential is never shown back.

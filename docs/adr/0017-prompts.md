@@ -71,3 +71,10 @@ testing is a playground for each kind; the editor is WYSIWYG with a tree of prom
   datasets, prompts in the agent's `judge` tool. Each is a later change on the same tables.
 - Prompt bodies share the tenant's storage quota with message bodies: a tenant near its quota cannot save a draft.
 - The console's bundle gains an editor library.
+
+## Amendment: chat prompts name tools (2026-11-23)
+
+A chat body carries `tools`, the patterns a conversation started from it may call (ADR 0019); a conversation from a prompt
+takes them with the system prompt, model and guardrails, so a request naming a prompt may not also name `tools`. They are
+resolved when the conversation is made, so a prompt names servers by slug and a server deleted since is a 400. Bodies
+stored before carry an empty list (tenant migration `prompts/0002_tools.sql`): none named, none offered.
