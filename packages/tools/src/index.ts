@@ -8,6 +8,7 @@ export const toolsMigrationsDir = join(import.meta.dirname, "..", "migrations", 
 export { BUILTIN_TOOLS } from "./builtin.ts";
 export {
   BuiltinToolServerError,
+  ToolDefinitionChangedError,
   ToolNotFoundError,
   ToolNotUsableError,
   ToolServerLimitError,
@@ -18,6 +19,7 @@ export {
 export { saveOAuthFlow, takeOAuthFlow } from "./oauth-flows.ts";
 export {
   createToolServer,
+  definitionHash,
   deleteToolServer,
   findToolServer,
   findToolServerById,

@@ -1,6 +1,7 @@
 // The tool registry (ADR 0019): servers, the tools they list, grants and the tools each conversation names. Everything
 // refers to a server by id; slugs appear only at the edges (patterns in, patterns out). The model only ever sees a
 // `pinned` definition, which an admin enabled or accepted: `recordSync` keeps that true for every listing.
+import { createHash } from "node:crypto";
 import {
   BUILTIN_TOOL_SERVER,
   exposedToolName,
@@ -20,6 +21,7 @@ import { errorCode } from "@kerby/observability";
 import { BUILTIN_TOOLS, builtinTool } from "./builtin.ts";
 import {
   BuiltinToolServerError,
+  ToolDefinitionChangedError,
   ToolNotFoundError,
   ToolNotUsableError,
   ToolServerLimitError,
@@ -279,7 +281,9 @@ async function refuseUnchangeable(db: TenantQueryable, id: string): Promise<neve
 /**
  * A new URL or auth. The server is `syncing` again, since what it lists may differ now; its tools keep their settings
  * until a worker lists them. Either change ends any OAuth connection the console began and has not finished. A
- * credential lives in the control plane: the caller drops it there when it no longer applies.
+ * credential lives in the control plane: the caller drops it there when it no longer applies. Every caller that
+ * changes what a listing would use (URL, auth, credential) or asks for a listing calls this, even with no changes:
+ * `updated_at` moves (by a millisecond at least), which fences an older listing still running (`recordSync`'s `asOf`).
  */
 export async function updateToolServer(
   db: TenantQueryable,
@@ -297,7 +301,8 @@ export async function updateToolServer(
             auth = coalesce($3, s.auth),
             auth_header = case when $3::text is null then s.auth_header else $4 end,
             auth_scope = case when $3::text is null then s.auth_scope else $5 end,
-            status = 'syncing', last_error = null, updated_at = now()
+            status = 'syncing', last_error = null,
+            updated_at = greatest(now(), s.updated_at + interval '1 millisecond')
       where s.id = $1 and s.kind = 'mcp'
       returning ${SERVER_COLUMNS}`,
     [id, changes.url ?? null, auth, header, scope],
@@ -358,21 +363,28 @@ function checkListing(
  * removed, and a removed one that is listed again comes back with its settings. A listing of more than
  * `MAX_TOOLS_PER_SERVER` tools, a duplicate or unnameable tool name, or an invalid definition is stored as an error
  * and leaves the tools as they were. Removed tools past `MAX_TOOLS_PER_SERVER` kept rows are forgotten, oldest first.
+ *
+ * `asOf` is the server's `updatedAt` when the listing began. When the server's URL, auth or credential changed since
+ * (its `updated_at` moved), the listing is stale and nothing is recorded: the change queued a listing of its own, and
+ * a slow old one must not overwrite it. False when nothing was recorded for that reason.
  */
 export async function recordSync(
   db: TenantDb,
   serverId: string,
   outcome: SyncOutcome,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await lockServer(tx, serverId);
+  asOf?: Date,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const updatedAt = await lockServer(tx, serverId);
+    // A `Date` holds milliseconds: the row's timestamp was read cut to them, as the worker's was.
+    if (asOf !== undefined && updatedAt.getTime() !== asOf.getTime()) return false;
     const checked = "error" in outcome ? { problem: outcome.error } : checkListing(outcome.tools);
     if ("problem" in checked) {
       await tx.query("update tool_servers set status = 'error', last_error = $2 where id = $1", [
         serverId,
         checked.problem.slice(0, MAX_ERROR_LENGTH),
       ]);
-      return;
+      return true;
     }
     await tx.query(
       `insert into tools as t (server_id, name, listed, pinned)
@@ -405,20 +417,23 @@ export async function recordSync(
       "update tool_servers set status = 'ready', last_error = null, synced_at = now() where id = $1",
       [serverId],
     );
+    return true;
   });
 }
 
-async function lockServer(tx: TenantTx, serverId: string): Promise<void> {
+/** Locks the server's row and returns its `updated_at`. */
+async function lockServer(tx: TenantTx, serverId: string): Promise<Date> {
   const { rows } = UUID.test(serverId)
-    ? await tx.query<{ kind: ToolServerKind }>(
-        "select kind from tool_servers where id = $1 for update",
+    ? await tx.query<{ kind: ToolServerKind; updated_at: Date }>(
+        "select kind, updated_at from tool_servers where id = $1 for update",
         [serverId],
       )
     : { rows: [] };
-  const kind = rows[0]?.kind;
-  if (kind === undefined)
+  const row = rows[0];
+  if (row === undefined)
     throw new ToolServerNotFoundError("the tool server was deleted: there is nothing to record");
-  if (kind === "builtin") throw new BuiltinToolServerError(BUILTIN_REFUSAL);
+  if (row.kind === "builtin") throw new BuiltinToolServerError(BUILTIN_REFUSAL);
+  return row.updated_at;
 }
 
 /**
@@ -448,10 +463,28 @@ export async function listTools(db: TenantQueryable, serverId: string): Promise<
   return rows.map(toolFromRow);
 }
 
+/** JSON with every object's keys sorted (by UTF-16 code units) and `undefined` members left out. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, member]) => member !== undefined);
+    entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** A tool's `listedHash` (ADR 0019): SHA-256, in hex, of the definition's canonical JSON. */
+export function definitionHash(definition: ToolDefinition): string {
+  return createHash("sha256").update(canonicalJson(definition)).digest("hex");
+}
+
 /**
  * Enable or disable a tool, set its effect, or accept what the server lists now. Enabling refuses a removed tool and
  * one whose exposed name providers would refuse. A disabled tool, and one being enabled, is pinned to what was listed,
- * so enabling approves exactly the definition the admin was shown.
+ * so enabling approves exactly the definition the admin was shown: with `expectedDefinition` (the `definitionHash` of
+ * what the admin was shown), enabling or accepting is refused with `ToolDefinitionChangedError` when the server has
+ * listed another definition since.
  */
 export async function updateTool(
   db: TenantDb,
@@ -469,14 +502,26 @@ export async function updateTool(
       throw new BuiltinToolServerError(
         "Kerby's own tools need no enabling and their effect is fixed: grant them and name them instead",
       );
-    const { rows: locked } = await tx.query<{ enabled: boolean; removed: boolean }>(
-      "select enabled, removed_at is not null as removed from tools where server_id = $1 and name = $2 for update",
+    const { rows: locked } = await tx.query<{
+      enabled: boolean;
+      removed: boolean;
+      listed: ToolDefinition;
+    }>(
+      "select enabled, removed_at is not null as removed, listed from tools where server_id = $1 and name = $2 for update",
       [serverId, name],
     );
     const current = locked[0];
     if (!current)
       throw new ToolNotFoundError(
         "the server has not listed a tool of that name: sync the server, then check the name",
+      );
+    if (
+      (changes.enabled === true || changes.acceptDefinition === true) &&
+      changes.expectedDefinition !== undefined &&
+      definitionHash(current.listed) !== changes.expectedDefinition
+    )
+      throw new ToolDefinitionChangedError(
+        "the server lists a different definition now: reload and review it",
       );
     if (changes.enabled === true) {
       if (current.removed)
@@ -505,12 +550,13 @@ export async function updateTool(
 /**
  * The refs `patterns` name, in order, each once. Refuses, naming every bad pattern and why: no such server, no such
  * tool, a removed tool, a tool not enabled. `kerby/<name>` must be one of Kerby's own tools; `<server>/*` needs only
- * the server.
+ * the server. No patterns: no query (a tenant whose tool tables are not there yet makes conversations without tools).
  */
 export async function resolveToolPatterns(
   db: TenantQueryable,
   patterns: string[],
 ): Promise<ToolRef[]> {
+  if (patterns.length === 0) return [];
   const parsed = patterns.map((pattern) => ({ pattern, parts: parseToolPattern(pattern) }));
   const slugs = [...new Set(parsed.flatMap(({ parts }) => (parts ? [parts.slug] : [])))];
   const { rows: servers } = await db.query<{ id: string; slug: string; kind: ToolServerKind }>(
@@ -557,8 +603,9 @@ export async function resolveToolPatterns(
   return distinct(refs);
 }
 
-/** The refs as patterns, with the servers' slugs now; a ref to a deleted server is dropped. */
+/** The refs as patterns, with the servers' slugs now; a ref to a deleted server is dropped. No refs: no query. */
 export async function toolPatterns(db: TenantQueryable, refs: ToolRef[]): Promise<string[]> {
+  if (refs.length === 0) return [];
   const ids = [...new Set(refs.map((ref) => ref.serverId))].filter((id) => UUID.test(id));
   const { rows } = await db.query<{ id: string; slug: string }>(
     "select id, slug from tool_servers where id = any($1::uuid[])",
@@ -580,12 +627,17 @@ function distinct(refs: ToolRef[]): ToolRef[] {
   return [...byKey.values()];
 }
 
-/** Replace the tools a conversation names, kept in the order given. Atomic; call it in the conversation's transaction. */
+/**
+ * Replace the tools a conversation names, kept in the order given. Atomic; call it in the conversation's transaction.
+ * Empty `refs` write nothing (no query): it is called for a new conversation, which names none yet, and that must work
+ * on a tenant whose tool tables are not there yet. Do not use it to clear a conversation's tools.
+ */
 export async function setConversationTools(
   db: TenantQueryable,
   conversationId: string,
   refs: ToolRef[],
 ): Promise<void> {
+  if (refs.length === 0) return;
   const unique = distinct(refs);
   await atomically(db, async (tx) => {
     await tx.query("delete from conversation_tools where conversation_id = $1", [conversationId]);
@@ -598,17 +650,25 @@ export async function setConversationTools(
   });
 }
 
-/** The tools a conversation names, in order; none for an unknown conversation. */
+/**
+ * The tools a conversation names, in order; none for an unknown conversation, and none on a tenant whose tool tables
+ * are not there yet (its tool migration has not run: Postgres 42P01).
+ */
 export async function listConversationTools(
   db: TenantQueryable,
   conversationId: string,
 ): Promise<ToolRef[]> {
   if (!UUID.test(conversationId)) return [];
-  const { rows } = await db.query<{ server_id: string; tool: string | null }>(
-    "select server_id, tool from conversation_tools where conversation_id = $1 order by position",
-    [conversationId],
-  );
-  return rows.map((row) => ({ serverId: row.server_id, tool: row.tool }));
+  try {
+    const { rows } = await db.query<{ server_id: string; tool: string | null }>(
+      "select server_id, tool from conversation_tools where conversation_id = $1 order by position",
+      [conversationId],
+    );
+    return rows.map((row) => ({ serverId: row.server_id, tool: row.tool }));
+  } catch (error) {
+    if (errorCode(error) === "42P01") return [];
+    throw error;
+  }
 }
 
 /** An integration's grants: the built-in server's first, then by slug, a whole server before its single tools. */
@@ -669,12 +729,14 @@ export async function listServerGrants(
 /**
  * The tools `refs` (or every server, for "all") stand for now: enabled, not removed and with a name providers accept,
  * each once with its pinned definition. Built-in refs expand to Kerby's own tools; the caller drops those it cannot
- * run, and applies `MAX_CONVERSATION_TOOLS`. Ordered by server (built-in first, then slug), then tool name.
+ * run, and applies `MAX_CONVERSATION_TOOLS`. Ordered by server (built-in first, then slug), then tool name. No refs:
+ * no query.
  */
 export async function offeredTools(
   db: TenantQueryable,
   refs: ToolRef[] | "all",
 ): Promise<OfferedTool[]> {
+  if (refs !== "all" && refs.length === 0) return [];
   const ids =
     refs === "all"
       ? null

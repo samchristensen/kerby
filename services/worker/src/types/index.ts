@@ -34,8 +34,10 @@ export type WorkerDeps = {
   modelKeys: ((tenantId: string, provider: string) => Promise<string | undefined>) | undefined;
   /** Tool servers' credentials; undefined without the secrets private key. */
   toolCredentials: ToolCredentials | undefined;
-  /** The only `fetch` that reaches a tenant's MCP server: the egress guard's. */
+  /** The only `fetch` that reaches a tenant's MCP server to call its tools: the egress guard's. */
   toolFetch: EgressFetch;
+  /** The egress guard's `fetch` for listing a server's tools: one page at most 1 MiB, one exchange at most 30 s. */
+  syncFetch: EgressFetch;
   settings: {
     workerId: string;
     claimTimeoutSeconds: number;

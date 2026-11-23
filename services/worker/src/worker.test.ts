@@ -42,7 +42,12 @@ import type {
   JudgmentRun,
 } from "@kerby/judgment";
 import { type OAuthCredential, parseOAuthCredential } from "@kerby/mcp";
-import { type OAuthFixture, startMcpFixture, startOAuthFixture } from "@kerby/mcp/testing";
+import {
+  type McpFixture,
+  type OAuthFixture,
+  startMcpFixture,
+  startOAuthFixture,
+} from "@kerby/mcp/testing";
 import { configureLogging } from "@kerby/observability";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import {
@@ -61,6 +66,7 @@ import {
   createDevelopmentRuntime,
   createHandlers,
   createScheduler,
+  toolFetches,
   type WorkerDeps,
 } from "./index.ts";
 import { toolServerHeaders } from "./service/mcp.ts";
@@ -148,8 +154,12 @@ async function harness(options: Options = {}) {
     modelKeys: options.modelKeys,
     judgments: options.judgments ?? [],
     toolCredentials,
-    // The egress guard as production builds it, but letting the loopback test server through.
-    toolFetch: createEgressFetch({ blockedRanges: [] }),
+    // The egress guard as production builds it, but letting the loopback test servers through.
+    ...toolFetches({
+      toolCallTimeoutMs: options.settings?.toolCallTimeoutMs ?? 60_000,
+      allowedHosts: [],
+      blockedRanges: [],
+    }),
     settings: {
       workerId: "test-worker",
       claimTimeoutSeconds: 30,
@@ -343,18 +353,151 @@ describe("listing a tool server (sync-tool-server)", () => {
     expect(fixture.requests).toEqual([]);
   });
 
-  it("refuses a private address through the egress guard", async () => {
+  it("refuses a private address through the egress guard, naming the host but not the address", async () => {
     const h = await harness();
-    h.deps.toolFetch = createEgressFetch();
+    const logs = captureLogs();
+    h.deps.syncFetch = createEgressFetch({
+      resolve: async () => [{ address: "10.20.30.40", family: 4 }],
+    });
     const t = await h.tenant("acme");
     const server = await createToolServer(t.ctx.db, {
       slug: "internal",
-      url: "http://127.0.0.1:9/mcp",
+      url: "https://internal.example/mcp",
       auth: { kind: "none" },
     });
     const after = await synced(h, t, server.id);
     expect(after.status).toBe("error");
-    expect(after.lastError).toContain("blocked_address");
+    expect(after.lastError).toContain(
+      "(blocked_address): internal.example is not a public address",
+    );
+    expect(after.lastError).not.toContain("10.20.30.40");
+    // The operator's log has the whole story.
+    expect(JSON.stringify(logs)).toContain("10.20.30.40");
+  });
+
+  it("stops a listing past the tool or byte limit, and a page past 1 MiB, as an error", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    /** Lists `fixture`'s tools as server `slug`: its state after, and how many pages were asked for. */
+    async function listedFrom(slug: string, fixture: McpFixture) {
+      const server = await createToolServer(t.ctx.db, {
+        slug,
+        url: fixture.url,
+        auth: { kind: "none" },
+      });
+      const after = await synced(h, t, server.id);
+      expect(await listTools(t.ctx.db, server.id)).toEqual([]);
+      return { after, pages: fixture.requests.filter((r) => r.method === "tools/list").length };
+    }
+
+    await using many = await startMcpFixture({
+      mode: "stateless",
+      tools: Array.from({ length: 400 }, (_, i) => ({ name: `t${i}` })),
+      pageSize: 50,
+    });
+    const counted = await listedFrom("many", many);
+    expect(counted.after.lastError).toContain("lists more than 200 tools");
+    expect(counted.pages).toBe(5);
+
+    // 600 KB a page: the seventh passes 4 MiB in all.
+    await using big = await startMcpFixture({
+      mode: "stateless",
+      tools: Array.from({ length: 10 }, (_, i) => ({
+        name: `big${i}`,
+        description: "d".repeat(600_000),
+      })),
+      pageSize: 1,
+    });
+    const weighed = await listedFrom("big", big);
+    expect(weighed.after.lastError).toContain(`over ${4 * 1024 * 1024} bytes`);
+    expect(weighed.pages).toBe(7);
+
+    // One page over 1 MiB: refused by the listing's egress guard as it arrives.
+    await using huge = await startMcpFixture({
+      mode: "stateless",
+      tools: [{ name: "huge", description: "d".repeat(1_500_000) }],
+    });
+    expect((await listedFrom("huge", huge)).after.lastError).toContain("response_too_large");
+  });
+
+  it("records nothing from a listing that began before the server changed", async () => {
+    await using old = await startMcpFixture({ mode: "stateless", tools: [{ name: "old" }] });
+    await using moved = await startMcpFixture({ mode: "stateless", tools: [{ name: "new" }] });
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let reads = 0;
+    const h = await harness({
+      toolCredentials: async () => {
+        // The first listing waits here, holding the old address, while the address changes.
+        if (reads++ === 0) {
+          reading.resolve();
+          await release.promise;
+        }
+        return "a-credential-value";
+      },
+    });
+    const logs = captureLogs();
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "crm",
+      url: old.url,
+      auth: { kind: "header", header: "X-Api-Key" },
+    });
+    await t.ctx.db.transaction((tx) =>
+      spawnInTx(tx, "sync-tool-server", { serverId: server.id }, { idempotencyKey: "sync:first" }),
+    );
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await reading.promise;
+    await updateToolServer(t.ctx.db, server.id, { url: moved.url });
+    release.resolve();
+    await eventually("the stale listing", async () =>
+      logs.some((line) => line.msg === "tool server listed"),
+    );
+    expect(old.requests.length).toBeGreaterThan(0);
+    expect(await listTools(t.ctx.db, server.id)).toEqual([]);
+    expect((await findToolServerById(t.ctx.db, server.id))?.status).toBe("syncing");
+
+    const after = await synced(h, t, server.id);
+    expect(after.status).toBe("ready");
+    expect((await listTools(t.ctx.db, server.id)).map((tool) => tool.name)).toEqual(["new"]);
+  });
+
+  it("records why a listing that cannot start failed on its last attempt, retrying before it", async () => {
+    let reads = 0;
+    const h = await harness({
+      toolCredentials: async () => {
+        reads++;
+        throw new Error("the control database is unreachable");
+      },
+    });
+    const t = await h.tenant("acme");
+    const server = await createToolServer(t.ctx.db, {
+      slug: "crm",
+      url: "https://crm.example/mcp",
+      auth: { kind: "header", header: "X-Api-Key" },
+    });
+    await t.ctx.db.transaction((tx) =>
+      spawnInTx(
+        tx,
+        "sync-tool-server",
+        { serverId: server.id },
+        {
+          idempotencyKey: `sync:${crypto.randomUUID()}`,
+          maxAttempts: 2,
+          retry: { kind: "fixed", baseSeconds: 0 },
+        },
+      ),
+    );
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    const after = await eventually("the listing's last attempt", async () => {
+      const found = await findToolServerById(t.ctx.db, server.id);
+      return found?.status !== "syncing" && found;
+    });
+    expect(after).toMatchObject({
+      status: "error",
+      lastError: "listing its tools failed: the control database is unreachable",
+    });
+    expect(reads).toBe(2);
   });
 });
 
@@ -425,6 +568,18 @@ describe("a turn", () => {
     expect((executions.rows[0]?.first_at ?? new Date(0)).getTime()).toBeGreaterThanOrEqual(
       requested.rows[0]?.created_at.getTime() ?? Infinity,
     );
+  });
+
+  it("runs on a tenant whose tool tables are not there yet (schema n-1)", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    await t.ctx.db.query(
+      "drop table tool_oauth_flows, conversation_tools, integration_tools, tools, tool_servers",
+    );
+    const conversation = await h.conversation(t, []);
+    await h.post(t, conversation.id, "hello");
+    const all = await h.settled(t, conversation.id, 2);
+    expect(textOf(all[1])).toBe("Echo: hello");
   });
 });
 
@@ -905,6 +1060,80 @@ describe("a turn's tools", () => {
     const sent = fixture.mcp.requests.map((request) => request.headers.authorization);
     expect(sent[0]).toBe(`Bearer ${granted.accessToken}`);
     expect(sent.at(-1)).toBe(`Bearer ${(await storedOAuth(h, t, server.id))?.accessToken}`);
+  });
+
+  it("says a write call may have taken effect when its response began and failed, not when the server answered an error", async () => {
+    let answer: "unavailable" | "malformed" | "error" = "unavailable";
+    const fixture: McpFixture = await startMcpFixture({
+      mode: "stateless",
+      tools: [
+        {
+          name: "send",
+          handler: () => {
+            throw new Error("no such recipient");
+          },
+        },
+      ],
+      intercept: (req, res) => {
+        if (req.headers["mcp-method"] !== "tools/call" || answer === "error") return false;
+        if (answer === "unavailable") res.writeHead(503).end();
+        else {
+          const id = fixture.requests.at(-1)?.id;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id, result: { content: "nope" } }));
+        }
+        return true;
+      },
+    });
+    cleanups.push(() => fixture.close());
+    const into = seen();
+    const h = await harness({ runtime: calling(into, "crm__send", { q: "hi" }) });
+    const t = await h.tenant("acme");
+    await registered(t, { url: fixture.url, tools: [{ name: "send", effect: "write" }] });
+    const MAY = "The call may have taken effect: check before calling it again.";
+    for (const [kind, may] of [
+      ["unavailable", true],
+      ["malformed", true],
+      ["error", false],
+    ] as const) {
+      answer = kind;
+      const conversation = await h.conversation(t, ["crm/send"]);
+      await h.post(t, conversation.id, "send it");
+      await h.settled(t, conversation.id, 3);
+      const [text] = textsOf(into.results.at(-1));
+      expect(into.results.at(-1)?.isError, kind).toBe(true);
+      expect(text?.endsWith(MAY), `${kind}: ${text}`).toBe(may);
+    }
+  });
+
+  it("scrubs the token of a Bearer credential when a result holds it alone", async () => {
+    const token = "s3cret-token-0123";
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      requiredHeader: { name: "authorization", value: `Bearer ${token}` },
+      tools: [
+        {
+          name: "whoami",
+          handler: () => ({ content: [{ type: "text", text: `token ${token}` }] }),
+        },
+      ],
+    });
+    const into = seen();
+    const h = await harness({
+      runtime: calling(into, "crm__whoami", {}),
+      toolCredentials: async () => `Bearer ${token}`,
+    });
+    const t = await h.tenant("acme");
+    await registered(t, {
+      url: fixture.url,
+      auth: { kind: "header", header: "Authorization" },
+      tools: [{ name: "whoami" }],
+    });
+    const conversation = await h.conversation(t, ["crm/whoami"]);
+    await h.post(t, conversation.id, "who am I");
+    const transcript = await h.settled(t, conversation.id, 3);
+    expect(textsOf(into.results[0])).toEqual(["token [redacted]"]);
+    expect(JSON.stringify(transcript)).not.toContain(token);
   });
 });
 
@@ -2211,6 +2440,28 @@ describe("judgments", () => {
         /judge input is invalid: questions: a judgment asks 1 to 32 questions/,
       );
       expect(calls).toHaveLength(0);
+    });
+
+    it("cuts an error result the model reads to 16 KiB", async () => {
+      const seen = { tools: [] as string[], results: [] as string[] };
+      const h = await harness({
+        runtime: judging({ state: "x", questions: request.questions }, seen),
+        judgments: [provider([], async () => ({ type: "refused", error: "e".repeat(100_000) }))],
+        modelKeys: async () => "key-0123456789",
+        echo: false,
+      });
+      const t = await h.tenant("acme");
+      await putModelKey(
+        h.control.db,
+        createSealer(generateSecretsKeyPair().publicKey),
+        t.id,
+        "typesafe",
+        "key-0123456789",
+      );
+      const conversation = await h.conversation(t, ["kerby/judge"]);
+      await h.post(t, conversation.id, "judge this");
+      await h.settled(t, conversation.id, 3);
+      expect(seen.results[0]).toBe(`${"e".repeat(16 * 1024)} [the error was cut at 16 KiB]`);
     });
   });
 });

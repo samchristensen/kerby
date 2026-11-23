@@ -9,7 +9,7 @@ import {
 } from "@kerby/contracts";
 import type { TenantContext } from "@kerby/db";
 import { EgressError } from "@kerby/egress";
-import { type McpCallOutcome, type McpSession, openMcpSession } from "@kerby/mcp";
+import { type McpCallOutcome, McpError, type McpSession, openMcpSession } from "@kerby/mcp";
 import { listConversationTools, type OfferedTool, offeredTools } from "@kerby/tools";
 import type { WorkerDeps } from "../types/index.ts";
 import { type Judge, judgeTool } from "./judgments.ts";
@@ -23,6 +23,8 @@ import {
 
 /** Text of one tool result the model reads, at most; past it the result is cut with a note. */
 const MAX_TOOL_RESULT_BYTES = 256 * 1024;
+/** Text of one error result the model reads (a refusal, a server's error), at most; past it the text is cut. */
+const MAX_ERROR_RESULT_BYTES = 16 * 1024;
 
 export interface TurnTools {
   /** What the model is offered, by exposed name (`<server>__<tool>`). */
@@ -42,15 +44,28 @@ export interface TurnTools {
   close(): Promise<void>;
 }
 
-function textResult(text: string, isError = false): ToolResult {
-  return { content: [{ type: "text", text }], isError };
+function textResult(text: string): ToolResult {
+  return { content: [{ type: "text", text }], isError: false };
+}
+
+/**
+ * An error result the model reads (here, or a guardrail's refusal): `text` cut to `MAX_ERROR_RESULT_BYTES` with a
+ * note, then `after` (a note of Kerby's) whole.
+ */
+export function errorResult(text: string, after = ""): ToolResult {
+  const bytes = new TextEncoder().encode(text);
+  const kept =
+    bytes.length <= MAX_ERROR_RESULT_BYTES
+      ? text
+      : // A cut inside a character leaves a replacement character: drop it.
+        `${new TextDecoder().decode(bytes.subarray(0, MAX_ERROR_RESULT_BYTES)).replace(/\uFFFD$/, "")} [the error was cut at ${MAX_ERROR_RESULT_BYTES / 1024} KiB]`;
+  return { content: [{ type: "text", text: `${kept}${after}` }], isError: true };
 }
 
 /** The message a model reads in place of a write tool's result when an earlier attempt may have run it. */
 export const interruptedResult = (name: string): ToolResult =>
-  textResult(
+  errorResult(
     `the call to ${name} was interrupted before its result was stored; it may or may not have taken effect: check before calling it again`,
-    true,
   );
 
 function specOf(tool: OfferedTool): ToolSpec {
@@ -74,7 +89,7 @@ export async function turnTools(
   conversationId: string,
 ): Promise<TurnTools | { refused: string }> {
   const refs = await listConversationTools(ctx.db, conversationId);
-  const named = refs.length === 0 ? [] : await offeredTools(ctx.db, refs);
+  const named = await offeredTools(ctx.db, refs);
   const judge = named.some((tool) => tool.server.kind === "builtin" && tool.tool === "judge")
     ? await judgeTool(deps, ctx.tenantId, conversationId)
     : undefined;
@@ -151,15 +166,14 @@ function runnable(
   ): Promise<ToolResult> {
     const input = call.input;
     if (typeof input !== "object" || input === null || Array.isArray(input))
-      return textResult(
+      return errorResult(
         `${tool.exposedName} takes a JSON object as its input (see its input schema), not ${Array.isArray(input) ? "an array" : input === null ? "null" : `a ${typeof input}`}`,
-        true,
       );
     const doing = `calling ${tool.exposedName}`;
     let opened = await sessionFor(tool.server, signal);
     // An OAuth server that refuses its token (401, so the call did not run) gets one refresh and one more try.
     for (let attempt = 0; ; attempt++) {
-      if ("missing" in opened) return textResult(`${doing} failed: ${opened.missing}`, true);
+      if ("missing" in opened) return errorResult(`${doing} failed: ${opened.missing}`);
       try {
         const outcome = await opened.session.callTool(tool.tool, input as Record<string, unknown>, {
           callId: call.id,
@@ -175,12 +189,12 @@ function runnable(
             ? afterRefusal(deps, tenantId, tool.server, opened.auth, error, signal)
             : undefined;
         if (again === undefined) {
-          const why = whyToolFailed(error, [...secrets], doing, tool.server.auth.kind);
-          return textResult(
+          const why = whyToolFailed(error, [...secrets], doing, tool.server);
+          return errorResult(
+            why,
             tool.effect === "write" && mayHaveTakenEffect(error)
-              ? `${why}. The call may have taken effect: check before calling it again.`
-              : why,
-            true,
+              ? ". The call may have taken effect: check before calling it again."
+              : "",
           );
         }
         // The refreshed token's session replaces the refused one for the rest of the run.
@@ -204,7 +218,7 @@ function runnable(
     },
     async execute(call, signal) {
       const tool = byName.get(call.name);
-      if (!tool) return textResult(`unknown tool "${call.name}"`, true);
+      if (!tool) return errorResult(`unknown tool "${call.name}"`);
       if (tool.server.kind === "builtin") return runBuiltin(tool.tool, call, signal, judge);
       return callRemote(tool, call, signal);
     },
@@ -235,15 +249,14 @@ async function runBuiltin(
       typeof input.text === "string"
         ? input.text
         : undefined;
-    return text === undefined ? textResult("echo needs a string `text`", true) : textResult(text);
+    return text === undefined ? errorResult("echo needs a string `text`") : textResult(text);
   }
   if (name === "judge" && judge) {
     // The model wrote this input: parse it as the API parses a tenant's, and say what is wrong so it can retry.
     const parsed = JudgmentRequestSchema.safeParse(call.input);
     if (!parsed.success)
-      return textResult(
+      return errorResult(
         `judge input is invalid: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
-        true,
       );
     const outcome = await judge(
       { ...parsed.data, model: parsed.data.model ?? DEFAULT_JUDGMENT_MODEL },
@@ -252,13 +265,24 @@ async function runBuiltin(
     );
     return outcome.type === "answered"
       ? textResult(JSON.stringify(outcome.answers))
-      : textResult(outcome.error, true);
+      : errorResult(outcome.error);
   }
-  return textResult(`unknown tool "${call.name}"`, true);
+  return errorResult(`unknown tool "${call.name}"`);
 }
 
-/** A timeout or a broken connection: the request may have reached the server, and the tool may have run. */
+/**
+ * The request may have reached the server and the tool may have run: a timeout, a broken connection, a response that
+ * began and was then cut, malformed or too large, or a gateway's 502, 503 or 504. A JSON-RPC error (the server
+ * answered) and a 4xx mean it did not run.
+ */
 function mayHaveTakenEffect(error: unknown): boolean {
+  if (error instanceof McpError)
+    return (
+      error.afterResponse &&
+      (error.kind === "protocol" ||
+        (error.kind === "http" &&
+          (error.status === 502 || error.status === 503 || error.status === 504)))
+    );
   if (error instanceof EgressError)
     return (
       error.reason === "timeout" ||

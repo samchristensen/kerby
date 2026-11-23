@@ -9,7 +9,7 @@ import {
   updateToolCredential,
 } from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
-import { createEgressFetch } from "@kerby/egress";
+import { type BlockedRange, createEgressFetch } from "@kerby/egress";
 import { createSystemOneJudgments } from "@kerby/judgment-systemone";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
 import {
@@ -37,6 +37,28 @@ export type { WorkerDeps } from "./types/index.ts";
 /** The development runtime: Pi Durable over the scripted fake model. Tests use it; production never does. */
 export const createDevelopmentRuntime = (): AgentRuntime =>
   createPiDurableRuntime({ models: createFakeModels() });
+
+/**
+ * The egress guard's `fetch`es for tenants' MCP servers (ADR 0010): public addresses only, but for the hosts a
+ * development stack names (`blockedRanges` narrows the check in tests). A call's result is cut at 256 KiB, so 4 MiB of
+ * response is plenty; a listing reads at most 1 MiB a page (and 4 MiB in all, counted by the sync), 30 s an exchange.
+ */
+export function toolFetches(options: {
+  toolCallTimeoutMs: number;
+  allowedHosts: readonly string[];
+  blockedRanges?: readonly BlockedRange[];
+}): Pick<WorkerDeps, "toolFetch" | "syncFetch"> {
+  const { allowedHosts, blockedRanges } = options;
+  const guard = blockedRanges === undefined ? { allowedHosts } : { allowedHosts, blockedRanges };
+  return {
+    toolFetch: createEgressFetch({
+      ...guard,
+      timeoutMs: options.toolCallTimeoutMs,
+      maxResponseBytes: 4 * 1024 * 1024,
+    }),
+    syncFetch: createEgressFetch({ ...guard, timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }),
+  };
+}
 
 async function startWorker(config: WorkerConfig): Promise<{
   scheduler: Scheduler;
@@ -86,10 +108,9 @@ async function startWorker(config: WorkerConfig): Promise<{
             updateToolCredential(control, keys, tenantId, serverId, change),
         }
       : undefined,
-    // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only, but for the
-    // hosts a development stack names.
-    toolFetch: createEgressFetch({
-      timeoutMs: config.toolCallTimeoutMs,
+    // Every exchange with a tenant's MCP server goes through the egress guard.
+    ...toolFetches({
+      toolCallTimeoutMs: config.toolCallTimeoutMs,
       allowedHosts: config.egressAllowedHosts,
     }),
     runtime: createPiDurableRuntime({

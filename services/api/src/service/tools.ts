@@ -40,6 +40,7 @@ import { errorFields, log } from "@kerby/observability";
 import {
   BuiltinToolServerError,
   createToolServer,
+  definitionHash,
   deleteToolServer,
   findToolServer,
   getGrants,
@@ -117,12 +118,13 @@ async function holdings(db: TenantQueryable, principal: Principal): Promise<Tool
   return principal.integrationId === null ? [] : getGrants(db, principal.integrationId);
 }
 
-/** Refuse when the caller's grants do not cover every one of `refs`. */
+/** Refuse when the caller's grants do not cover every one of `refs`. No refs: nothing to hold, and no query. */
 export async function assertHolds(
   db: TenantQueryable,
   principal: Principal,
   refs: ToolRef[],
 ): Promise<void> {
+  if (refs.length === 0) return;
   const held = await holdings(db, principal);
   if (held === "all") return;
   const missing = uncoveredBy(held, refs);
@@ -202,6 +204,7 @@ function toolResource(slug: string, tool: ToolRecord): Tool {
     removed: tool.removedAt !== null,
     definition: tool.pinned,
     listed: tool.drifted ? tool.listed : null,
+    listedHash: definitionHash(tool.listed),
   };
 }
 
@@ -361,7 +364,7 @@ export async function createTenantToolServer(
     detail: {
       serverId: server.id,
       slug: server.slug,
-      url: request.url,
+      url: new URL(request.url).origin,
       ...authDetail(server.auth),
     },
   });
@@ -429,7 +432,7 @@ export async function updateTenantToolServer(
     detail: {
       serverId: server.id,
       slug: server.slug,
-      url: server.url,
+      url: server.url === null ? null : new URL(server.url).origin,
       ...authDetail(server.auth),
       credentialReplaced: request.credential !== undefined,
     },

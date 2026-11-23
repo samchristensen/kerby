@@ -1,7 +1,7 @@
 // An MCP client on a given `fetch` (ADR 0019): Streamable HTTP, stateless 2026-07-28 first, falling back to the
 // handshake revisions (2025-11-25 and older). Kerby declares no client capabilities.
 import { z } from "zod";
-import { McpError } from "./errors.ts";
+import { clip, McpError } from "./errors.ts";
 import {
   encodeHeaderValue,
   HEADER_MISMATCH,
@@ -37,6 +37,17 @@ export {
   registerOAuthClient,
 } from "./oauth.ts";
 
+/**
+ * The secrets in a credential header's value, to scrub from anything a server answers: the value, and for a value with
+ * a scheme (`Bearer <token>`, `<word> <rest>`) the rest too when it is at least 8 characters, since a server may echo
+ * the token alone.
+ */
+export function headerSecrets(value: string): string[] {
+  if (value.length === 0) return [];
+  const rest = /^[^\s]+ +(.+)$/.exec(value)?.[1]?.trim();
+  return rest !== undefined && rest.length >= 8 ? [value, rest] : [value];
+}
+
 /** `tools/list` pages followed before giving up on a server that never stops paginating. */
 const MAX_LIST_PAGES = 50;
 /** One JSON response or one server-sent event, in characters. */
@@ -65,8 +76,14 @@ export type McpCallOutcome = {
 
 /** @public The worker holds one per server per run (ADR 0019). */
 export interface McpSession {
-  /** Every tool the server lists, following `nextCursor` for at most 50 pages. */
-  listTools(signal: AbortSignal): Promise<McpToolListing[]>;
+  /**
+   * Every tool the server lists, following `nextCursor` for at most 50 pages. With `limits`, stops with a `protocol`
+   * McpError as soon as more than `maxTools` tools, or more than `maxBytes` decoded response bytes, have arrived.
+   */
+  listTools(
+    signal: AbortSignal,
+    limits?: { maxTools: number; maxBytes: number },
+  ): Promise<McpToolListing[]>;
   /**
    * Calls a tool; `callId` goes in `params._meta["kerby/callId"]` for servers that deduplicate. `inputSchema` (the
    * definition the model saw) lets a 2026-07-28 server's `x-mcp-header` arguments be mirrored into `Mcp-Param-*`
@@ -97,7 +114,23 @@ type Outgoing = {
   name?: string;
   /** `Mcp-Param-*` headers, sent to a 2026-07-28 server only. */
   paramHeaders?: Record<string, string>;
+  /** Decoded bytes the answer may still take; reading past them throws `exceeded()`. */
+  budget?: Budget;
 };
+type Budget = { left: number; exceeded: () => McpError };
+
+/** `body`, counted against `budget` as it arrives. */
+function counted(body: ReadableStream<Uint8Array>, budget: Budget): ReadableStream<Uint8Array> {
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        budget.left -= chunk.byteLength;
+        if (budget.left < 0) throw budget.exceeded();
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+}
 
 const RpcIdSchema = z.union([z.string(), z.number()]);
 const RpcErrorSchema = z.object({
@@ -139,18 +172,27 @@ const InitializeResultSchema = z.object({ protocolVersion: z.string() });
 const SupportedVersionsSchema = z.object({ supported: z.array(z.string()) });
 
 function describeIssues(error: z.ZodError): string {
-  return error.issues
-    .slice(0, 3)
-    .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
-    .join("; ");
+  return clip(
+    error.issues
+      .slice(0, 3)
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; "),
+  );
 }
 
-function parseResult<T>(schema: z.ZodType<T>, result: Record<string, unknown>, method: string): T {
+/** `afterResponse`: the result answers the request asked for (see `McpError`), not a handshake step. */
+function parseResult<T>(
+  schema: z.ZodType<T>,
+  result: Record<string, unknown>,
+  method: string,
+  afterResponse = false,
+): T {
   const parsed = schema.safeParse(result);
   if (!parsed.success) {
     throw new McpError(
       "protocol",
       `the MCP server's ${method} result is malformed: ${describeIssues(parsed.error)}`,
+      { afterResponse },
     );
   }
   return parsed.data;
@@ -194,7 +236,7 @@ export function openMcpSession(options: {
 }): McpSession {
   const { url, fetch, clientInfo } = options;
   const callerHeaders = { ...options.headers };
-  const secrets = Object.values(callerHeaders).filter((value) => value.length > 0);
+  const secrets = Object.values(callerHeaders).flatMap(headerSecrets);
   const host = new URL(url).host;
   let era: Era | undefined;
   let probing: Promise<unknown> | undefined;
@@ -202,11 +244,14 @@ export function openMcpSession(options: {
   let closed = false;
   const cancellations = new Set<Promise<void>>();
 
-  /** Server-supplied text with every caller header value (a credential the server may echo) taken out. */
+  /**
+   * Server-supplied text with every caller header value (a credential the server may echo) taken out, cut to
+   * `MAX_SERVER_TEXT_CHARS`.
+   */
   const scrub = (text: string): string => {
     let out = text;
     for (const secret of secrets) out = out.split(secret).join("[redacted]");
-    return out;
+    return clip(out);
   };
 
   const headersFor = (current: Era | undefined): Headers => {
@@ -221,22 +266,21 @@ export function openMcpSession(options: {
     return headers;
   };
 
-  const failureError = (failure: Failure, context = ""): McpError => {
+  /** `afterResponse`: the failure answered the request asked for, not a handshake step before it. */
+  const failureError = (failure: Failure, context = "", afterResponse = false): McpError => {
     const { status, rpcError, snippet } = failure;
     if (rpcError) {
       return new McpError(
         "rpc",
         `${context}MCP error ${rpcError.code} (HTTP ${status}): ${scrub(rpcError.message)}`,
-        { status, code: rpcError.code },
+        { status, code: rpcError.code, afterResponse },
       );
     }
     const body = snippet.trim() ? `: ${scrub(snippet.trim().slice(0, 200))}` : "";
     return new McpError(
       "http",
       `${context}the MCP server at ${host} answered HTTP ${status}${body}`,
-      {
-        status,
-      },
+      { status, afterResponse },
     );
   };
 
@@ -250,6 +294,11 @@ export function openMcpSession(options: {
         { status },
       );
     }
+    if (status >= 300 && status < 400) {
+      // Never followed: the request carries the server's credential, in whatever header it is.
+      await response.body?.cancel().catch(() => {});
+      throw new McpError("http", redirected(status, response.headers.get("location")), { status });
+    }
     const { text } = await readText(response.body, MAX_ERROR_BODY_CHARS);
     let rpcError: RpcError | undefined;
     try {
@@ -261,6 +310,18 @@ export function openMcpSession(options: {
     return { status, rpcError, snippet: text };
   }
 
+  function redirected(status: number, location: string | null): string {
+    let to: string | undefined;
+    try {
+      if (location !== null) to = new URL(location, url).origin;
+    } catch {
+      // Not a URL: say so below.
+    }
+    return to === undefined || to === "null"
+      ? `the MCP server at ${host} answered a redirect (HTTP ${status}) without a usable Location; Kerby does not follow redirects: register the server's own URL`
+      : `the MCP server at ${host} redirected to ${clip(to)} (HTTP ${status}); Kerby does not follow redirects: register that URL instead`;
+  }
+
   /** Answers a server's request on a handshake session: Kerby offers no client features. */
   async function refuseServerRequest(
     id: string | number,
@@ -270,6 +331,7 @@ export function openMcpSession(options: {
   ): Promise<void> {
     const response = await fetch(url, {
       method: "POST",
+      redirect: "manual",
       headers: headersFor(current),
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -322,7 +384,7 @@ export function openMcpSession(options: {
     if (message.id !== id) {
       throw new McpError(
         "protocol",
-        `the MCP server answered request id ${JSON.stringify(message.id)} while Kerby waited for ${id}`,
+        `the MCP server answered request id ${clip(JSON.stringify(message.id))} while Kerby waited for ${id}`,
       );
     }
     if (!message.result) {
@@ -336,10 +398,12 @@ export function openMcpSession(options: {
     id: number,
     current: Era | undefined,
     signal: AbortSignal,
+    budget: Budget | undefined,
   ): Promise<Record<string, unknown>> {
     const type = (response.headers.get("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+    const body = response.body && budget ? counted(response.body, budget) : response.body;
     if (type === "application/json") {
-      const { text, truncated } = await readText(response.body, MAX_MESSAGE_CHARS);
+      const { text, truncated } = await readText(body, MAX_MESSAGE_CHARS);
       if (truncated) {
         throw new McpError(
           "protocol",
@@ -358,8 +422,8 @@ export function openMcpSession(options: {
       }
       throw new McpError("protocol", `the MCP server's response does not answer request ${id}`);
     }
-    if (type === "text/event-stream" && response.body) {
-      for await (const event of readSse(response.body, MAX_MESSAGE_CHARS)) {
+    if (type === "text/event-stream" && body) {
+      for await (const event of readSse(body, MAX_MESSAGE_CHARS)) {
         if (event.data === "") continue;
         let value: unknown;
         try {
@@ -381,7 +445,7 @@ export function openMcpSession(options: {
     await response.body?.cancel().catch(() => {});
     throw new McpError(
       "protocol",
-      `the MCP server answered HTTP ${response.status} with content type "${type ?? ""}"; MCP needs application/json or text/event-stream`,
+      `the MCP server answered HTTP ${response.status} with content type "${clip(type ?? "")}"; MCP needs application/json or text/event-stream`,
     );
   }
 
@@ -412,12 +476,13 @@ export function openMcpSession(options: {
     try {
       const response = await fetch(url, {
         method: "POST",
+        redirect: "manual",
         headers,
         body: JSON.stringify({ jsonrpc: "2.0", id, method: out.method, params }),
         signal,
       });
       if (!response.ok) return { ok: false, failure: await readFailure(response) };
-      const result = await readAnswer(response, id, current, signal);
+      const result = await readAnswer(response, id, current, signal, out.budget);
       const resultType = result.resultType;
       if (resultType === "input_required") {
         throw new McpError(
@@ -433,7 +498,11 @@ export function openMcpSession(options: {
       }
       return { ok: true, result, headers: response.headers };
     } catch (error) {
-      if (!signal.aborted) throw error;
+      if (!signal.aborted) {
+        // The request reached the server and this is about its answer: for anything but the handshake, a call may
+        // have run.
+        throw error instanceof McpError && out.method !== "initialize" ? error.answered() : error;
+      }
       if (current?.kind === "legacy") cancelLater(current, id);
       throw signal.reason;
     }
@@ -444,6 +513,7 @@ export function openMcpSession(options: {
     const sent = (async () => {
       const response = await fetch(url, {
         method: "POST",
+        redirect: "manual",
         headers: headersFor(current),
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -478,7 +548,7 @@ export function openMcpSession(options: {
     if (!LEGACY_VERSIONS.includes(protocolVersion)) {
       throw new McpError(
         "protocol",
-        `the MCP server chose protocol version ${JSON.stringify(protocolVersion)}; Kerby speaks ${[MODERN_VERSION, ...LEGACY_VERSIONS].join(", ")}`,
+        `the MCP server chose protocol version ${clip(JSON.stringify(protocolVersion))}; Kerby speaks ${[MODERN_VERSION, ...LEGACY_VERSIONS].join(", ")}`,
       );
     }
     const sessionId = answer.headers.get("mcp-session-id") ?? undefined;
@@ -489,6 +559,7 @@ export function openMcpSession(options: {
     try {
       const response = await fetch(url, {
         method: "POST",
+        redirect: "manual",
         headers: headersFor(established),
         body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
         signal,
@@ -520,10 +591,11 @@ export function openMcpSession(options: {
       const parsed = SupportedVersionsSchema.safeParse(failure.rpcError?.data);
       const supported = parsed.success ? parsed.data.supported : [];
       if (!supported.some((version) => LEGACY_VERSIONS.includes(version))) {
-        const spoken = supported.length > 0 ? ` (it speaks ${supported.join(", ")})` : "";
+        const spoken = supported.length > 0 ? ` (it speaks ${clip(supported.join(", "))})` : "";
         throw failureError(
           failure,
           `the MCP server speaks none of ${[MODERN_VERSION, ...LEGACY_VERSIONS].join(", ")}${spoken}: `,
+          true,
         );
       }
     } else if (
@@ -532,9 +604,9 @@ export function openMcpSession(options: {
       (code === METHOD_NOT_FOUND && failure.status === 404)
     ) {
       era = { kind: "modern" };
-      throw failureError(failure);
+      throw failureError(failure, "", true);
     } else if (!FALLBACK_STATUSES.has(failure.status)) {
-      throw failureError(failure);
+      throw failureError(failure, "", true);
     }
     era = await initialize(failure, signal);
     return onEra(era, out, signal);
@@ -550,11 +622,11 @@ export function openMcpSession(options: {
     if (answer.ok) return answer.result;
     const expired =
       current.kind === "legacy" && current.sessionId !== undefined && answer.failure.status === 404;
-    if (!expired) throw failureError(answer.failure);
+    if (!expired) throw failureError(answer.failure, "", true);
     if (era === current) era = await initialize(undefined, signal);
     const again = await send(era ?? current, out, signal);
     if (again.ok) return again.result;
-    throw failureError(again.failure);
+    throw failureError(again.failure, "", true);
   }
 
   async function rpc(out: Outgoing, signal: AbortSignal): Promise<Record<string, unknown>> {
@@ -582,15 +654,36 @@ export function openMcpSession(options: {
   }
 
   return {
-    async listTools(signal) {
+    async listTools(signal, limits) {
       const tools: McpToolListing[] = [];
+      let listedCount = 0;
+      const budget: Budget | undefined = limits && {
+        left: limits.maxBytes,
+        exceeded: () =>
+          new McpError(
+            "protocol",
+            `the MCP server's tool listing is over ${limits.maxBytes} bytes; Kerby reads at most ${limits.maxBytes} per server: ask its owner to list fewer or smaller tools`,
+            { afterResponse: true },
+          ),
+      };
       let cursor: string | undefined;
       for (let page = 0; page < MAX_LIST_PAGES; page++) {
         const result = await rpc(
-          { method: "tools/list", params: cursor === undefined ? {} : { cursor } },
+          {
+            method: "tools/list",
+            params: cursor === undefined ? {} : { cursor },
+            ...(budget ? { budget } : {}),
+          },
           signal,
         );
-        const listed = parseResult(ListToolsResultSchema, result, "tools/list");
+        const listed = parseResult(ListToolsResultSchema, result, "tools/list", true);
+        listedCount += listed.tools.length;
+        if (limits && listedCount > limits.maxTools)
+          throw new McpError(
+            "protocol",
+            `the MCP server lists more than ${limits.maxTools} tools; Kerby keeps at most ${limits.maxTools} per server: ask its owner to split them across servers`,
+            { afterResponse: true },
+          );
         for (const tool of listed.tools) {
           // 2026-07-28: a tool whose x-mcp-header annotations are invalid must not be offered.
           if (era?.kind === "modern" && "invalid" in mcpHeaderParams(tool.inputSchema)) continue;
@@ -609,6 +702,7 @@ export function openMcpSession(options: {
       throw new McpError(
         "protocol",
         `the MCP server's tools/list did not end within ${MAX_LIST_PAGES} pages`,
+        { afterResponse: true },
       );
     },
 
@@ -626,7 +720,7 @@ export function openMcpSession(options: {
         },
         signal,
       );
-      const call = parseResult(CallToolResultSchema, result, "tools/call");
+      const call = parseResult(CallToolResultSchema, result, "tools/call", true);
       const outcome: McpCallOutcome = {
         content: call.content as McpContent[],
         isError: call.isError === true,
@@ -642,7 +736,7 @@ export function openMcpSession(options: {
       const headers = headersFor(era);
       headers.delete("content-type");
       try {
-        const response = await fetch(url, { method: "DELETE", headers });
+        const response = await fetch(url, { method: "DELETE", redirect: "manual", headers });
         await response.body?.cancel().catch(() => {});
       } catch {
         // Best effort: the server expires the session on its own (405 or 404 are fine too).

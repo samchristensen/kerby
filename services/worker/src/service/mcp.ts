@@ -3,6 +3,7 @@
 // account of a failure the tenant may read (a sync's `last_error`, a tool's error result) that never holds a credential.
 import { EgressError } from "@kerby/egress";
 import {
+  headerSecrets,
   isWithinResource,
   McpError,
   type OAuthCredential,
@@ -10,6 +11,7 @@ import {
   parseOAuthCredential,
   refreshOAuthCredential,
 } from "@kerby/mcp";
+import { log } from "@kerby/observability";
 import type { ToolServerRecord } from "@kerby/tools";
 import type { WorkerDeps } from "../types/index.ts";
 
@@ -24,7 +26,8 @@ type Server = Pick<ToolServerRecord, "id" | "slug" | "url" | "auth">;
 
 /**
  * The headers a server's auth needs, and every secret in them or behind them (to scrub from anything the server
- * answers); `accessToken` is the OAuth token sent, for a refresh after a refusal. `missing` says why nothing can be sent.
+ * answers: a header's value, and the token of a `<scheme> <token>` value on its own); `accessToken` is the OAuth token
+ * sent, for a refresh after a refusal. `missing` says why nothing can be sent.
  */
 export type ServerAuth =
   | { headers: Record<string, string>; secrets: string[]; accessToken?: string }
@@ -51,7 +54,7 @@ export async function toolServerHeaders(
       return {
         missing: `no credential is stored for "${server.slug}": PUT /v1/tool-servers/${server.slug}/credential`,
       };
-    return { headers: { [server.auth.header]: stored }, secrets: [stored] };
+    return { headers: { [server.auth.header]: stored }, secrets: headerSecrets(stored) };
   }
   const credential = stored === undefined ? undefined : parseOAuthCredential(stored);
   if (!credential) return { missing: notConnected(server.slug) };
@@ -158,17 +161,21 @@ async function refreshed(
   return "missing" in outcome ? outcome : bearer(server, outcome);
 }
 
-/** Why an exchange with a server failed, in words the tenant can act on, with every credential scrubbed out. */
+/**
+ * Why an exchange with `server` failed, in words the tenant can act on, with every credential scrubbed out. An egress
+ * refusal of a private address names the host only (its message names the address the host resolved to, which goes
+ * to the operator's log instead).
+ */
 export function whyToolFailed(
   error: unknown,
   secrets: readonly string[],
   doing: string,
-  auth: ToolServerRecord["auth"]["kind"],
+  server: Pick<ToolServerRecord, "url" | "auth">,
 ): string {
   let why: string;
   if (error instanceof McpError && error.kind === "unauthorized")
     why =
-      auth === "oauth"
+      server.auth.kind === "oauth"
         ? error.status === 403
           ? "the server refused the authorization (HTTP 403): it may need another scope; set the server's scope and connect it again in the console"
           : "the server refused the authorization (HTTP 401): connect it again in the console"
@@ -176,7 +183,14 @@ export function whyToolFailed(
   else if (error instanceof McpError) why = error.message;
   else if (error instanceof EgressError && error.reason === "timeout")
     why = "the server did not answer in time";
-  else if (error instanceof EgressError)
+  else if (error instanceof EgressError && error.reason === "blocked_address") {
+    const host = server.url === null ? "the server" : new URL(server.url).hostname;
+    why = `the address was refused (blocked_address): ${host} is not a public address, and Kerby reaches public addresses only`;
+    log("warn", "egress refused a tool server's address", {
+      reason: error.reason,
+      detail: error.message,
+    });
+  } else if (error instanceof EgressError)
     why = `the address was refused (${error.reason}): ${error.message}`;
   else if (error instanceof DOMException && error.name === "TimeoutError")
     why = "the server did not answer in time";

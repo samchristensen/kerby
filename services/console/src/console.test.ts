@@ -934,6 +934,24 @@ describe("tools", () => {
       ok: false,
       error: "github/x.y cannot be enabled: providers refuse its name",
     });
+    // The hash of the definition the page showed goes along; a changed one is refused with the api's words.
+    const shown = "a".repeat(64);
+    reply = () =>
+      error(
+        409,
+        "definition_changed",
+        "the server lists a different definition now: reload and review it",
+      );
+    expect(
+      await h.service.updateTool(h.access, "github", "search", {
+        acceptDefinition: true,
+        expectedDefinition: shown,
+      }),
+    ).toEqual({
+      ok: false,
+      error: "the server lists a different definition now: reload and review it",
+    });
+    expect(h.calls.at(-1)?.body).toEqual({ acceptDefinition: true, expectedDefinition: shown });
     reply = () => error(404, "not_found");
     expect(await h.service.syncToolServer(h.access, "gone")).toMatchObject({
       ok: false,
@@ -963,6 +981,7 @@ describe("tools", () => {
                   removed: false,
                   definition: { description: "Search", inputSchema: { type: "object" } },
                   listed: null,
+                  listedHash: "b".repeat(64),
                 },
               ],
               grantedTo: [

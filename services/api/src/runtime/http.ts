@@ -67,6 +67,7 @@ import {
 } from "@kerby/serve";
 import {
   BuiltinToolServerError,
+  ToolDefinitionChangedError,
   ToolNotFoundError,
   ToolNotUsableError,
   ToolServerLimitError,
@@ -327,6 +328,8 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(404, "not_found", error.message);
             if (error instanceof ToolNotUsableError)
               throw new HttpError(400, "tool_not_usable", error.message);
+            if (error instanceof ToolDefinitionChangedError)
+              throw new HttpError(409, "definition_changed", error.message);
             if (error instanceof ToolServerRequestError)
               throw new HttpError(400, "invalid_request", error.message);
             if (error instanceof OAuthFlowError)

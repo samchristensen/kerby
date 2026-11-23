@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { MAX_TOOL_SERVERS, MAX_TOOLS_PER_SERVER, type ToolDefinition } from "@kerby/contracts";
 import { createTestTenant, type TestTenant } from "@kerby/conversations/testing";
 import { describe, expect, it } from "vitest";
@@ -5,6 +6,7 @@ import {
   BUILTIN_TOOLS,
   BuiltinToolServerError,
   createToolServer,
+  definitionHash,
   deleteToolServer,
   findToolServer,
   findToolServerById,
@@ -20,6 +22,7 @@ import {
   type SyncOutcome,
   setConversationTools,
   setGrants,
+  ToolDefinitionChangedError,
   ToolNotFoundError,
   ToolNotUsableError,
   type ToolRecord,
@@ -298,21 +301,135 @@ describe("syncing a server's tools", () => {
     });
   });
 
+  it("records an input schema over 64 KiB as an error naming the tool", async () => {
+    await using tenant = await createTestTenant();
+    const gh = await github(tenant);
+    const before = await listTools(tenant.db, gh.id);
+    await recordSync(tenant.db, gh.id, {
+      tools: [
+        {
+          name: "huge",
+          definition: {
+            description: "x",
+            inputSchema: { type: "object", description: "y".repeat(64 * 1024) },
+          },
+        },
+      ],
+    });
+    expect(await findToolServerById(tenant.db, gh.id)).toMatchObject({
+      status: "error",
+      lastError: expect.stringMatching(/"huge" with an invalid definition: .*at most 64 KiB/),
+    });
+    expect(await listTools(tenant.db, gh.id)).toEqual(before);
+  });
+
   it("forgets the oldest removed tools past what a server may keep", async () => {
     await using tenant = await createTestTenant();
     const gh = await server(tenant, "github");
-    const first = Array.from({ length: MAX_TOOLS_PER_SERVER }, (_, i): [string, string] => [
-      `old${i}`,
-      "x",
-    ]);
-    await recordSync(tenant.db, gh.id, listing(...first));
-    await recordSync(tenant.db, gh.id, listing(["new0", "x"], ["new1", "x"]));
+    const named = (prefix: string): [string, string][] =>
+      Array.from({ length: MAX_TOOLS_PER_SERVER / 2 }, (_, i) => [`${prefix}${i}`, "x"]);
+    // `a*` are removed first, `z*` later: the names sort the other way round, so only the removal time keeps `z*`.
+    await recordSync(tenant.db, gh.id, listing(...named("a"), ...named("z")));
+    await recordSync(tenant.db, gh.id, listing(...named("z")));
+    await sleep(5);
+    await recordSync(tenant.db, gh.id, listing(...named("n")));
     const tools = await listTools(tenant.db, gh.id);
     expect(tools).toHaveLength(MAX_TOOLS_PER_SERVER);
-    expect(tools.filter((tool) => tool.removedAt === null).map((tool) => tool.name)).toEqual([
-      "new0",
-      "new1",
-    ]);
+    const live = tools.filter((tool) => tool.removedAt === null).map((tool) => tool.name);
+    const removed = tools.filter((tool) => tool.removedAt !== null).map((tool) => tool.name);
+    expect(live.sort()).toEqual(
+      named("n")
+        .map(([name]) => name)
+        .sort(),
+    );
+    expect(removed.sort()).toEqual(
+      named("z")
+        .map(([name]) => name)
+        .sort(),
+    );
+  });
+
+  it("records nothing from a listing that began before the server changed", async () => {
+    await using tenant = await createTestTenant();
+    const gh = await server(tenant, "github");
+    // A worker began listing the old address; the address changed, and a newer listing was recorded.
+    const stale = gh.updatedAt;
+    const moved = await updateToolServer(tenant.db, gh.id, {
+      url: "https://moved.example.com/mcp",
+    });
+    expect(moved.updatedAt.getTime()).toBeGreaterThan(stale.getTime());
+    expect(await recordSync(tenant.db, gh.id, listing(["new", "x"]), moved.updatedAt)).toBe(true);
+    // The slow old one finishes last, with tools or with an error: neither is kept.
+    expect(await recordSync(tenant.db, gh.id, listing(["old", "x"]), stale)).toBe(false);
+    expect(await recordSync(tenant.db, gh.id, { error: "HTTP 401" }, stale)).toBe(false);
+    expect((await listTools(tenant.db, gh.id)).map((tool) => tool.name)).toEqual(["new"]);
+    expect(await findToolServerById(tenant.db, gh.id)).toMatchObject({
+      status: "ready",
+      lastError: null,
+    });
+    // Every change moves updated_at, even two within one millisecond, and asking for a listing (no change) too.
+    const first = await updateToolServer(tenant.db, gh.id, {});
+    const second = await updateToolServer(tenant.db, gh.id, {});
+    expect(second.updatedAt.getTime()).toBeGreaterThan(first.updatedAt.getTime());
+    expect(await recordSync(tenant.db, gh.id, listing(["x", "x"]), first.updatedAt)).toBe(false);
+  });
+});
+
+describe("a tenant whose tool tables are not there yet (schema n-1)", () => {
+  it("makes, reads and runs conversations without tools, and still fails a query that needs them", async () => {
+    await using tenant = await createTestTenant();
+    const id = await conversation(tenant);
+    await tenant.db.query(
+      "drop table tool_oauth_flows, conversation_tools, integration_tools, tools, tool_servers",
+    );
+    expect(await resolveToolPatterns(tenant.db, [])).toEqual([]);
+    await setConversationTools(tenant.db, id, []);
+    expect(await listConversationTools(tenant.db, id)).toEqual([]);
+    expect(await toolPatterns(tenant.db, [])).toEqual([]);
+    expect(await offeredTools(tenant.db, [])).toEqual([]);
+    // Naming a tool there is a real error, not hidden.
+    await expect(resolveToolPatterns(tenant.db, ["github/*"])).rejects.toMatchObject({
+      code: "42P01",
+    });
+  });
+});
+
+describe("approving what the admin was shown", () => {
+  it("refuses enabling or accepting a definition that changed since, by its hash", async () => {
+    await using tenant = await createTestTenant();
+    const gh = await server(tenant, "github");
+    await recordSync(tenant.db, gh.id, listing(["search", "v1"]));
+    const shown = definitionHash(definition("v1"));
+    // The key order of the stored JSON does not matter.
+    expect(definitionHash({ inputSchema: definition("v1").inputSchema, description: "v1" })).toBe(
+      shown,
+    );
+    await recordSync(tenant.db, gh.id, listing(["search", "v2"]));
+    await expect(
+      updateTool(tenant.db, gh.id, "search", { enabled: true, expectedDefinition: shown }),
+    ).rejects.toBeInstanceOf(ToolDefinitionChangedError);
+    expect((await byName(tenant, gh.id)).get("search")?.enabled).toBe(false);
+
+    const current = definitionHash(definition("v2"));
+    expect(
+      await updateTool(tenant.db, gh.id, "search", { enabled: true, expectedDefinition: current }),
+    ).toMatchObject({ enabled: true, pinned: definition("v2") });
+
+    // Drifted: accepting what was shown before the next listing is refused; without the hash it is not checked.
+    await recordSync(tenant.db, gh.id, listing(["search", "v3"]));
+    await expect(
+      updateTool(tenant.db, gh.id, "search", {
+        acceptDefinition: true,
+        expectedDefinition: current,
+      }),
+    ).rejects.toThrow("the server lists a different definition now: reload and review it");
+    expect((await byName(tenant, gh.id)).get("search")?.pinned).toEqual(definition("v2"));
+    // Changing only the effect needs no hash check.
+    await updateTool(tenant.db, gh.id, "search", { effect: "read", expectedDefinition: current });
+    expect(await updateTool(tenant.db, gh.id, "search", { acceptDefinition: true })).toMatchObject({
+      pinned: definition("v3"),
+      drifted: false,
+    });
   });
 });
 

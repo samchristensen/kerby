@@ -10,6 +10,7 @@ import type { RunContext } from "@kerby/durable";
 import type { JsonValue } from "@kerby/judgment";
 import type { WorkerDeps } from "../types/index.ts";
 import { runJudgment } from "./judgments.ts";
+import { errorResult } from "./tools.ts";
 
 /**
  * `blocked`: these guardrails fired (their probability of yes reached `blockAt`). `unavailable`: the check could not run
@@ -137,11 +138,6 @@ export async function checkUserMessage(
   });
 }
 
-const refusedTool = (text: string): ToolResult => ({
-  content: [{ type: "text", text }],
-  isError: true,
-});
-
 /**
  * Check a tool call (its name and input) against the conversation's `tool_call` guardrails. Returns the result the model
  * gets instead of the tool's when the call must not run, or undefined to let it run. Call it inside the tool's step.
@@ -166,11 +162,11 @@ export async function guardToolCall(
     signal,
   );
   if (verdict.type === "blocked")
-    return refusedTool(
+    return errorResult(
       `The tool "${call.name}" was not run: blocked by guardrail ${verdict.by.map((n) => `"${n}"`).join(", ")}.`,
     );
   if (verdict.type === "unavailable")
-    return refusedTool(
+    return errorResult(
       `The tool "${call.name}" was not run: a guardrail could not be checked (${verdict.error}).`,
     );
   return undefined;

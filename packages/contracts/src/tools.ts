@@ -7,6 +7,8 @@ import { z } from "zod";
 export const MAX_TOOL_SERVERS = 20;
 /** Tools kept per server from one listing; a server listing more is a sync error. */
 export const MAX_TOOLS_PER_SERVER = 200;
+/** A tool's input schema as JSON, at most; a listing with a bigger one is a sync error naming the tool. */
+const MAX_INPUT_SCHEMA_BYTES = 64 * 1024;
 /** Tools offered to one turn, and patterns one conversation or prompt may name. */
 export const MAX_CONVERSATION_TOOLS = 64;
 /** Patterns one integration may be granted. */
@@ -79,8 +81,13 @@ const ToolAnnotationsSchema = z.looseObject({
 export const ToolDefinitionSchema = z.object({
   title: z.string().max(200).exactOptional(),
   description: z.string().max(16_000),
-  /** JSON Schema of the tool's input, `type: "object"`. */
-  inputSchema: z.record(z.string(), z.unknown()),
+  /** JSON Schema of the tool's input, `type: "object"`: at most `MAX_INPUT_SCHEMA_BYTES` as JSON. */
+  inputSchema: z
+    .record(z.string(), z.unknown())
+    .refine(
+      (schema) => new TextEncoder().encode(JSON.stringify(schema)).length <= MAX_INPUT_SCHEMA_BYTES,
+      `an input schema is at most ${MAX_INPUT_SCHEMA_BYTES / 1024} KiB as JSON: ask the server's owner to shorten it`,
+    ),
   annotations: ToolAnnotationsSchema.exactOptional(),
 });
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
@@ -257,6 +264,14 @@ export const UpdateToolRequestSchema = z
     enabled: z.boolean().exactOptional(),
     effect: ToolEffectSchema.exactOptional(),
     acceptDefinition: z.literal(true).exactOptional(),
+    /**
+     * The `listedHash` of the tool as the caller was shown it. With `enabled: true` or `acceptDefinition`, the change
+     * is refused (409 `definition_changed`) when the server lists another definition now. Without it, no check.
+     */
+    expectedDefinition: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "expectedDefinition is the listedHash shown: 64 hex characters")
+      .exactOptional(),
   })
   .refine(
     (request) =>
@@ -284,6 +299,11 @@ export const ToolSchema = z.object({
   definition: ToolDefinitionSchema,
   /** What the server lists now, when that differs from `definition` (only while `drifted`). */
   listed: ToolDefinitionSchema.nullable(),
+  /**
+   * SHA-256 (hex) of the canonical JSON (keys sorted) of what the server lists now: the definition enabling or accepting
+   * approves. Send it back as `expectedDefinition`.
+   */
+  listedHash: z.string(),
 });
 export type Tool = z.infer<typeof ToolSchema>;
 
