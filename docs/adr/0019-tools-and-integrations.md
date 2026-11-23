@@ -34,14 +34,14 @@ session id); servers on 2025-11-25 and older still expect a session.
   [ADR 0014](0014-tenant-console.md): a signed-in person in the console, and the operator.
   - `admin` may do everything the API offers and holds every tool.
   - `restricted` may create, post to, read and stream conversations (from a prompt too), submit and read judgments, and
-    list its tools. Everything that changes the tenant's configuration (model keys, prompts, tool servers, grants) is
-    403 `forbidden`. Least privilege; a route joins the list when a client needs it.
+    list its tools (`GET /v1/tools`). Every other route is 403 `forbidden`, the message naming the role and what it may
+    call. Least privilege; a route joins the list when a client needs it.
 - **Tool servers and tools live in the tenant database** (a new `packages/tools`, `migrations/tenant/`).
   - `tool_servers`: `slug` (`[a-z0-9-]{1,24}`, unique, fixed once made; `kerby` is reserved), `url`, `auth` (`none`, or
     `header` with the header's name), sync status (`syncing`, `ready`, `error` with its reason) and `synced_at`.
   - `tools`, one row per server and tool name: the definition last listed, the **pinned** definition the model sees,
     `enabled` (false until an admin turns it on), `effect` (`read` or `write`: the tenant's call, `write` until set; the
-    console pre-fills it from `readOnlyHint`), `drifted`, `removed_at`.
+    console shows the server's `readOnlyHint` beside the choice, as a hint only), `drifted`, `removed_at`.
   - `integration_tools`, the grants: `(integration_id, server_id, tool)`, `tool` null for every enabled tool of the server;
     deleted with the server.
   - The model sees a tool as `<slug>__<tool>`. A tool whose name would not fit providers' `[A-Za-z0-9_-]{1,64}` cannot be
@@ -70,8 +70,8 @@ session id); servers on 2025-11-25 and older still expect a session.
   prompt, model and guardrails. The api resolves each pattern to a server id when the conversation is made (an unknown
   server or tool is 400 `unknown_tool`) and stores ids, so a server deleted and made again under the same slug is not the
   old conversation's. `<slug>/*` covers the server's tools that are enabled at each turn.
-- **The poster must hold every tool the conversation names.** Creating a conversation and posting a message check, in the
-  same tenant transaction, that the caller's grants cover the conversation's tools (`<slug>/*` needs a grant for the whole
+- **The poster must hold every tool the conversation names.** Creating a conversation and posting a message check, before
+  anything is stored, that the caller's grants cover the conversation's tools (`<slug>/*` needs a grant for the whole
   server); otherwise 403 `tool_not_granted`, naming the patterns. So a restricted integration cannot push a conversation
   someone else started into tools it was not given, a narrowed grant applies from its next message, and a turn needs no
   record of who posted.
@@ -81,12 +81,12 @@ session id); servers on 2025-11-25 and older still expect a session.
   ends. A new Kerby capability ships as a `kerby/<name>` tool.
 - **A turn's tools** are the conversation's tools that are enabled, not removed and available now, at most 64 (past that
   the turn ends with `last_error`). The worker calls a remote tool inside its `tool:<callId>` step, after the guardrails
-  ([ADR 0016](0016-guardrails.md)): through `createEgressFetch` with 60 s per call, a session per server per run only for
-  servers older than 2026-07-28, the call id in `_meta` for servers that deduplicate, and no client capabilities (no
-  sampling, roots or elicitation: a server cannot spend the tenant's model key or ask a person anything). Text and
-  `structuredContent` (as JSON text) reach the model; other content becomes a note naming its kind; a result is cut at
-  256 KiB with a note. An egress refusal, a timeout, an HTTP or MCP error is an error result the model reads, not a turn
-  retry; on a `write` tool a timeout or broken connection says the call may have taken effect.
+  ([ADR 0016](0016-guardrails.md)): through `createEgressFetch`, `TOOL_CALL_TIMEOUT_MS` (60 s) per call, one MCP session
+  per server per run opened on first use, the call id in `_meta` (`kerby/callId`) for servers that deduplicate, and no
+  client capabilities (no sampling, roots or elicitation: a server cannot spend the tenant's model key or ask a person
+  anything). Text and `structuredContent` (as JSON text) reach the model; other content becomes a note naming its kind; a
+  result is cut at 256 KiB with a note. An egress refusal, a timeout, an HTTP or MCP error is an error result the model
+  reads, not a turn retry; on a `write` tool a timeout or broken connection says the call may have taken effect.
 - **The interrupted-write rule.** `recordToolExecution` counts runs inside the step. When it finds an earlier execution
   (an attempt began the call and never stored a result), a `write` tool is not called again: the model gets an error
   result saying the call was interrupted and may or may not have taken effect. A `read` tool runs again. A tool's
@@ -94,21 +94,30 @@ session id); servers on 2025-11-25 and older still expect a session.
 - **Tools are managed through the API, and the console uses the same routes.** Admin: `POST`/`GET /v1/tool-servers`,
   `GET`/`PATCH`/`DELETE /v1/tool-servers/:slug`, `PUT /v1/tool-servers/:slug/credential`,
   `POST /v1/tool-servers/:slug/sync`, `PATCH /v1/tool-servers/:slug/tools/:name` (`enabled`, `effect`,
-  `acceptDefinition`), `GET`/`PUT /v1/integrations/:id/tools` (the grants; `kerby_app` reads `integrations` to check the
-  id is the tenant's). Any caller: `GET /v1/tools`, the tools it may use, with descriptions and schemas, so a client can
-  name them. The console calls these with the person's session token, as the Studio does, and adds Tools pages (servers,
-  credential, sync, enable, effect, drift review, the integrations granted), an Integrations page in place of API keys
-  (role, keys, grants) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
-  `integration.*`) with ids and slugs only.
+  `acceptDefinition`), `GET /v1/integrations`, `GET`/`PUT /v1/integrations/:id/tools` (the grants; `kerby_app` reads
+  `integrations` to check the id is the tenant's). Any caller: `GET /v1/tools`, the tools it may use, with descriptions
+  and schemas, so a client can name them. Refusals: 400 `unknown_tool` (with `problems`), `too_many_tools`,
+  `tool_not_usable`, `builtin_tool_server`; 403 `tool_not_granted`; 409 `tool_server_exists`, `tool_server_limit`. The
+  console calls these with the person's session token, as the Studio does, and adds Tools pages (servers, credential,
+  sync, enable, effect, drift review, the integrations granted), an Integrations page in place of API keys (role, keys,
+  grants) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
+  `integration.*`) with ids, slugs and patterns only.
 - **OAuth comes next, on the same tables.** `auth: oauth` per MCP's authorization spec: a callback in the console, PKCE,
   the `resource` parameter, the issuer check, a Client ID Metadata Document Kerby publishes with dynamic registration where
   a server lacks it, and discovery and token calls through egress. Tokens are sealed under the server's secret name; the
   worker refreshes them under a row lock on that secret, since two workers refreshing at once would revoke each other's
   token. A credential belongs to the tenant, not to an end user.
-- **The MCP client sits behind one package**, `packages/mcp`: Streamable HTTP over a `fetch` it is given (egress).
-  Wrapping an SDK or writing it on `fetch` is decided with its [ADR 0005](0005-dependencies.md) line:
-  `@modelcontextprotocol/sdk` 1.32.2 speaks at most 2025-11-25, and the 2.x client (`@modelcontextprotocol/client` 2.4.0)
-  was not checked against 2026-07-28.
+- **The MCP client sits behind one package**, `packages/mcp`, written on the `fetch` it is given (the egress guard's): no
+  dependency, since Kerby needs only `tools/list` and `tools/call` over Streamable HTTP and `@modelcontextprotocol/sdk`
+  1.32.2 speaks at most 2025-11-25. A session's first request is 2026-07-28 (`_meta` and `MCP-Protocol-Version` on every
+  request, no handshake). An unsupported-version error naming an older revision, or a 400/404/405 that is not a 2026-07-28
+  refusal, makes it fall back to the handshake (`initialize` for 2025-11-25, `Mcp-Session-Id`, DELETE on close); a
+  refused request ran nothing, so a write is never repeated by the fallback. `tools/list` stops at 50 pages, one message
+  at 4 Mi characters. `@kerby/mcp/testing` is a real MCP server for tests, in both revisions.
+- **The development stack reaches a local MCP server.** `createEgressFetch({ allowedHosts })` lets named hosts through
+  although they resolve to private addresses (a redirect away from one is checked as usual). The worker takes them from
+  `EGRESS_ALLOWED_HOSTS` and refuses it unless `KERBY_ENVIRONMENT=development`; compose names `host.docker.internal`.
+  `make tools-e2e` proves the path on the real stack.
 - Rejected:
   - Grants on keys (restricted keys): rotation makes a new key here (`rotateKey`), so every rotation would have to copy
     them, and one client with two keys could hold two policies. (owner's call)
@@ -134,6 +143,6 @@ session id); servers on 2025-11-25 and older still expect a session.
 - A tool's output is untrusted text in the model's context, and guardrails do not read it (ADR 0016).
 - A `write` tool cut off by a crash is reported, not repeated: the model, and through it the user, may have to check.
 - A failing remote tool is the model's to handle; the turn does not retry it.
-- The egress guard refuses the Compose network, so the proof on the real stack needs an MCP server the guard lets
-  through. Plan 0001 holds that question.
+- The egress guard refuses the Compose network, so the development stack names the one host it lets through
+  (`host.docker.internal`, development only) and `make tools-e2e` runs the MCP test fixture on the host.
 - One credential per server for the whole tenant: end users who each need their own account are not served yet.

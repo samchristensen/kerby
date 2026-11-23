@@ -95,6 +95,9 @@ importers:
       '@kerby/db':
         specifier: workspace:*
         version: link:packages/db
+      '@kerby/mcp':
+        specifier: workspace:*
+        version: link:packages/mcp
       '@kerby/secrets':
         specifier: workspace:*
         version: link:packages/secrets

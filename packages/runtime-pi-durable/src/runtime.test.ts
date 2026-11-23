@@ -498,4 +498,40 @@ describe("fake model", () => {
     expect(resumed[0]).toMatchObject({ content: [{ text: "Tool said: ping" }] });
     expect(executed).toEqual(["kerby__echo:call_1"]);
   });
+
+  it("calls a named tool with a JSON input, and says what it was given", async () => {
+    const { runtime, model } = fake();
+    const lookup = {
+      ...echoSpec,
+      name: "crm__lookup",
+      description: "Find a customer by name.",
+      inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    };
+    const inputs: unknown[] = [];
+    const run = (text: string) =>
+      makeRun({
+        model,
+        history: [user(text)],
+        tools: [echoSpec, lookup],
+        executeTool: async (call) => {
+          inputs.push({ name: call.name, input: call.input });
+          return { content: [{ type: "text", text: "Ada, Paris" }], isError: false };
+        },
+      });
+    const called = messages(await collect(runtime.run(run('call crm__lookup {"q":"Ada"}'))));
+    expect(inputs).toEqual([{ name: "crm__lookup", input: { q: "Ada" } }]);
+    expect(called.at(-1)).toMatchObject({ content: [{ text: "Tool said: Ada, Paris" }] });
+
+    const say = async (text: string) =>
+      messages(await collect(runtime.run(run(text))))[0]?.content.at(-1);
+    expect(await say("describe crm__lookup")).toMatchObject({
+      text: "Described: Find a customer by name.",
+    });
+    expect(await say("describe crm__other")).toMatchObject({
+      text: 'No tool "crm__other" was given.',
+    });
+    expect(await say("list tools")).toMatchObject({ text: "Tools: echo, crm__lookup" });
+    expect(await say("call crm__lookup [1]")).toMatchObject({ text: "Not a JSON object: [1]" });
+    expect(inputs).toHaveLength(1);
+  });
 });

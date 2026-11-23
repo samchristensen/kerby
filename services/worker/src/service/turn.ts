@@ -158,6 +158,7 @@ export async function runTurn(
         // A guardrail that stops the call answers in the tool's place: the model reads why, and the tool never runs.
         const stopped = await guardToolCall(deps, ctx.tenantId, conversation, call, signal);
         if (stopped) return stopped;
+        await tools.prepare(call.name);
         const runs = await recordToolExecution(ctx.db, {
           conversationId,
           callId: call.id,

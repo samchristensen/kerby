@@ -7,6 +7,7 @@
     "@biomejs/biome": "catalog:",
     "@kerby/control-plane": "workspace:*",
     "@kerby/db": "workspace:*",
+    "@kerby/mcp": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@types/node": "catalog:",
     "knip": "catalog:",

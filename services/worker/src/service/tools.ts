@@ -23,6 +23,11 @@ export interface TurnTools {
   readonly specs: ToolSpec[];
   /** Whether a call may run again after an attempt that began it never stored a result: `read` tools only. */
   repeatable(name: string): boolean;
+  /**
+   * Opens what a call needs before it counts as begun: a remote tool's credential and session. A credential that cannot
+   * be read throws here, so the retried turn does not take the call for one that began and report a write as interrupted.
+   */
+  prepare(name: string): Promise<void>;
   /** Runs a call. A failure of the tool or its server is an error result; only a lost run (`signal`) throws. */
   execute(call: ToolCall, signal: AbortSignal): Promise<ToolResult>;
   /** `text` without any tool credential this run opened. */
@@ -162,6 +167,10 @@ function runnable(
     specs: offered.map(specOf),
     repeatable: (name) => byName.get(name)?.effect === "read",
     scrub,
+    async prepare(name) {
+      const tool = byName.get(name);
+      if (tool && tool.server.kind !== "builtin") await sessionFor(tool.server);
+    },
     async execute(call, signal) {
       const tool = byName.get(call.name);
       if (!tool) return textResult(`unknown tool "${call.name}"`, true);

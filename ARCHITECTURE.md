@@ -4,13 +4,13 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-tools-and-integrations.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
 services/   deployables: api (tenants' code calls it), worker (runs turns), control (operators run it), console (tenants'
-           people sign up, manage keys and chat in it); they own no tables
+           people sign up, manage integrations, keys and tools, and chat in it); they own no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -57,14 +57,15 @@ would hold second copies of packages the composition root already built (enforce
 
 Each external system lives behind exactly one package; nothing else imports the SDK.
 
-| System                              | Only `packages/...`  | Package offers                                                              |
-| ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| Postgres (`pg`)                     | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes) |
-| Absurd (`absurd-sdk`)               | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop   |
-| S3 (`@aws-sdk/client-s3`)           | `blobs`              | `put`/`get`/`delete` by tenant context; raw-key `Bucket` for control only   |
-| Pi Durable and its libraries        | `runtime-pi-durable` | an `AgentRuntime`                                                           |
-| Tenant-supplied URLs                | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
-| System One API (TypeSafe, OpenCode) | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`            |
+| System                               | Only `packages/...`  | Package offers                                                                                                                       |
+| ------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Postgres (`pg`)                      | `db`                 | `ControlDb`, `TenantDb`, the tenant pool registry, migrations (both planes)                                                          |
+| Absurd (`absurd-sdk`)                | `durable`            | task names and params, spawn, register, the tenant scheduler's claim loop                                                            |
+| S3 (`@aws-sdk/client-s3`)            | `blobs`              | `put`/`get`/`delete` by tenant context; raw-key `Bucket` for control only                                                            |
+| Pi Durable and its libraries         | `runtime-pi-durable` | an `AgentRuntime`                                                                                                                    |
+| Tenant-supplied URLs                 | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                                                                              |
+| System One API (TypeSafe, OpenCode)  | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`                                                                     |
+| Remote MCP servers (Streamable HTTP) | `mcp`                | an `McpSession` (list and call tools) over the `fetch` it is given, always the egress guard's (ADR 0019); written on `fetch`, no SDK |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
@@ -75,10 +76,10 @@ Judgment providers follow the same rule: `packages/judgment` defines `JudgmentPr
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                          |
-| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                        |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                                                                                    | Migrations                                                                |
+| ------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations` and their `api_keys`, encrypted `tenant_secrets` (model keys, tool credentials), sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                              |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, prompts (`prompts`, `prompt_versions`, `prompt_labels`), tools (`tool_servers`, `tools`, `integration_tools`, `conversation_tools`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts,tools}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -86,17 +87,26 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `TenantDb` comes only from a verified API key resolved in the control plane.
 - A tenant id reaches code only through a verified API key (api), a verified console session (console, and the api when the
   console forwards one for the browser's chat), never through a request body or a URL. _review_
+- Every API key belongs to an integration ([ADR 0019](docs/adr/0019-tools-and-integrations.md)): `integrations` (control
+  plane, one `admin` `default` per tenant from provisioning), `api_keys.integration_id` with a foreign key on
+  `(integration_id, tenant_id)` so a key can only sit in its own tenant's integration. The api reads the integration's
+  `role` with the key and caches it with the tenant: `admin` (and a console session) may call every route and use every
+  tool; `restricted` may call `/v1/conversations*`, `/v1/judgments*` and `GET /v1/tools` (else 403 `forbidden`) and use
+  only the tools granted to it (`integration_tools`, tenant database). Rotating a key makes the new one in the same
+  integration; archiving an integration revokes its keys.
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
   nightly backup copy ([ADR 0013](docs/adr/0013-exports-and-bucket-backup.md)).
 - Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)), for chat and judgment providers alike; Kerby holds no provider key. A key is
   sealed by `packages/secrets` to a public key the api and the console hold, stored in the control plane's `tenant_secrets`, and
-  opened only by a worker (the private key) inside the run that uses it. Tool credentials will follow the same path. Logs carry the
+  opened only by a worker (the private key) inside the run that uses it. A tool server's credential takes the same path
+  (`tool-credential/<serverId>`, ADR 0019). Logs carry the
   tenant id, never message content or secrets; the worker scrubs the key from provider errors. _review_
 - No tenant code runs in Kerby's processes. Tools are remote MCP servers. Every call to a URL a tenant supplied goes
   through `createEgressFetch` from `packages/egress` ([ADR 0010](docs/adr/0010-egress-guard.md)): public addresses
-  only, connected to the address it checked, redirects re-checked, time and size limits. _review_
+  only, connected to the address it checked, redirects re-checked, time and size limits. A development stack may name
+  hosts the guard lets through anyway (`EGRESS_ALLOWED_HOSTS`, refused unless `KERBY_ENVIRONMENT=development`). _review_
 - Lifecycle is an operator command in `services/control`: provision, suspend, export, delete, rotate the database password.
   Provisioning copies the template database (migrated at startup) and creates a role that owns that database and may
   connect to no other tenant database, with a random password of its own ([ADR 0009](docs/adr/0009-tenant-database-credentials.md)):
@@ -105,7 +115,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   again at every login, so a rotation needs no restart. At startup control gives a password to every tenant lacking one, re-seals those under an older key,
   and closes the maintenance databases (`postgres`, `template1`) and the template to everyone but its admin role, as it
   does the control database: a tenant role can open its own database and nothing else.
-  Deleting drops the database and role, deletes the object prefix and purges keys and the console's people and sessions;
+  Deleting drops the database and role, deletes the object prefix and purges integrations, keys and the console's people and sessions;
   the row stays with status `deleted`. Exporting uploads a `pg_dump` and the object listing to the export bucket and
   returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
   deleted tenants' copies (ADR 0013).
@@ -113,7 +123,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control provisions as above and stores
   the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
   kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
-  `kerby_console`: API keys (never their hashes), model keys, people and sessions, appending to the audit log as
+  `kerby_console`: integrations and their API keys (never the hashes), model keys, people and sessions, appending to the audit log as
   `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
   account (failed sign-ins an hour), per process like the api's limits.
 - Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
@@ -172,7 +182,9 @@ flowchart LR
    Alongside it the supervisor records the run's complete events in the trace ([ADR 0018](docs/adr/0018-trace.md)); resume
    never reads it (see **Trace** below).
 5. **Tools run once.** `AgentRun.executeTool` is an Absurd step keyed by conversation and tool-call id: a retry gets the
-   stored result instead of repeating a side effect.
+   stored result instead of repeating a side effect. A step that finds the call already began in an earlier attempt
+   (`tool_executions` counts runs) runs it again only for a `read` tool; a `write` tool answers that it was interrupted
+   and may or may not have taken effect (ADR 0019).
 6. **Retry** is a rerun of step 2 onward. The conversation resumes after its last persisted message.
 
 - **One turn at a time per conversation.** Posting a message while a turn is queued or running is a 409; the check and the
@@ -206,7 +218,7 @@ flowchart LR
   prose. `POST /v1/judgments` enqueues a `run-judgment` task (the same `turns` queue, so it counts against the tenant's
   concurrent turns) and answers 202; a worker opens the tenant's key, calls the provider inside a step and stores the
   outcome as the task's result; `GET /v1/judgments/:id` reads it (`pending`, `running`, `answered`, `refused`, `failed`).
-  The agent's `judge` tool runs the same code inside its tool step. No table: params and result live in Absurd (30 days).
+  The agent's `judge` tool (`kerby/judge`, offered only to a conversation that names it) runs the same code inside its tool step. No table: params and result live in Absurd (30 days).
 - **Guardrails** ([ADR 0016](docs/adr/0016-guardrails.md)). A conversation may carry yes/no conditions, set at creation, checked
   by a judgment before the assistant acts. The worker judges the user message first thing in `runTurn` (a step); a block
   flags it (`messages.blocked_by`), persists a flagged refusal and ends the turn, and `readHistory` never rehydrates a
@@ -216,8 +228,23 @@ flowchart LR
   database (`packages/prompts`): one draft with a revision (a save or publish names the revision it started from, else
   409), immutable versions 1..N, labels that move (`latest` is implied). `POST /v1/conversations { prompt }` and
   `POST /v1/judgments { state, prompt }` resolve a label once, when they are made, and record `{ name, version }`; a
-  conversation keeps the rendered system prompt, model and guardrails in its own row, so a turn never reads the prompt
+  conversation keeps the rendered system prompt, model, guardrails and tools in its own row (tools in `conversation_tools`), so a turn never reads the prompt
   tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
+- **Tools** ([ADR 0019](docs/adr/0019-tools-and-integrations.md)). A tenant registers remote MCP servers (`tool_servers`:
+  a slug, a URL, `auth` none or a header whose value is a sealed credential) through admin routes `/v1/tool-servers*`;
+  the reserved server `kerby` serves Kerby's own tools from code (`judge`, and `echo` where `ENABLE_ECHO_TOOL` is set).
+  Registering a server, changing it, or `.../sync` enqueues `sync-tool-server` (on `turns`) in the same tenant
+  transaction; only a worker can open the credential, so only a worker lists tools (`packages/mcp` over the egress guard,
+  30 s), and `recordSync` applies the listing: a new tool arrives disabled; a disabled tool's pinned definition follows
+  the listing; an enabled tool keeps the definition an admin approved and is `drifted` until one accepts the new one;
+  a tool no longer listed is `removed` and not offered. A conversation (or its chat prompt) names its tools as
+  `<server>/<tool>` or `<server>/*`, resolved to server ids in `conversation_tools`; none named, none offered. Creating
+  one and posting to one need the caller's integration to hold every tool it names (403 `tool_not_granted`). A turn
+  offers the named tools that are enabled and available (at most 64, else `last_error`), as `<server>__<tool>` with the
+  pinned definition; a remote call runs in its tool step after the guardrails, one MCP session per server per run,
+  `TOOL_CALL_TIMEOUT_MS` (60 s) each, the call id in `_meta`, text passed and cut at 256 KiB, and any failure is an error
+  result the model reads, never a turn retry. `GET /v1/tools` lists what the caller may name. `make tools-e2e` is the
+  proof on the real stack.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
@@ -241,12 +268,15 @@ then provisions a `default` tenant through the operator API and prints its key. 
   inside the network (`make up` provisions through `docker compose exec`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
-  `make worktree NAME=<name>` makes a checkout under `worktrees/<name>` with its own project and port pair in `.env`.
-- The worker runs the scripted fake model and the `echo` tool (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`); the
+  `make worktree NAME=<name>` makes a checkout under `worktrees/<name>` with its own project and port pair in `.env`,
+  which the Makefile exports to its targets (the scripts read `KERBY_API_PORT` and `KERBY_PROJECT`).
+- The worker runs the scripted fake model (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`) and serves
+  `kerby/echo` to conversations that name it (`ENABLE_ECHO_TOOL` on api and worker); the
   worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
   `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
   `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
-  key pair; `make secrets-key` makes a real one.
+  key pair; `make secrets-key` makes a real one. The worker's egress guard lets `host.docker.internal` through
+  (`EGRESS_ALLOWED_HOSTS`, development only), so an MCP server on this machine can be registered as a tool server.
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
@@ -255,7 +285,10 @@ then provisions a `default` tenant through the operator API and prints its key. 
   stream-saturation phase: a second api process, both filled to their stream cap, peak connections per process and role.
 - `make e2e` (scripts/e2e.ts) is the proof on the real stack: two workers, an SSE stream, `docker kill` of the worker
   holding a turn mid-flight, then checks that the turn finished elsewhere, the tool ran once and every message exists once.
-- `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e` and
+- `make tools-e2e` (scripts/tools-e2e.ts) is the proof of tools (ADR 0019) on the real stack: the MCP test fixture on this
+  machine registered and listed through the egress guard, a tool granted to a restricted integration and called by its
+  conversation, an ungranted tool refused, a changed definition kept from the model until an admin accepts it.
+- `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e`, `make tools-e2e` and
   `make multitenant` are the real-stack runs. There is no tracing: logs are the record until a profile needs more.
 - Every process writes JSON lines (`@kerby/observability`: `at`, `level`, `msg`, `tenantId`, scalar fields, never
   content). `make logs-query` filters them: `TENANT=<id>`, `LEVEL=warn` (that level and worse), `MSG=<substring>`,

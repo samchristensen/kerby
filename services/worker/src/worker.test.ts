@@ -639,6 +639,42 @@ describe("a turn's tools", () => {
     }
   });
 
+  it("retries a turn whose credential could not be read without taking the write call for an interrupted one", async () => {
+    const secret = "s3cret-value-0123";
+    await using fixture = await startMcpFixture({
+      mode: "stateless",
+      requiredHeader: { name: "x-api-key", value: secret },
+      tools: [{ name: "send" }],
+    });
+    const into = seen();
+    let reads = 0;
+    const h = await harness({
+      runtime: calling(into, "crm__send", { q: "hi" }),
+      toolCredentials: async () => {
+        reads++;
+        if (reads === 1) throw new Error("the control database is unreachable");
+        return secret;
+      },
+    });
+    const t = await h.tenant("acme");
+    await registered(t, {
+      url: fixture.url,
+      auth: { kind: "header", header: "X-Api-Key" },
+      tools: [{ name: "send", effect: "write" }],
+    });
+    const conversation = await h.conversation(t, ["crm/send"]);
+    await h.post(t, conversation.id, "send it", false);
+    await retryFast(t);
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await h.settled(t, conversation.id, 3);
+
+    expect(reads).toBe(2);
+    expect(into.results.at(-1)?.isError).toBe(false);
+    expect(fixture.calls).toHaveLength(1);
+    const executions = await t.ctx.db.query("select executions from tool_executions");
+    expect(executions.rows).toEqual([{ executions: 1 }]);
+  });
+
   it("ends a call that hangs after toolCallTimeoutMs with an error result the model reads", async () => {
     await using fixture = await startMcpFixture({
       mode: "stateless",

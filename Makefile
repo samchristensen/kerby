@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
+.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e tools-e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -81,6 +81,9 @@ logs-query: ## Filtered JSON log lines: TENANT= LEVEL=warn MSG= SERVICE= SINCE=3
 
 e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes elsewhere (KERBY_E2E_KEEP=1 keeps the stack)
 	node scripts/e2e.ts
+
+tools-e2e: ## Tools on the real stack (ADR 0019): a local MCP server listed, granted to a restricted integration, called; drift pinned
+	node scripts/tools-e2e.ts
 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, a 200-tenant load run (KERBY_LOAD_TENANTS=n) and stream saturation on two api processes
 	node scripts/multitenant.ts
