@@ -39,8 +39,9 @@ turn, hold a model key outside the worker (ADR 0008), or cross tenants.
 - **Embeddings are bring-your-own-key** (ADR 0008). `packages/embeddings` is the port (`EmbeddingProvider`, types only,
   plus a deterministic fake for development and tests); `packages/embeddings-openai` speaks the OpenAI `/v1/embeddings`
   wire format with `fetch` for the providers that serve it with the tenant's existing chat key: `openai`, `google`,
-  `mistral`, `fireworks`, `openrouter` (each checked against its API reference; `together` is left out, since its
-  embeddings need a dedicated endpoint). A tenant chooses an embedding model
+  `mistral`, `fireworks`, `openrouter` and `opencode` (each checked against its API reference; OpenCode's is the
+  Console's `/inference/openai/v1/embeddings`, so its pay-as-you-go key, one key for chat, decisions and embeddings;
+  `together` is left out, since its embeddings need a dedicated endpoint). A tenant chooses an embedding model
   (`PUT /v1/search/settings { embeddingModel: "openai/text-embedding-3-small" }`, audited); without one search is
   keyword only. A provider's refusal (bad key, unknown model) is stored as `search_settings.last_error` and
   not retried; an outage throws and the task retries.
@@ -59,7 +60,8 @@ turn, hold a model key outside the worker (ADR 0008), or cross tenants.
 
 ## Consequences
 
-- Anthropic-only and OpenCode-only tenants get keyword search: neither offers an embeddings endpoint.
+- Anthropic-only tenants get keyword search: Anthropic offers no embeddings endpoint. OpenCode's embedding models are a
+  Console feature (its docs: not in Go or the free tier); whatever its endpoint refuses shows in `lastError`.
 - Setting an embedding model sends every indexed chat's text to that provider with the tenant's key; the audit log
   records who chose it.
 - Chunk text duplicates message text in the tenant's database; it is bounded by the conversation caps and not counted

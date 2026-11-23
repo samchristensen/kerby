@@ -21,6 +21,7 @@ const PROVIDERS: Record<EmbeddingProviderId, { label: string; baseUrl: string }>
   mistral: { label: "Mistral", baseUrl: "https://api.mistral.ai/v1" },
   fireworks: { label: "Fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" },
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  opencode: { label: "OpenCode", baseUrl: "https://opencode.ai/inference/openai/v1" },
 };
 
 const DEFAULT_TIMEOUT_MS = 30_000;
