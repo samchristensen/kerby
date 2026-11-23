@@ -256,38 +256,6 @@ async function rollout(service: Service, environment: string, tag: string): Prom
   }
 }
 
-/**
- * Fan the tenant migrations out to every tenant database through the operator API, which has no public route: the call
- * runs inside the control container, which holds OPERATOR_TOKEN. Throws, stopping the release, if the call or any tenant
- * fails; the services still on the previous release tolerate the old schema (ADR 0004).
- */
-function migrateTenants(environment: string): void {
-  const output = railway([
-    "ssh",
-    "--service",
-    "control",
-    "--environment",
-    environment,
-    "--",
-    "node",
-    "--input-type=module",
-    "-e",
-    `const r = await fetch("http://127.0.0.1:8081/v1/operator/migrate", {
-  method: "POST",
-  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
-  body: "{}",
-});
-console.log(r.status, await r.text());`,
-  ]);
-  console.log(`tenant migrations: ${output}`);
-  const match = /(\d{3}) (\{.*\})\s*$/s.exec(output);
-  const run: unknown = match?.[2] ? JSON.parse(match[2]) : undefined;
-  const failed = record(run, "migration result").failed;
-  if (match?.[1] !== "200" || !Array.isArray(failed) || failed.length > 0) {
-    throw new Error(`tenant migrations did not complete: ${output}`);
-  }
-}
-
 async function deploy(environment: string, tag: string): Promise<void> {
   // Every image must exist before any service moves, so a release never stops half-way for a missing image.
   for (const service of SERVICES) {
@@ -295,10 +263,10 @@ async function deploy(environment: string, tag: string): Promise<void> {
       stdio: "ignore",
     });
   }
-  // control first: it migrates the control database and creates the limited roles the others connect as.
+  // control first. Its pre-deploy command (.railway/railway.ts) migrates the control database and every tenant database
+  // before the new control starts, and a failure there fails this rollout: nothing else moves, so the api, worker and
+  // console that read the new schema never run ahead of it.
   await rollout("control", environment, tag);
-  // Then every tenant database, before the api, worker and console that read the new schema move.
-  migrateTenants(environment);
   await Promise.all(
     SERVICES.filter((service) => service !== "control").map((service) =>
       rollout(service, environment, tag),
