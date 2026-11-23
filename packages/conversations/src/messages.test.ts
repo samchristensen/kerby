@@ -190,8 +190,10 @@ describe("postUserMessage", () => {
     const size = new TextEncoder().encode(
       JSON.stringify({ role: "user", content: [...text("hello")] }),
     ).byteLength;
-    // The quota fits one message. Both posts pass the check before storing anything; the gate then holds each one
-    // after its body is indexed until the other's is, so each transaction sees both rows and the re-check refuses.
+    // The quota fits one message. Both posts usually pass the check before storing anything; the gate then holds each
+    // one after its body is indexed until the other's is, so each transaction sees both rows and the re-check refuses.
+    // Under load one post's row can land before the other's first check, which then refuses before storing anything:
+    // a post that settles opens the gate too, or the first would wait forever for a body that never comes.
     let arrived = 0;
     const { promise: gate, resolve: release } = Promise.withResolvers<void>();
     const racing: Blobs = {
@@ -207,7 +209,7 @@ describe("postUserMessage", () => {
       [first, second].map((conversation) =>
         postUserMessage(tenant, racing, conversation.id, [...text("hello")], {
           storageBytes: size,
-        }),
+        }).finally(release),
       ),
     );
     const won = results.filter((r) => r.status === "fulfilled").length;
