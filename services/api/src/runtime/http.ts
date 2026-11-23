@@ -18,12 +18,14 @@ import type { TenantContext, TenantLease } from "@kerby/db";
 import { log, withTenant } from "@kerby/observability";
 import {
   bearerToken,
+  clientAddress,
   createRouter,
   type FetchHandler,
   HttpError,
   json,
   type Route,
   readJson,
+  TokenBuckets,
 } from "@kerby/serve";
 import { createAuthenticator } from "../service/auth.ts";
 import {
@@ -35,7 +37,6 @@ import {
   type StreamItem,
 } from "../service/conversations.ts";
 import { listTenantModelKeys, removeModelKey, setModelKey } from "../service/model-keys.ts";
-import { clientAddress, TokenBuckets } from "../service/rate-limit.ts";
 import {
   type ApiDeps,
   NotFoundError,
@@ -121,7 +122,11 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
     async (request, params, client) => {
       // The only work done before a key is verified is a key lookup: an address that keeps presenting bad keys is
       // refused without one, whatever key it sends next.
-      const address = clientAddress(request, client.address, deps.settings.trustProxy);
+      const address = clientAddress(
+        request.headers.get("x-forwarded-for"),
+        client.address,
+        deps.settings.trustProxy,
+      );
       const perMinute = deps.settings.failedAuthPerMinute;
       const blocked = failedAuth.wait(address, perMinute);
       if (blocked > 0) return rateLimited(blocked, "too many failed authentications");

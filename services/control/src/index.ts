@@ -4,7 +4,7 @@ import {
   controlMigrationsDir,
   resolveTenantDbUrl,
   restrictControlDatabase,
-  setAppRolePassword,
+  setRolePassword,
 } from "@kerby/control-plane";
 import { createClusterAdmin, createControlDb, migrate, TenantPools } from "@kerby/db";
 import { configureAlerts, flushAlerts, log } from "@kerby/observability";
@@ -29,7 +29,12 @@ async function startControl(config: ControlConfig) {
   const tenantDbBox = createSecretBox(splitKeys(config.tenantDbKeys), "TENANT_DB_KEYS key");
   const control = createControlDb(config.controlDatabaseUrl);
   await migrate(control, [controlMigrationsDir]);
-  if (config.appDatabasePassword) await setAppRolePassword(control, config.appDatabasePassword);
+  if (config.appDatabasePassword) {
+    await setRolePassword(control, "kerby_app", config.appDatabasePassword);
+  }
+  if (config.consoleDatabasePassword) {
+    await setRolePassword(control, "kerby_console", config.consoleDatabasePassword);
+  }
   await restrictControlDatabase(control);
 
   const cluster = createClusterAdmin(config.clusterAdminUrl);
@@ -82,10 +87,10 @@ async function startControl(config: ControlConfig) {
   await ensureTemplate(deps);
   await restrictClusterDatabases(deps);
   await ensureTenantDbPasswords(deps);
-  const server = await serve(createControlApp(deps, config.operatorToken), {
-    host: config.host,
-    port: config.port,
-  });
+  const server = await serve(
+    createControlApp(deps, { operator: config.operatorToken, console: config.consoleToken }),
+    { host: config.host, port: config.port },
+  );
   const nightly = startNightly(deps);
   log("info", "control listening", { port: server.port });
   return {

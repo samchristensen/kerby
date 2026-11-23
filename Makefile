@@ -14,8 +14,9 @@ setup: ## Install dependencies and git hooks
 
 check: typecheck lint architecture docs knip ## The gate: everything CI requires except tests. Run before saying done.
 
-typecheck: ## tsc, strict
+typecheck: ## tsc, strict: the repository, then the console's pages (JSX and the DOM, services/console/tsconfig.json)
 	pnpm exec tsc
+	pnpm exec tsc -p services/console
 
 lint: ## Biome lint + format check
 	pnpm exec biome check .
@@ -35,10 +36,11 @@ knip: ## Dead files, unused exports and types, unused or undeclared dependencies
 test: ## Run all tests
 	pnpm exec vitest run
 
-up: ## Build and start the local stack, provision the default tenant, print its API key
+up: ## Build and start the local stack, provision the default tenant, print its API key and the console's address
 	docker compose up -d --build --wait
 	@key=$$(./scripts/provision-default.sh) && \
-	  echo "" && echo "Kerby is up. API: http://127.0.0.1:$${KERBY_API_PORT:-8080}" && echo "API key (tenant default): $$key"
+	  echo "" && echo "Kerby is up. API: http://127.0.0.1:$${KERBY_API_PORT:-8080}" && echo "API key (tenant default): $$key" && \
+	  echo "Console (sign up for a workspace of your own): http://127.0.0.1:$${KERBY_CONSOLE_PORT:-3000}"
 
 down: ## Stop the local stack, keep its data
 	docker compose down

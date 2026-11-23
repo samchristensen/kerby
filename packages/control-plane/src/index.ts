@@ -6,8 +6,15 @@ import { join } from "node:path";
 /** Control-plane migrations, for `migrate(controlDb, [controlMigrationsDir])`. */
 export const controlMigrationsDir = join(import.meta.dirname, "..", "migrations", "control");
 
-export { restrictControlDatabase, setAppRolePassword } from "./app-role.ts";
 export { audit } from "./audit.ts";
+export {
+  createConsoleSession,
+  deleteConsoleSession,
+  EmailTakenError,
+  findConsoleUser,
+  insertConsoleUser,
+  readConsoleSession,
+} from "./console.ts";
 export {
   listTenantsWithoutDbPassword,
   newTenantDbPassword,
@@ -26,6 +33,7 @@ export {
   parseApiKey,
   revokeApiKey,
 } from "./keys.ts";
+export { restrictControlDatabase, setRolePassword } from "./roles.ts";
 export {
   deleteModelKey,
   hasModelKey,

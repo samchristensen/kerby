@@ -87,14 +87,34 @@ function specifiers(text: string): string[] {
   return found;
 }
 
+/**
+ * Specifiers a source file loads for their values: every import, re-export and dynamic import except `import type` and
+ * `export type`, which TypeScript erases (`verbatimModuleSyntax` keeps `import { type X }`, so that one counts).
+ */
+function valueSpecifiers(text: string): string[] {
+  const found: string[] = [];
+  for (const pattern of [
+    /\b(?:import|export)\s+(?!type\b)[^;'"]*?\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s+["']([^"']+)["']/g,
+    /\bimport\(\s*["']([^"']+)["']\s*\)/g,
+  ]) {
+    for (const match of text.matchAll(pattern)) if (match[1]) found.push(match[1]);
+  }
+  return found;
+}
+
 function packageName(spec: string): string {
   const parts = spec.split("/");
   return spec.startsWith("@") ? parts.slice(0, 2).join("/") : (parts[0] ?? spec);
 }
 
-function layerIndex(src: string, path: string): number {
+/**
+ * The layer of `path` under a service's `src`. A service built on Next.js keeps its routes in `src/app`, where Next.js
+ * looks for them: that directory is the runtime layer (ADR 0014).
+ */
+function layerIndex(src: string, path: string, nextApp: boolean): number {
   const first = relative(src, path).split(sep)[0] ?? "";
-  return (LAYERS as readonly string[]).indexOf(first);
+  return (LAYERS as readonly string[]).indexOf(first === "app" && nextApp ? "runtime" : first);
 }
 
 export function checkArchitecture(root: string): Violation[] {
@@ -194,6 +214,8 @@ export function checkArchitecture(root: string): Violation[] {
     const manifest =
       ws.kind === "scripts" ? "the root package.json" : `${rel(ws.dir)}/package.json`;
     const src = join(ws.dir, "src");
+    // A Next.js service: `src/app` is its runtime layer, and Next.js bundles it apart from the rest (ADR 0014).
+    const nextApp = ws.kind === "services" && declared.has("next") ? join(src, "app") : undefined;
 
     for (const file of walk(ws.dir)) {
       if (!/\.(?:m?ts|tsx)$/.test(file)) continue;
@@ -208,7 +230,24 @@ export function checkArchitecture(root: string): Violation[] {
         }
       }
       const importerLayer =
-        ws.kind === "services" && !file.endsWith(".test.ts") ? layerIndex(src, file) : -1;
+        ws.kind === "services" && !file.endsWith(".test.ts")
+          ? layerIndex(src, file, nextApp !== undefined)
+          : -1;
+      if (nextApp && !relative(nextApp, file).startsWith("..") && !file.endsWith(".test.ts")) {
+        for (const spec of valueSpecifiers(text)) {
+          const kerby = packageName(spec).startsWith("@kerby/");
+          const leavesApp =
+            spec.startsWith(".") &&
+            relative(nextApp, resolve(dirname(file), spec)).startsWith("..");
+          if (kerby || leavesApp) {
+            add(
+              "layers",
+              file,
+              `imports the value of "${spec}" into src/app, which Next.js bundles: that code would load a second time inside the bundle, apart from the one src/index.ts built. Fix: \`import type\` it, and reach values through what src/index.ts installs (the console: consoleService() in src/app/_lib/console.ts). See ADR 0014`,
+            );
+          }
+        }
+      }
       for (const spec of specifiers(text)) {
         if (spec.startsWith(".")) {
           const target = resolve(dirname(file), spec);
@@ -220,7 +259,8 @@ export function checkArchitecture(root: string): Violation[] {
             );
             continue;
           }
-          const targetLayer = importerLayer >= 0 ? layerIndex(src, target) : -1;
+          const targetLayer =
+            importerLayer >= 0 ? layerIndex(src, target, nextApp !== undefined) : -1;
           if (targetLayer > importerLayer) {
             const from = LAYERS[importerLayer];
             add(
@@ -283,13 +323,14 @@ export function checkArchitecture(root: string): Violation[] {
     if (ws.kind === "services" && existsSync(src)) {
       for (const entry of readdirSync(src, { withFileTypes: true })) {
         const ok = entry.isDirectory()
-          ? (LAYERS as readonly string[]).includes(entry.name)
+          ? (LAYERS as readonly string[]).includes(entry.name) ||
+            (entry.name === "app" && nextApp !== undefined)
           : entry.name === "index.ts" || entry.name.endsWith(".test.ts");
         if (!ok) {
           add(
             "layers",
             join(src, entry.name),
-            `src/ may hold only index.ts, tests, and the layer directories (${LAYERS.join(", ")}). Fix: move this into the layer it belongs to. See ARCHITECTURE.md#layers`,
+            `src/ may hold only index.ts, tests, and the layer directories (${LAYERS.join(", ")}; and app, a Next.js service's routes). Fix: move this into the layer it belongs to. See ARCHITECTURE.md#layers`,
           );
         }
       }

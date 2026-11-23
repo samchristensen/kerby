@@ -108,6 +108,51 @@ describe("checkArchitecture", () => {
     expect(rules(root)).toContain("names:packages/contracts/package.json");
   });
 
+  describe("a Next.js service", () => {
+    const typeImp = (spec: string) => `import type { x } from ${JSON.stringify(spec)};\n`;
+    const web = (files: Record<string, string>) =>
+      tree({
+        "pnpm-workspace.yaml": 'catalog:\n  yaml: "2.9.1"\n  next: "16.4.6"\n',
+        "services/web/package.json": pkg("@kerby/web", {
+          "@kerby/contracts": "workspace:*",
+          next: "catalog:",
+        }),
+        "services/web/src/index.ts": imp("./app/_lib/deps.ts") + imp("./service/keys.ts"),
+        "services/web/src/service/keys.ts": imp("@kerby/contracts"),
+        "services/web/src/app/_lib/deps.ts": typeImp("../../service/keys.ts"),
+        ...files,
+      });
+
+    it("keeps its routes in src/app, the runtime layer, importing Kerby code as types only", () => {
+      const root = web({
+        "services/web/src/app/page.tsx":
+          imp("next/link") + imp("./_lib/deps.ts") + typeImp("@kerby/contracts"),
+      });
+      expect(checkArchitecture(root)).toEqual([]);
+    });
+
+    it("rejects loading a Kerby value into the bundle, from a package or from outside src/app", () => {
+      const root = web({
+        "services/web/src/app/page.tsx": imp("@kerby/contracts"),
+        "services/web/src/app/keys/page.tsx": imp("../../service/keys.ts"),
+        // `import { type x }` still loads the module under verbatimModuleSyntax
+        "services/web/src/app/other/page.tsx": `import { type x } from ${JSON.stringify("@kerby/contracts")};\n`,
+      });
+      const found = checkArchitecture(root);
+      expect(found.map((v) => `${v.rule}:${v.file}`)).toEqual([
+        "layers:services/web/src/app/keys/page.tsx",
+        "layers:services/web/src/app/other/page.tsx",
+        "layers:services/web/src/app/page.tsx",
+      ]);
+      expect(found[0]?.message).toContain("import type");
+    });
+
+    it("is the only kind of service with src/app", () => {
+      const root = tree({ "services/api/src/app/page.ts": "export const x = 1;\n" });
+      expect(rules(root)).toEqual(["layers:services/api/src/app"]);
+    });
+  });
+
   describe("tenancy", () => {
     const control = (sql: string) =>
       tree({

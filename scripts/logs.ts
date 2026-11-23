@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
-const SERVICES = ["control", "api", "worker"] as const;
+const SERVICES = ["control", "api", "worker", "console"] as const;
 const LEVELS = ["debug", "info", "warn", "error"] as const;
 type Level = (typeof LEVELS)[number];
 

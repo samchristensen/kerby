@@ -18,5 +18,11 @@
     "erasableSyntaxOnly": true
   },
   "include": ["packages", "services", "scripts", ".railway"],
-  "exclude": ["**/node_modules"]
+  // The console's Next.js pages (JSX, the DOM) have their own config: `make typecheck` runs both.
+  "exclude": [
+    "**/node_modules",
+    "**/.next",
+    "services/console/src/app",
+    "services/console/next.config.ts"
+  ]
 }

@@ -1,12 +1,13 @@
 // Operate Kerby on Railway (ADRs 0007, 0011). Run through `make railway-plan`, `make railway-setup` and `make deploy`.
 //   node scripts/railway.ts plan     [environment]        preview what `.railway/railway.ts` would change
-//   node scripts/railway.ts setup    [environment]        make the environment match `.railway/railway.ts`, add its domain and secrets
+//   node scripts/railway.ts setup    [environment]        make the environment match `.railway/railway.ts`, add its domains and secrets
 //   node scripts/railway.ts secrets  [environment]        create the secrets the IaC file leaves to preserve(); never replaces one
+//   node scripts/railway.ts domains  [environment]        give the public services (api, console) a Railway domain if they have none
 //   node scripts/railway.ts registry [environment]        give each service the GHCR pull token in $GHCR_PULL_TOKEN
 //   node scripts/railway.ts deploy   [environment] [tag]  point the environment's image tag at `tag` (default: this commit's
-//                                                         `sha-<commit>`, built by CI) and redeploy: control first, then api and worker
+//                                                         `sha-<commit>`, built by CI) and redeploy: control first, then the rest
 // The infrastructure is Railway Infrastructure as Code in `.railway/railway.ts`; this script does only what that file cannot:
-// make an environment, generate secrets once, add the generated domain, set registry credentials, and roll images out.
+// make an environment, generate secrets once, add the generated domains, set registry credentials, and roll images out.
 // Railway builds nothing: CI builds and pushes the images (.github/workflows/ci.yml). `environment` defaults to production;
 // a new name is a copy of it with secrets of its own.
 // Needs the `railway` CLI (signed in, or RAILWAY_TOKEN for one environment) with the project linked, and for `deploy`, docker
@@ -17,7 +18,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { generateBoxKey, generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 
 const PRODUCTION = "production";
-const SERVICES = ["control", "api", "worker"] as const;
+const SERVICES = ["control", "api", "worker", "console"] as const;
+/** The services the internet reaches, each on a generated Railway domain. */
+const PUBLIC_SERVICES = ["api", "console"] as const;
 type Service = (typeof SERVICES)[number];
 const REGISTRY_OWNER = "samchristensen";
 const imageOf = (service: Service, tag: string) =>
@@ -91,10 +94,12 @@ function ensureEnvironment(environment: string): void {
       throw new Error(`there is no "${PRODUCTION}" environment to copy "${environment}" from`);
     }
     railway(["environment", "new", environment, "--duplicate", PRODUCTION, "--json"]);
-    // The copy's services appear a little later; applying before they do would create strays.
+    // The copy's services appear a little later; applying before they do would create strays. A service production does
+    // not have yet comes from the IaC file afterwards.
+    const expected = ["Postgres", ...SERVICES].filter((name) => serviceNames(PRODUCTION).has(name));
     for (let attempt = 0; ; attempt++) {
       const have = serviceNames(environment);
-      if (["Postgres", ...SERVICES].every((name) => have.has(name))) break;
+      if (expected.every((name) => have.has(name))) break;
       if (attempt >= 30) throw new Error(`the services of "${environment}" did not appear`);
       execFileSync("sleep", ["2"]);
     }
@@ -138,10 +143,15 @@ function ensureSecrets(environment: string): void {
     environment !== PRODUCTION &&
     control.OPERATOR_TOKEN !== undefined &&
     control.OPERATOR_TOKEN === variablesOf("control", PRODUCTION).OPERATOR_TOKEN;
-  for (const name of ["OPERATOR_TOKEN", "APP_DATABASE_PASSWORD"]) {
+  // The console references CONSOLE_TOKEN here, and api and worker TENANT_DB_KEYS below (.railway/railway.ts).
+  for (const name of [
+    "OPERATOR_TOKEN",
+    "APP_DATABASE_PASSWORD",
+    "CONSOLE_TOKEN",
+    "CONSOLE_DATABASE_PASSWORD",
+  ]) {
     if (control[name] === undefined || copied) set("control", name, secret());
   }
-  // api and worker reference control's copy (.railway/railway.ts).
   if (control.TENANT_DB_KEYS === undefined || copied) {
     set("control", "TENANT_DB_KEYS", generateBoxKey());
   }
@@ -155,21 +165,23 @@ function ensureSecrets(environment: string): void {
   }
 }
 
-/** The api's Railway-generated domain; the IaC file does not manage generated domains. */
-function ensureDomain(environment: string): void {
-  const domains = record(
-    railwayJson(["domain", "list", "--service", "api", "--environment", environment]),
-    "domains",
-  );
-  if (list(domains.domains, "domains").length === 0) {
-    railway(["domain", "--service", "api", "--environment", environment, "--json"]);
+/** The public services' Railway-generated domains; the IaC file does not manage generated domains. */
+function ensureDomains(environment: string): void {
+  for (const service of PUBLIC_SERVICES) {
+    const domains = record(
+      railwayJson(["domain", "list", "--service", service, "--environment", environment]),
+      "domains",
+    );
+    if (list(domains.domains, "domains").length === 0) {
+      railway(["domain", "--service", service, "--environment", environment, "--json"]);
+    }
   }
 }
 
 function setup(environment: string): void {
   ensureEnvironment(environment);
   iac("apply", "--yes");
-  ensureDomain(environment);
+  ensureDomains(environment);
   ensureSecrets(environment);
   console.log(
     `railway "${environment}" matches .railway/railway.ts. Next: make deploy ENV=${environment}`,
@@ -251,9 +263,13 @@ async function deploy(environment: string, tag: string): Promise<void> {
       stdio: "ignore",
     });
   }
-  // control first: it migrates the control database and creates the limited role api and worker connect as.
+  // control first: it migrates the control database and creates the limited roles the others connect as.
   await rollout("control", environment, tag);
-  await Promise.all([rollout("api", environment, tag), rollout("worker", environment, tag)]);
+  await Promise.all(
+    SERVICES.filter((service) => service !== "control").map((service) =>
+      rollout(service, environment, tag),
+    ),
+  );
 }
 
 /**
@@ -304,11 +320,12 @@ if (command === "plan") {
   iac("plan");
 } else if (command === "setup") setup(environment);
 else if (command === "secrets") ensureSecrets(environment);
+else if (command === "domains") ensureDomains(environment);
 else if (command === "registry") registry(environment);
 else if (command === "deploy") await deploy(environment, tag ?? `sha-${git("rev-parse", "HEAD")}`);
 else {
   console.error(
-    "usage: node scripts/railway.ts <plan|setup|secrets|registry|deploy> [environment] [tag]",
+    "usage: node scripts/railway.ts <plan|setup|secrets|domains|registry|deploy> [environment] [tag]",
   );
   process.exit(1);
 }

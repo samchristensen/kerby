@@ -9,11 +9,17 @@ import {
 } from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
+  audit,
   authenticateApiKey,
   createApiKey,
+  createConsoleSession,
+  deleteConsoleSession,
   deleteModelKey,
+  EmailTakenError,
+  findConsoleUser,
   getTenant,
   hasModelKey,
+  insertConsoleUser,
   insertTenant,
   listApiKeys,
   listModelKeys,
@@ -24,13 +30,14 @@ import {
   newTenantDbPassword,
   parseApiKey,
   putModelKey,
+  readConsoleSession,
   readModelKey,
   readTenantDbPassword,
   recordUsage,
   resealTenantDbPasswords,
   resolveTenantDbUrl,
   revokeApiKey,
-  setAppRolePassword,
+  setRolePassword,
   setTenantStatus,
   storeTenantDbPassword,
   TenantNameTakenError,
@@ -185,17 +192,18 @@ describe("api keys", () => {
   });
 });
 
-describe("the limited app role (what api and worker connect as)", () => {
-  async function asApp(controlUrl: string) {
-    const admin = createControlDb(controlUrl, { max: 1 });
-    await setAppRolePassword(admin, "app-role-password-for-tests");
-    await admin.close();
-    const url = new URL(controlUrl);
-    url.username = "kerby_app";
-    url.password = "app-role-password-for-tests";
-    return createControlDb(url.toString(), { max: 1 });
-  }
+/** A handle on the control database as one of the limited service roles, given a password the way control does. */
+async function asRole(controlUrl: string, role: "kerby_app" | "kerby_console") {
+  const admin = createControlDb(controlUrl, { max: 1 });
+  await setRolePassword(admin, role, `${role}-password-for-tests`);
+  await admin.close();
+  const url = new URL(controlUrl);
+  url.username = role;
+  url.password = `${role}-password-for-tests`;
+  return createControlDb(url.toString(), { max: 1 });
+}
 
+describe("the limited app role (what api and worker connect as)", () => {
   it("does what the services need and nothing of the operator's", async () => {
     await using control = await createTestControlDb();
     const tenant = await insertTenant(control.db, { name: "acme", dbHost: "h", dbPort: 1 });
@@ -203,7 +211,7 @@ describe("the limited app role (what api and worker connect as)", () => {
     const { secret } = await createApiKey(control.db, tenant.id);
     const box = createSecretBox([generateBoxKey()]);
     await storeTenantDbPassword(control.db, box, tenant.id, "tenant-db-password");
-    const app = await asApp(control.url);
+    const app = await asRole(control.url, "kerby_app");
     try {
       // api: verify a key; worker: list and read tenants, record usage
       expect((await authenticateApiKey(app, secret))?.tenant.id).toBe(tenant.id);
@@ -242,6 +250,122 @@ describe("the limited app role (what api and worker connect as)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("the console role", () => {
+  it("does what the console needs, never reads a key hash, and touches nothing of the operator's", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    await setTenantStatus(control.db, tenant.id, "active");
+    const user = await insertConsoleUser(control.db, {
+      tenantId: tenant.id,
+      email: "ada@example.com",
+      passwordHash: "scrypt$17$8$1$c2FsdA==$aGFzaA==",
+    });
+    const sealer = createSealer(generateSecretsKeyPair().publicKey);
+    const role = await asRole(control.url, "kerby_console");
+    try {
+      // sign in: read the person, keep a session
+      expect((await findConsoleUser(role, "ada@example.com"))?.id).toBe(user.id);
+      const token = await createConsoleSession(
+        role,
+        { id: user.id, tenantId: tenant.id },
+        new Date(Date.now() + 60_000),
+      );
+      expect((await readConsoleSession(role, token))?.tenantName).toBe("acme");
+      await deleteConsoleSession(role, token);
+      // keys: create, list, revoke; the new key works at the api
+      const { key, secret } = await createApiKey(role, tenant.id, "ci");
+      expect((await listApiKeys(role, tenant.id)).map((k) => k.label)).toEqual(["ci"]);
+      expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(tenant.id);
+      expect(await revokeApiKey(role, tenant.id, key.id)).toBe(true);
+      // model keys, and the audit trail of both
+      await putModelKey(role, sealer, tenant.id, "anthropic", "sk-test-1234");
+      expect((await listModelKeys(role, tenant.id)).map((k) => k.provider)).toEqual(["anthropic"]);
+      expect(await deleteModelKey(role, tenant.id, "anthropic")).toBe(true);
+      await audit(role, { tenantId: tenant.id, actor: `user:${user.id}`, action: "key.create" });
+
+      for (const sql of [
+        "select key_hash from api_keys",
+        "update api_keys set key_hash = '\\x00'",
+        "update api_keys set tenant_id = gen_random_uuid()",
+        "insert into console_users (tenant_id, email, password_hash) values (gen_random_uuid(), 'x', 'y')",
+        "update console_users set password_hash = 'x'",
+        "update console_users set tenant_id = gen_random_uuid()",
+        "insert into tenants (name, db_host, db_port, db_name, db_role) values ('x', 'h', 1, 'd', 'r')",
+        "update tenants set status = 'active'",
+        "select * from audit_log",
+        "select * from usage",
+        "select * from tenant_db_credentials",
+      ]) {
+        await expect(role.query(sql), sql).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await role.close();
+    }
+  });
+});
+
+describe("console people and sessions", () => {
+  const hash = "scrypt$17$8$1$c2FsdA==$aGFzaA==";
+
+  it("keeps one account per email", async () => {
+    await using control = await createTestControlDb();
+    const a = await insertTenant(control.db, newTenant("a"));
+    const b = await insertTenant(control.db, newTenant("b"));
+    await insertConsoleUser(control.db, {
+      tenantId: a.id,
+      email: "ada@example.com",
+      passwordHash: hash,
+    });
+    await expect(
+      insertConsoleUser(control.db, {
+        tenantId: b.id,
+        email: "ada@example.com",
+        passwordHash: hash,
+      }),
+    ).rejects.toBeInstanceOf(EmailTakenError);
+    expect(await findConsoleUser(control.db, "bob@example.com")).toBeUndefined();
+  });
+
+  it("reads a live session by its token only, never an expired, deleted or malformed one", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    const { id } = await insertConsoleUser(control.db, {
+      tenantId: tenant.id,
+      email: "ada@example.com",
+      passwordHash: hash,
+    });
+    const user = { id, tenantId: tenant.id };
+    const live = await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
+    const expired = await createConsoleSession(control.db, user, new Date(Date.now() - 1));
+
+    expect(await readConsoleSession(control.db, live)).toMatchObject({
+      userId: id,
+      email: "ada@example.com",
+      tenantId: tenant.id,
+      tenantName: "acme",
+      tenantStatus: "provisioning",
+    });
+    expect(await readConsoleSession(control.db, expired)).toBeUndefined();
+    expect(await readConsoleSession(control.db, `${live.slice(0, -1)}A`)).toBeUndefined();
+    expect(await readConsoleSession(control.db, "not a token")).toBeUndefined();
+    // the table holds hashes, not tokens
+    const stored = await control.db.query("select 1 from console_sessions where token_hash = $1", [
+      Buffer.from(live),
+    ]);
+    expect(stored.rowCount).toBe(0);
+
+    // a new sign-in forgets the person's expired sessions
+    await createConsoleSession(control.db, user, new Date(Date.now() + 60_000));
+    const { rows } = await control.db.query<{ n: number }>(
+      "select count(*)::int as n from console_sessions where expires_at <= now()",
+    );
+    expect(rows[0]?.n).toBe(0);
+
+    await deleteConsoleSession(control.db, live);
+    expect(await readConsoleSession(control.db, live)).toBeUndefined();
   });
 });
 

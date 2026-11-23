@@ -44,12 +44,15 @@ const ApiKeySchema = z.object({
 });
 export type ApiKey = z.infer<typeof ApiKeySchema>;
 
+/** A tenant's name: unique among live tenants, chosen at provisioning (by an operator, or at sign-up in the console). */
+export const TenantNameSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, "lowercase letters, digits and dashes");
+
 export const CreateTenantRequestSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .max(100)
-    .regex(/^[a-z0-9][a-z0-9-]*$/, "lowercase letters, digits and dashes"),
+  name: TenantNameSchema,
   plan: z.string().min(1).optional(),
   limits: LimitsSchema.optional(),
 });

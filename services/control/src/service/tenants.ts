@@ -37,11 +37,13 @@ export type Provisioned = { tenant: TenantRecord; key: Awaited<ReturnType<typeof
 
 /**
  * Provision a tenant: a database copied from the template, a role that can reach only it, the tenant migrations,
- * the first key. On any failure nothing is left behind: the database, the role and the row are removed.
+ * the first key. On any failure nothing is left behind: the database, the role and the row are removed. `actor` is who
+ * asked, for the audit log: an operator, or the console at sign-up.
  */
 export async function provisionTenant(
   deps: ControlDeps,
   request: ProvisionRequest,
+  actor: "operator" | "console" = ACTOR,
 ): Promise<Provisioned> {
   const { control, cluster, settings, pools, tenantDbBox } = deps;
   let tenant: TenantRecord;
@@ -54,7 +56,7 @@ export async function provisionTenant(
       dbPort: settings.clusterPort,
     });
   } catch (error) {
-    if (error instanceof TenantNameTakenError) throw new ConflictError(error.message);
+    if (error instanceof TenantNameTakenError) throw new ConflictError(error.message, "name_taken");
     throw error;
   }
 
@@ -76,7 +78,7 @@ export async function provisionTenant(
     const active = await setTenantStatus(control, tenant.id, "active");
     await audit(control, {
       tenantId: tenant.id,
-      actor: ACTOR,
+      actor,
       action: "tenant.create",
       detail: { name: tenant.name },
     });
@@ -127,8 +129,9 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
 }
 
 /**
- * Delete: refuse new work, drop the database and role, delete the object prefix, purge keys and secrets. Every step
- * is safe to repeat, so a failed delete is retried by calling it again. The row stays, status `deleted`.
+ * Delete: refuse new work, drop the database and role, delete the object prefix, purge keys, secrets and the console's
+ * people and sessions. Every step is safe to repeat, so a failed delete is retried by calling it again. The row stays,
+ * status `deleted`.
  */
 export async function deleteTenant(deps: ControlDeps, id: string): Promise<void> {
   const { control, cluster, buckets, pools } = deps;
@@ -143,6 +146,8 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
     await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
     await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
+    await tx.query("delete from console_sessions where tenant_id::text = $1", [id]);
+    await tx.query("delete from console_users where tenant_id::text = $1", [id]);
     await setTenantStatus(tx, id, "deleted");
   });
   await audit(control, {

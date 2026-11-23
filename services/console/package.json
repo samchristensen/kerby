@@ -1,0 +1,28 @@
+{
+  "name": "@kerby/console",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kerby/config": "workspace:*",
+    "@kerby/contracts": "workspace:*",
+    "@kerby/control-plane": "workspace:*",
+    "@kerby/db": "workspace:*",
+    "@kerby/observability": "workspace:*",
+    "@kerby/runtime-pi-durable": "workspace:*",
+    "@kerby/secrets": "workspace:*",
+    "@kerby/serve": "workspace:*",
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "tailwindcss": "catalog:"
+  }
+}

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Kerby: an agent runtime sold as a multi-tenant service; tenants are untrusted customers. Humans steer; agents
-execute; a human merges. Stack: TypeScript on Node (no build step), pnpm workspaces. Postgres is the only service: a
+execute; a human merges. Stack: TypeScript on Node (no build step but the console's Next.js pages), pnpm workspaces. Postgres is the only service: a
 control database plus one database per tenant, with durable execution through Absurd. Bytes and transcripts live in
 S3-compatible storage, indexed in the tenant's database. Agent harnesses (Pi Durable first) sit behind `AgentRuntime`.
 
@@ -34,7 +34,7 @@ message says how to fix the violation; follow it. A rule that needs changing nee
 
 - Imports point one way: scripts and services to packages, services never to services; inside a service, `types -> config -> repo -> service -> runtime`. Enforced.
 - Each external system (Postgres, Absurd, S3, a harness) sits behind one package. Enforced.
-- A tenant is a database: repo functions take a `ControlDb` or `TenantDb`, never a pool; a tenant id comes only from a verified API key. Migrations live in `migrations/control/` or `migrations/tenant/`. Enforced for migrations, review for the rest.
+- A tenant is a database: repo functions take a `ControlDb` or `TenantDb`, never a pool; a tenant id comes only from a verified API key or console session. Migrations live in `migrations/control/` or `migrations/tenant/`. Enforced for migrations, review for the rest.
 - No tenant code runs in Kerby's processes; tenant secrets are encrypted, and logs carry tenant ids, never content.
 - The harness is disposable: persist each `message_end` before acting on it; resume from the index, not from harness state.
 - Dependencies are `catalog:` exact pins (enforced). Config is read once at startup and fails loudly.

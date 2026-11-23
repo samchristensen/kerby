@@ -75,7 +75,8 @@ Decisions: ADRs 0001-0004.
 ### M9 Commercial readiness
 
 - [ ] Plans and limits as data; billing integration; usage visible to the tenant
-- [ ] Tenant console: keys, tools, model keys (BYO: the API exists, ADR 0008), usage
+- [x] Tenant console: sign-up, sign-in, API keys, model keys (BYO), on Railway with a public domain (`services/console`, ADR 0014)
+- [ ] Tenant console: tools (after M7), usage; email verification and password reset (tech debt)
 - [ ] Audit log, including operator access to a tenant; verified export and deletion; optional per-tenant bucket
 - [ ] Not code, but required before selling: terms, DPA, security posture page, incident process
 
