@@ -28,6 +28,11 @@ export class ToolNotUsableError extends Error {
   override name = "ToolNotUsableError";
 }
 
+/** Enabling or accepting named a definition (`expectedDefinition`) the server no longer lists. */
+export class ToolDefinitionChangedError extends Error {
+  override name = "ToolDefinitionChangedError";
+}
+
 /** Patterns that name no usable tool; `problems` says why for each, and the message lists them all. */
 export class UnknownToolError extends Error {
   override name = "UnknownToolError";
