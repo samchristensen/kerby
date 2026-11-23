@@ -5,9 +5,9 @@ import { Logo } from "../_components/ui.tsx";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 px-4 py-12">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-page px-4 py-12">
       <Logo href="/" />
-      <div className="mt-8 w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
+      <div className="mt-8 w-full max-w-md rounded-2xl border border-line bg-panel p-8 shadow-sm">
         {children}
       </div>
     </div>

@@ -20,7 +20,7 @@ export default async function ApiKeyPage({ params }: { params: Promise<{ keyId: 
       <PageHeader
         title={key.label || "Untitled key"}
         actions={
-          key.revokedAt ? <Badge tone="zinc">Revoked</Badge> : <Badge tone="green">Active</Badge>
+          key.revokedAt ? <Badge tone="neutral">Revoked</Badge> : <Badge tone="live">Active</Badge>
         }
       />
       <Card title="Details">
@@ -42,7 +42,7 @@ export default async function ApiKeyPage({ params }: { params: Promise<{ keyId: 
               value: key.lastUsedAt ? (
                 formatDateTime(key.lastUsedAt)
               ) : (
-                <span className="text-zinc-400">Never</span>
+                <span className="text-muted">Never</span>
               ),
             },
             {
@@ -55,7 +55,7 @@ export default async function ApiKeyPage({ params }: { params: Promise<{ keyId: 
       {key.revokedAt ? null : (
         <div className="mt-6">
           <Card title="Danger zone">
-            <p className="mb-4 text-sm text-zinc-500">
+            <p className="mb-4 text-sm text-muted">
               Revoking a key is immediate and permanent. Requests that use it will be refused.
             </p>
             <ConfirmAction

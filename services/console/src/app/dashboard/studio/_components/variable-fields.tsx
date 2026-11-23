@@ -44,22 +44,22 @@ export function PromptVariableFields({
 
   if (!name || !source) return null;
   const current = known ? { key, variables: known } : loaded?.key === key ? loaded : undefined;
-  if (!current) return <p className="text-sm text-zinc-500">Loading its variables…</p>;
+  if (!current) return <p className="text-sm text-muted">Loading its variables…</p>;
   if ("error" in current) return <Alert tone="error">{current.error}</Alert>;
   if (current.variables.length === 0) {
-    return <p className="text-sm text-zinc-500">This prompt has no variables.</p>;
+    return <p className="text-sm text-muted">This prompt has no variables.</p>;
   }
   return (
     <fieldset className="space-y-3">
-      <legend className="text-sm font-semibold text-zinc-900">Variables</legend>
+      <legend className="text-sm font-semibold text-fg">Variables</legend>
       {current.variables.map((variable) => (
         <label key={variable.name} className={labelClass}>
           <code className="font-mono">{variable.name}</code>
           {variable.default === undefined ? (
-            <span className="ml-2 text-xs text-amber-700">required</span>
+            <span className="ml-2 text-xs text-brand-text">required</span>
           ) : null}
           {variable.description ? (
-            <span className="block text-xs font-normal text-zinc-500">{variable.description}</span>
+            <span className="block text-xs font-normal text-muted">{variable.description}</span>
           ) : null}
           <input
             name={`var.${variable.name}`}

@@ -24,20 +24,20 @@ export default async function ProvidersLayout({ children }: { children: ReactNod
               activeClassName={listItemActiveClass}
             >
               <span className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-medium text-zinc-900">
+                <span className="truncate text-sm font-medium text-fg">
                   {providerName(provider.id)}
                 </span>
                 <span
-                  className={`flex shrink-0 items-center gap-1.5 text-xs ${provider.configured ? "text-emerald-700" : "text-zinc-400"}`}
+                  className={`flex shrink-0 items-center gap-1.5 text-xs ${provider.configured ? "text-live-text" : "text-muted"}`}
                 >
                   <span
                     aria-hidden="true"
-                    className={`size-2 rounded-full ${provider.configured ? "bg-emerald-500" : "bg-zinc-300"}`}
+                    className={`size-2 rounded-full ${provider.configured ? "bg-live" : "bg-muted/50"}`}
                   />
                   {provider.configured ? "Key set" : "No key"}
                 </span>
               </span>
-              <code className="mt-0.5 block font-mono text-xs text-zinc-500">
+              <code className="mt-0.5 block font-mono text-xs text-muted">
                 {provider.id}
                 {provider.chat ? " · chat" : ""}
                 {provider.decisions ? " · decisions" : ""}

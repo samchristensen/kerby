@@ -131,7 +131,7 @@ export function ChatDraftEditor({
   return (
     <div className="space-y-6">
       <Card title="Text">
-        <p id="prompt-text-label" className="mb-2 text-sm text-zinc-500">
+        <p id="prompt-text-label" className="mb-2 text-sm text-muted">
           The system prompt, in markdown. Write <code className="font-mono">{"{{name}}"}</code>{" "}
           where a value goes in.
         </p>
@@ -150,12 +150,12 @@ export function ChatDraftEditor({
 
       <Card title="Variables">
         {names.length === 0 ? (
-          <p className="text-sm text-zinc-500">
+          <p className="text-sm text-muted">
             None. Each <code className="font-mono">{"{{name}}"}</code> in the text appears here.
           </p>
         ) : (
           <table className="w-full text-left text-sm">
-            <thead className="text-xs text-zinc-500">
+            <thead className="text-xs text-muted">
               <tr>
                 <th className="pb-2 font-medium">Name</th>
                 <th className="pb-2 font-medium">Description</th>
@@ -170,7 +170,7 @@ export function ChatDraftEditor({
                     <td className="py-1 pr-3">
                       <code className="font-mono">{variable}</code>
                       {row?.default ? null : (
-                        <span className="ml-2 text-xs text-amber-700">required</span>
+                        <span className="ml-2 text-xs text-brand-text">required</span>
                       )}
                     </td>
                     <td className="py-1 pr-3">
@@ -218,7 +218,7 @@ export function ChatDraftEditor({
           }}
           className={`${inputClass} mt-1.5`}
         />
-        <p className="mt-1.5 text-sm text-zinc-500">
+        <p className="mt-1.5 text-sm text-muted">
           {providers.length > 0
             ? `Keys on file for: ${providers.join(", ")}. Leave blank for the workspace default.`
             : "You have no model keys yet: add one under Model providers. Leave blank for the workspace default."}
@@ -252,14 +252,14 @@ export function ChatDraftEditor({
         }
       >
         {guardrails.length === 0 ? (
-          <p className="text-sm text-zinc-500">
+          <p className="text-sm text-muted">
             None. A guardrail is a yes/no question asked before the assistant acts; a yes blocks the
             message or tool call.
           </p>
         ) : (
           <ul className="space-y-4">
             {guardrails.map((row, index) => (
-              <li key={row.key} className="space-y-3 rounded-lg border border-zinc-200 p-3">
+              <li key={row.key} className="space-y-3 rounded-lg border border-line p-3">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className={labelClass}>
                     Name
@@ -328,7 +328,7 @@ export function ChatDraftEditor({
                 </label>
                 <button
                   type="button"
-                  className="text-sm text-red-600 hover:underline"
+                  className="text-sm text-danger hover:underline"
                   onClick={() => {
                     setGuardrails((rows) => rows.filter((r) => r.key !== row.key));
                     changed();

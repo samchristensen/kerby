@@ -20,7 +20,7 @@ export default async function ApiKeysLayout({ children }: { children: ReactNode 
       actions={<ButtonLink href="/dashboard/api-keys/new">New key</ButtonLink>}
     >
       {keys.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-zinc-500">
+        <p className="px-4 py-8 text-center text-sm text-muted">
           No API keys yet. Create one to call the API.
         </p>
       ) : (
@@ -34,17 +34,17 @@ export default async function ApiKeysLayout({ children }: { children: ReactNode 
               >
                 <span className="flex items-center justify-between gap-2">
                   <span
-                    className={`truncate text-sm font-medium ${key.label ? "text-zinc-900" : "text-zinc-500 italic"}`}
+                    className={`truncate text-sm font-medium ${key.label ? "text-fg" : "text-muted italic"}`}
                   >
                     {key.label || "Untitled key"}
                   </span>
                   {key.revokedAt ? (
-                    <Badge tone="zinc">Revoked</Badge>
+                    <Badge tone="neutral">Revoked</Badge>
                   ) : (
-                    <Badge tone="green">Active</Badge>
+                    <Badge tone="live">Active</Badge>
                   )}
                 </span>
-                <span className="mt-1 flex items-center justify-between gap-2 text-xs text-zinc-500">
+                <span className="mt-1 flex items-center justify-between gap-2 text-xs text-muted">
                   <code className="truncate font-mono">kb_{key.id}_…</code>
                   <span className="shrink-0">{formatDate(key.createdAt)}</span>
                 </span>

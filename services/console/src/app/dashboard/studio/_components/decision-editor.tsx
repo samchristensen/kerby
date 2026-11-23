@@ -128,7 +128,7 @@ function JsonTextArea({
   );
 }
 
-const removeClass = "text-sm text-red-600 hover:underline";
+const removeClass = "text-sm text-danger hover:underline";
 
 export function DecisionDraftEditor({
   name,
@@ -185,7 +185,7 @@ export function DecisionDraftEditor({
           }}
           className={`${inputClass} mt-1.5`}
         />
-        <p className="mt-1.5 text-sm text-zinc-500">
+        <p className="mt-1.5 text-sm text-muted">
           {providers.length > 0
             ? `Keys on file for: ${providers.join(", ")}. Leave blank for the default judgment model.`
             : "You have no judgment provider keys yet: add one under Model providers. Leave blank for the default judgment model."}
@@ -220,13 +220,13 @@ export function DecisionDraftEditor({
         }
       >
         {questions.length === 0 ? (
-          <p className="text-sm text-zinc-500">
+          <p className="text-sm text-muted">
             No questions yet. A published decision model asks at least one.
           </p>
         ) : (
           <ul className="space-y-4">
             {questions.map((row, index) => (
-              <li key={row.key} className="space-y-3 rounded-lg border border-zinc-200 p-3">
+              <li key={row.key} className="space-y-3 rounded-lg border border-line p-3">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className={labelClass}>
                     Name
@@ -354,7 +354,7 @@ export function DecisionDraftEditor({
                     </p>
                     {row.levels.map((level, position) => (
                       <div key={level.key} className="grid gap-2 sm:grid-cols-[2rem_1fr_auto_auto]">
-                        <span className="pt-2 text-sm text-zinc-500">{position}</span>
+                        <span className="pt-2 text-sm text-muted">{position}</span>
                         <input
                           aria-label={`Level ${position} description`}
                           value={level.description.text}
@@ -375,7 +375,7 @@ export function DecisionDraftEditor({
                         />
                         <button
                           type="button"
-                          className="text-sm text-zinc-600 hover:underline disabled:opacity-40"
+                          className="text-sm text-muted hover:underline disabled:opacity-40"
                           disabled={position === 0}
                           onClick={() =>
                             update(row.key, (r) => {
