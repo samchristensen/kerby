@@ -339,4 +339,27 @@ describe("checkArchitecture", () => {
       expect(checkArchitecture(root)).toEqual([]);
     });
   });
+
+  describe("queries", () => {
+    it("rejects comparing a uuid column as text, which no index serves", () => {
+      const root = tree({
+        "packages/contracts/src/index.ts":
+          'export const q = "select 1 from tenants where id::text = $1";\n',
+        "services/api/src/repo/chats.ts":
+          'export const q = "delete from keys where tenant_id::text in ($1)";\n',
+      });
+      expect(rules(root)).toEqual([
+        "queries:packages/contracts/src/index.ts",
+        "queries:services/api/src/repo/chats.ts",
+      ]);
+    });
+
+    it("accepts a uuid comparison and other text casts", () => {
+      const root = tree({
+        "packages/contracts/src/index.ts":
+          'export const q = "select id::text as id from tenants where id = $1 and status::text = $2";\n',
+      });
+      expect(checkArchitecture(root)).toEqual([]);
+    });
+  });
 });

@@ -43,7 +43,6 @@ export {
   findConversation,
   insertConversation,
   isBusy,
-  isConversationId,
   listConversations,
   recordToolExecution,
 } from "./repo.ts";

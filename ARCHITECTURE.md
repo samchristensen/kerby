@@ -49,6 +49,9 @@ types -> config -> repo -> service -> runtime
 
 `src/index.ts` is the composition root: it builds the real adapters and hands them down. Tests may import any layer.
 
+SQL compares a uuid column as uuid (`id = $1`), after checking the value with `isUuid` from `@kerby/db` (anything else is
+not found); a column cast to text matches no index, so every call would scan the table (enforced, rule `queries`).
+
 A service built on Next.js (the console) keeps its pages and server actions in `src/app`, where Next.js looks for them:
 that is its `runtime` layer. Next.js bundles `src/app`, so it imports Kerby packages and the rest of `src/` with
 `import type` only, and reaches values through what `src/index.ts` installed (`consoleService()`); otherwise the bundle
@@ -79,10 +82,10 @@ one kind, and the composition roots of api (which only makes and checks secrets 
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                                                                                           | Migrations                                                                 |
-| ------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                               |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the event log (`events`, `subscription_cursors`, `delivery_attempts`), the Absurd schema                                      | `packages/{durable,blobs,conversations,prompts,events}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                                                                                                                                               | Migrations                                                                 |
+| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, `tenant_wakeups` (when each tenant's queue is due), the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                               |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the event log (`events`, `subscription_cursors`, `delivery_attempts`), the Absurd schema                                                                                          | `packages/{durable,blobs,conversations,prompts,events}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -118,12 +121,16 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
   deleted tenants' copies (ADR 0013).
 - Self-serve sign-up ([ADR 0014](docs/adr/0014-tenant-console.md)): the console hashes the password and calls control's
-  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control provisions as above and stores
+  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control refuses an email that is not on
+  `signup_allowlist` (403 `not_invited`), otherwise provisions as above and stores
   the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
   kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
   `kerby_console`: API keys (never their hashes), model keys, people and sessions, appending to the audit log as
   `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
-  account (failed sign-ins an hour), per process like the api's limits.
+  account (failed sign-ins an hour), per process like the api's limits; sign-ins to one account take turns and an
+  address checks four at once, each looking at the limits when its turn comes, so a concurrent burst cannot outrun them.
+  A tenant holds at most 50 live API keys (`MAX_API_KEYS_PER_TENANT`; 409 `api_key_limit` from control, a message in
+  the console); rotating a key at the cap works.
 - Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
@@ -132,7 +139,11 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `packages/prompts`), when a message is posted, before anything is stored and again inside the post's transaction, and
   when a prompt's draft grows or it is published: 413 `storage_quota_exceeded`; a turn already admitted finishes.
   Before a key is verified, the only work is the key lookup: a client address that fails `FAILED_AUTH_PER_MINUTE` (30)
-  times in a minute gets 429 without one. The
+  times in a minute gets 429 without one. Lookups from one address take turns, four at once
+  (`LOOKUPS_PER_ADDRESS`), each checking the limit when its turn comes and counting a wrong key before giving its turn
+  up, so a concurrent burst of bad keys gets at most three lookups past the limit while many good keys at once only
+  wait; a credential the cache answers, or one already being looked up for another request, needs no lookup. The cache keeps at most 10,000
+  credentials (`MAX_CACHED_CREDENTIALS`), least recently used first, each for `AUTH_CACHE_SECONDS`. The
   address is the socket peer, or with `TRUST_PROXY=true` (Railway, whose edge sets `X-Forwarded-For` with the client
   first) the left-most `X-Forwarded-For` entry. The numbers are defaults until pricing (plan 0001, M9).
 
@@ -156,7 +167,12 @@ flowchart LR
   S -->|live deltas| C[client SSE]
 ```
 
-1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` (a periodic sweep catches missed ones) and
+1. **Schedule.** The worker learns of work from the control plane's `NOTIFY` and from `tenant_wakeups`: after enqueueing,
+   the api marks the tenant due and then sends the `NOTIFY` (two statements, never one transaction); after each claim,
+   the worker writes when that tenant's queue next needs a look (now for work left over, a retry's backoff, a lease that
+   lapses; nothing when the queue is empty), unless a newer hint arrived meanwhile. Every `SWEEP_INTERVAL_SECONDS` (10)
+   it looks at the tenants that are due; every `FULL_SWEEP_INTERVAL_SECONDS` (300), at start and when its `LISTEN`
+   reconnects, at every active tenant, the backstop for a hint lost between the api's commit and its write. It
    claims from that tenant's database only while the tenant is under its concurrency limit, counted across every
    worker: the claim runs in a tenant-database transaction holding an advisory lock, counts the turns running there
    under a live lease and claims at most the difference. A worker already at the limit by itself does not ask. A worker
@@ -197,8 +213,10 @@ flowchart LR
   last row's `updated_at` to the microsecond and its id. The console's chat uses it and the rest of this API with the person's
   session token ([ADR 0014](docs/adr/0014-tenant-console.md#amendment-chat-and-browsing-in-the-console-2026-11-22)).
 - **Streaming.** `GET .../events` replays persisted messages from the index after `Last-Event-ID` (the message `seq`), a page at a time,
-  then tails the tenant database with `LISTEN`: the worker `NOTIFY`s `{persisted: seq}` when a message commits and live
-  events (deltas, tool events) in full when they fit in 7500 bytes. Live events carry no SSE id and are not replayed;
+  then tails the tenant database with `LISTEN`: the api and the worker `NOTIFY` `{persisted: seq}` once a message has
+  committed, and the worker sends live events (deltas, tool events) in full when they fit in 7500 bytes. A `NOTIFY` is
+  never sent inside a transaction that writes: Postgres commits such transactions one at a time across the whole
+  cluster, every tenant's ([docs/deploy.md](docs/deploy.md#postgres)). Live events carry no SSE id and are not replayed;
   a poll every 5 s is the backstop for a lost notification. The model's reasoning (`thinking_delta`, `thinking_end`) is
   among the live events but the api drops it unless the request says `?include=thinking`. All streams on one tenant database in an api process share
   one `LISTEN` connection; a process caps its open streams per tenant (429) and in all (503), to stay inside the

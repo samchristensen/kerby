@@ -7,16 +7,16 @@ export function SubscriptionState({ subscription }: { subscription: Subscription
   if (subscription.state === "disabled") {
     return (
       <span title={subscription.disabledReason ?? undefined}>
-        <Badge tone="zinc">Disabled</Badge>
+        <Badge tone="neutral">Disabled</Badge>
       </span>
     );
   }
   if (subscription.failingSince) {
     return (
       <span title={`Every delivery has failed since ${formatDateTime(subscription.failingSince)}`}>
-        <Badge tone="red">Failing</Badge>
+        <Badge tone="danger">Failing</Badge>
       </span>
     );
   }
-  return <Badge tone="green">Active</Badge>;
+  return <Badge tone="live">Active</Badge>;
 }

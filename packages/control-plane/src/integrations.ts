@@ -1,7 +1,7 @@
 // Integrations (ADR 0020): who a key acts for, and what it may do. The console makes and changes them; the api only
 // reads them, through the key it authenticates.
 import { DEFAULT_INTEGRATION, SCOPES, type Scope, ScopeSchema } from "@kerby/contracts";
-import type { ControlDb, ControlQueryable } from "@kerby/db";
+import { type ControlDb, type ControlQueryable, isUuid } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
 
 export type IntegrationRecord = {
@@ -41,8 +41,6 @@ export function integrationFromRow(row: IntegrationRow): IntegrationRecord {
 export class IntegrationNameTakenError extends Error {
   override name = "IntegrationNameTakenError";
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Make an integration. Throws `IntegrationNameTakenError` when a live one of the tenant has the name. */
 export async function createIntegration(
@@ -89,9 +87,10 @@ async function findIntegrationByName(
   tenantId: string,
   name: string,
 ): Promise<IntegrationRecord | undefined> {
+  if (!isUuid(tenantId)) return undefined;
   const { rows } = await db.query<IntegrationRow>(
     `select ${INTEGRATION_COLUMNS} from integrations
-      where tenant_id::text = $1 and name = $2 and deleted_at is null`,
+      where tenant_id = $1 and name = $2 and deleted_at is null`,
     [tenantId, name],
   );
   return rows[0] ? integrationFromRow(rows[0]) : undefined;
@@ -102,9 +101,10 @@ export async function listIntegrations(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<IntegrationRecord[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<IntegrationRow>(
     `select ${INTEGRATION_COLUMNS} from integrations
-      where tenant_id::text = $1 and deleted_at is null order by created_at, id`,
+      where tenant_id = $1 and deleted_at is null order by created_at, id`,
     [tenantId],
   );
   return rows.map(integrationFromRow);
@@ -116,10 +116,10 @@ export async function getIntegration(
   tenantId: string,
   integrationId: string,
 ): Promise<IntegrationRecord | undefined> {
-  if (!UUID.test(integrationId)) return undefined;
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<IntegrationRow>(
     `select ${INTEGRATION_COLUMNS} from integrations
-      where id = $1 and tenant_id::text = $2 and deleted_at is null`,
+      where id = $1 and tenant_id = $2 and deleted_at is null`,
     [integrationId, tenantId],
   );
   return rows[0] ? integrationFromRow(rows[0]) : undefined;
@@ -132,10 +132,10 @@ export async function setIntegrationScopes(
   integrationId: string,
   scopes: readonly Scope[],
 ): Promise<IntegrationRecord | undefined> {
-  if (!UUID.test(integrationId)) return undefined;
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<IntegrationRow>(
     `update integrations set scopes = $3
-      where id = $1 and tenant_id::text = $2 and deleted_at is null
+      where id = $1 and tenant_id = $2 and deleted_at is null
       returning ${INTEGRATION_COLUMNS}`,
     [integrationId, tenantId, SCOPES.filter((scope) => scopes.includes(scope))],
   );
@@ -151,11 +151,11 @@ export async function deleteIntegration(
   tenantId: string,
   integrationId: string,
 ): Promise<boolean> {
-  if (!UUID.test(integrationId)) return false;
+  if (!isUuid(integrationId) || !isUuid(tenantId)) return false;
   return db.transaction(async (tx) => {
     const { rowCount } = await tx.query(
       `update integrations set deleted_at = now()
-        where id = $1 and tenant_id::text = $2 and deleted_at is null`,
+        where id = $1 and tenant_id = $2 and deleted_at is null`,
       [integrationId, tenantId],
     );
     if (rowCount !== 1) return false;
@@ -166,7 +166,7 @@ export async function deleteIntegration(
     // Tombstones: the dispatcher cancels their queued deliveries in the tenant's database, then removes them.
     await tx.query(
       `update subscriptions set state = 'deleted', updated_at = now()
-        where integration_id = $1 and tenant_id::text = $2 and state <> 'deleted'`,
+        where integration_id = $1 and tenant_id = $2 and state <> 'deleted'`,
       [integrationId, tenantId],
     );
     return true;

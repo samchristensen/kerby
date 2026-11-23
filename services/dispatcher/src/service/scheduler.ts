@@ -153,7 +153,7 @@ export function createScheduler(
             ? {}
             : { heartbeatEveryMs: settings.heartbeatEveryMs }),
         });
-        const tasks = await executor.claim(limit, claimReserved);
+        const { tasks } = await executor.claim(limit, claimReserved);
         reserved -= claimReserved;
         claimReserved = 0;
         remaining = tasks.length;

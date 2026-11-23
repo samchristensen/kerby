@@ -1,4 +1,5 @@
 import {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   audit,
   type CreatedKey,
@@ -8,7 +9,7 @@ import {
   listApiKeys,
   revokeApiKey,
 } from "@kerby/control-plane";
-import { type ControlDeps, NotFoundError } from "../types/index.ts";
+import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 const ACTOR = "operator";
@@ -25,7 +26,13 @@ export async function createKey(
       ? await ensureDefaultIntegration(deps.control, tenantId)
       : await getIntegration(deps.control, tenantId, request.integrationId);
   if (!integration) throw new NotFoundError(`integration ${request.integrationId} not found`);
-  const created = await createApiKey(deps.control, tenantId, integration.id, request.label);
+  const created = await createApiKey(deps.control, tenantId, integration.id, request.label).catch(
+    (error: unknown) => {
+      if (error instanceof ApiKeyLimitError)
+        throw new ConflictError(error.message, "api_key_limit");
+      throw error;
+    },
+  );
   await audit(deps.control, {
     tenantId,
     actor: ACTOR,

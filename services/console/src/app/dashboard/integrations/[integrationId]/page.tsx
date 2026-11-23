@@ -41,14 +41,14 @@ export default async function IntegrationPage({
         description={`Created ${formatDate(integration.createdAt)}`}
         actions={
           <span className="flex items-center gap-2">
-            <code className="font-mono text-xs text-zinc-500">{integration.id}</code>
+            <code className="font-mono text-xs text-muted">{integration.id}</code>
             <CopyButton value={integration.id} label="Copy ID" />
           </span>
         }
       />
       <div className="space-y-6">
         <Card title="Scopes">
-          <p className="mb-4 text-sm text-zinc-500">
+          <p className="mb-4 text-sm text-muted">
             What this integration's keys may do. A request that needs a scope it lacks is refused
             with 403.
           </p>
@@ -61,25 +61,23 @@ export default async function IntegrationPage({
 
         <Card title="API keys">
           {integration.keys.length === 0 ? (
-            <p className="mb-4 text-sm text-zinc-500">No keys yet.</p>
+            <p className="mb-4 text-sm text-muted">No keys yet.</p>
           ) : (
-            <ul className="mb-5 divide-y divide-zinc-100">
+            <ul className="mb-5 divide-y divide-line">
               {integration.keys.map((key) => (
                 <li key={key.id} className="flex flex-wrap items-center gap-3 py-3 first:pt-0">
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center gap-2 text-sm">
-                      <span
-                        className={key.label ? "font-medium text-zinc-900" : "text-zinc-500 italic"}
-                      >
+                      <span className={key.label ? "font-medium text-fg" : "text-muted italic"}>
                         {key.label || "Untitled key"}
                       </span>
                       {key.revokedAt ? (
-                        <Badge tone="zinc">Revoked</Badge>
+                        <Badge tone="neutral">Revoked</Badge>
                       ) : (
-                        <Badge tone="green">Active</Badge>
+                        <Badge tone="live">Active</Badge>
                       )}
                     </p>
-                    <p className="mt-0.5 text-xs text-zinc-500">
+                    <p className="mt-0.5 text-xs text-muted">
                       <code className="font-mono">kb_{key.id}_…</code> · created{" "}
                       {formatDate(key.createdAt)} ·{" "}
                       {key.revokedAt
@@ -113,25 +111,25 @@ export default async function IntegrationPage({
           }
         >
           {subscriptions.length === 0 ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               None yet. A subscription sends this integration's events to a webhook as they happen,
               signed so your endpoint can check they came from Kerby.
             </p>
           ) : (
-            <ul className="divide-y divide-zinc-100">
+            <ul className="divide-y divide-line">
               {subscriptions.map((subscription) => (
                 <li key={subscription.id} className="py-3 first:pt-0 last:pb-0">
                   <Link
                     href={`${base}/subscriptions/${subscription.id}`}
-                    className="block rounded-md hover:bg-zinc-50"
+                    className="block rounded-md hover:bg-raised"
                   >
                     <span className="flex items-center justify-between gap-3">
-                      <code className="truncate font-mono text-sm text-zinc-900">
+                      <code className="truncate font-mono text-sm text-fg">
                         {subscription.destination.url}
                       </code>
                       <SubscriptionState subscription={subscription} />
                     </span>
-                    <span className="mt-1 block truncate text-xs text-zinc-500">
+                    <span className="mt-1 block truncate text-xs text-muted">
                       {subscription.description ? `${subscription.description} · ` : ""}
                       {subscription.types.join(", ")} ·{" "}
                       {subscription.scope === "tenant" ? "whole workspace" : "own events"}
@@ -144,7 +142,7 @@ export default async function IntegrationPage({
         </Card>
 
         <Card title="Danger zone">
-          <p className="mb-4 text-sm text-zinc-500">
+          <p className="mb-4 text-sm text-muted">
             Deleting an integration revokes its keys and deletes its subscriptions, at once and for
             good. Conversations it started stay.
           </p>

@@ -35,8 +35,9 @@ are on the internet.
   returns fewer rows than asked advances it to `<xmin>.0`, so a filter that matches nothing still moves on. The poll
   endpoint and the dispatcher's fan-out use the same function.
 - **Pull: `GET /v1/events`** (`after`, `limit` up to 500, `types` with `turn.*` wildcards, `conversationId`, `wait` up to
-  30 s of long-poll on a `LISTEN events` the tenant database's commits wake). It counts against the same per-tenant and
-  per-process caps as SSE streams. Needs the `events` scope; what it returns depends on visibility (ADR 0020).
+  30 s of long-poll on a `LISTEN events`, which the writer notifies after its commit, re-reading every second). It counts
+  against the same per-tenant and per-process caps as SSE streams. Needs the `events` scope; what it returns depends on
+  visibility (ADR 0020).
 - **Push: subscriptions.** A subscription belongs to an integration and names a destination, event type patterns and a
   scope (`own`: what that integration started; `tenant`: everything, which needs the integration's `tenant` scope). The
   row lives in the control database (it is configuration, like keys and model keys, and the dispatcher must find
@@ -87,8 +88,9 @@ are on the internet.
   the sweep interval; a long-poll re-reads every second.
 - A turn's outcome event commits a moment before Absurd marks its task finished. `busy` therefore means a turn task is
   active _and_ its outcome is not recorded, so a client that posts as soon as it sees `turn.completed` is not refused.
-- Every emitting transaction gains one insert and a `NOTIFY`; the control `NOTIFY` after commit is best effort, and the
-  sweep is the backstop.
+- Every emitting transaction gains one insert. Its `NOTIFY`s (`events` on the tenant database, `tenant_events` on
+  control) go after the commit, never inside it: a `NOTIFY` in a writing transaction serializes commits across the whole
+  cluster. Both are best effort; the long-poll's re-read and the dispatcher's sweep are the backstops.
 - Delivery tasks of a disabled subscription are dropped when claimed; a deleted one's are cancelled. A redelivery is a
   new task.
 - Not built: other destination kinds (an SQS or EventBridge adapter is the next one a customer asks for), a synchronous

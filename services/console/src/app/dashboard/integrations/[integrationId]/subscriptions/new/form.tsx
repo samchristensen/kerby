@@ -23,7 +23,7 @@ function Checkbox({
   strong?: boolean;
 }) {
   return (
-    <label className={`flex items-center gap-2 text-sm ${covered ? "text-zinc-400" : ""}`}>
+    <label className={`flex items-center gap-2 text-sm ${covered ? "text-muted" : ""}`}>
       <input
         type="checkbox"
         name={covered ? undefined : field}
@@ -70,10 +70,10 @@ export function NewSubscriptionForm({
   if (state?.ok) {
     return (
       <Card title="Subscription created">
-        <p className="mb-4 text-sm text-zinc-600">
+        <p className="mb-4 text-sm text-muted">
           Events go to{" "}
-          <code className="font-mono text-zinc-900">{state.subscription.destination.url}</code> from
-          now on. Each request is signed with this secret (Standard Webhooks): verify the{" "}
+          <code className="font-mono text-fg">{state.subscription.destination.url}</code> from now
+          on. Each request is signed with this secret (Standard Webhooks): verify the{" "}
           <code className="font-mono">webhook-signature</code> header with it.
         </p>
         <SecretReveal secret={state.secret} noun="signing secret" />
@@ -119,7 +119,7 @@ export function NewSubscriptionForm({
           error={refused?.fields?.description}
         />
         <fieldset className="space-y-3">
-          <legend className="text-sm font-medium text-zinc-800">Event types</legend>
+          <legend className="text-sm font-medium text-fg">Event types</legend>
           <Checkbox
             field={types.all.field}
             label="* (every type, including ones added later)"
@@ -132,10 +132,7 @@ export function NewSubscriptionForm({
             {types.families.map((family) => {
               const wildcard = all || checked.has(family.wildcard.field);
               return (
-                <div
-                  key={family.family}
-                  className="space-y-1.5 rounded-lg border border-zinc-200 p-3"
-                >
+                <div key={family.family} className="space-y-1.5 rounded-lg border border-line p-3">
                   <Checkbox
                     field={family.wildcard.field}
                     label={family.wildcard.pattern}
@@ -161,11 +158,11 @@ export function NewSubscriptionForm({
             })}
           </div>
           {refused?.fields?.types ? (
-            <p className="text-sm text-red-600">{refused.fields.types}</p>
+            <p className="text-sm text-danger">{refused.fields.types}</p>
           ) : null}
         </fieldset>
         <fieldset className="space-y-2">
-          <legend className="text-sm font-medium text-zinc-800">Whose events</legend>
+          <legend className="text-sm font-medium text-fg">Whose events</legend>
           <label className="flex items-start gap-2 text-sm">
             <input
               type="radio"
@@ -175,8 +172,8 @@ export function NewSubscriptionForm({
               className="mt-1"
             />
             <span>
-              <span className="font-medium text-zinc-900">This integration's</span>
-              <span className="block text-zinc-500">
+              <span className="font-medium text-fg">This integration's</span>
+              <span className="block text-muted">
                 What its keys started: their conversations and judgments.
               </span>
             </span>
@@ -191,8 +188,8 @@ export function NewSubscriptionForm({
               className="mt-1"
             />
             <span>
-              <span className="font-medium text-zinc-900">The whole workspace's</span>
-              <span className="block text-zinc-500">
+              <span className="font-medium text-fg">The whole workspace's</span>
+              <span className="block text-muted">
                 {tenantScope
                   ? "Everything: other integrations' work and chats started in this console too."
                   : "Needs the tenant scope: add it to this integration first."}
@@ -200,7 +197,7 @@ export function NewSubscriptionForm({
             </span>
           </label>
           {refused?.fields?.scope ? (
-            <p className="text-sm text-red-600">{refused.fields.scope}</p>
+            <p className="text-sm text-danger">{refused.fields.scope}</p>
           ) : null}
         </fieldset>
         {refused?.error ? <Alert tone="error">{refused.error}</Alert> : null}

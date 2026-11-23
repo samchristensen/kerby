@@ -1,13 +1,26 @@
-// The tenant scheduler (ADR 0004): the worker learns of work from a NOTIFY on the control database (plus a periodic
-// sweep as the backstop), and claims from a tenant's own database only while that tenant is under its concurrency
-// limit, counted across every worker in the tenant's database (`TenantExecutor.claim`). A tenant at its limit on
-// this worker alone costs nothing (no query), so a noisy tenant cannot delay another.
+// The tenant scheduler (ADR 0004): the worker learns of work from a NOTIFY on the control database, plus two sweeps
+// as the backstop, and claims from a tenant's own database only while that tenant is under its concurrency limit,
+// counted across every worker in the tenant's database (`TenantExecutor.claim`). A tenant at its limit on this worker
+// alone costs nothing (no query), so a noisy tenant cannot delay another.
+//
+// Which tenants a sweep looks at (`tenant_wakeups` on control): the api marks a tenant due when it enqueues; after a
+// claim, the worker records when the tenant's queue next needs a look (now, for work left over; a retry's backoff; a
+// lease that lapses), unless a hint arrived since it read the hint's version. Every `sweepIntervalMs` the worker
+// looks at the tenants that are due; every `fullSweepIntervalMs`, at start and when LISTEN reconnects, at every
+// active tenant: a hint is lost if the api fails between its commit and its hint.
 //
 // The worker as a whole runs at most `maxRunningTurns` turns (each holds its tenant's connection pool, so this bounds
 // the process's connections). Slots are reserved before a claim and a claim never takes more than it reserved, so a
 // claimed task is always run. A tenant that asks while the worker is full waits in arrival order; each slot that frees
 // goes to the longest-waiting tenant, not to whoever finished a turn, so a tenant with a deep queue cannot starve others.
-import { getTenant, listTenants, type TenantRecord } from "@kerby/control-plane";
+import {
+  getTenant,
+  listDueTenants,
+  listTenants,
+  readWakeupVersion,
+  settleTenantWakeup,
+  type TenantRecord,
+} from "@kerby/control-plane";
 import type { TenantContext } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
 import { errorFields, log, withTenant } from "@kerby/observability";
@@ -16,14 +29,15 @@ import type { WorkerDeps } from "../types/index.ts";
 /** Tenants looked at at once during a sweep (plan 0001, S4: about 20 is the sweet spot). */
 const SWEEP_CONCURRENCY = 20;
 
+/** `due`: the tenants whose work is due. `all`: every active tenant, the backstop for a lost hint. */
+type SweepKind = "due" | "all";
+
 export interface Scheduler {
   /** Look for work for one tenant now (a notification arrived). */
   notify(tenantId: string): void;
-  /** Look at every active tenant. */
-  sweep(): Promise<void>;
   /** Turns running for a tenant on this worker. */
   inFlight(tenantId: string): number;
-  /** Subscribe to notifications, sweep once, then sweep on an interval. */
+  /** Subscribe to notifications, look at every active tenant once, then sweep on both intervals. */
   start(): Promise<void>;
   /** Stop claiming; wait up to `graceMs` for running turns, then return (their leases lapse for another worker). */
   stop(graceMs?: number): Promise<void>;
@@ -41,7 +55,7 @@ type PumpOptions = {
   known?: TenantRecord;
   /** A slot was reserved for this tenant when it reached the front of the queue. */
   granted?: boolean;
-  /** Looking at everyone as a backstop: a full worker neither looks nor queues the tenant. */
+  /** Looking at many tenants as a backstop: a full worker neither looks nor queues the tenant. */
   sweep?: boolean;
 };
 
@@ -60,8 +74,8 @@ export function createScheduler(
   const chains = new Map<string, Promise<void>>();
   const live = new Set<Promise<void>>();
   let stopping = false;
-  let timer: NodeJS.Timeout | undefined;
-  let sweeping: Promise<void> | undefined;
+  const timers: NodeJS.Timeout[] = [];
+  const sweeping = new Map<SweepKind, Promise<void>>();
   let unsubscribe: (() => Promise<void>) | undefined;
 
   const free = () => cap - runningTotal - reserved;
@@ -88,7 +102,8 @@ export function createScheduler(
       const tenant = known ?? (await getTenant(control, tenantId));
       if (tenant?.status !== "active") return;
       const limit = limitOf(tenant, settings.defaultMaxConcurrentTurns);
-      // Fast path: this worker alone is at the limit, so all workers together are too.
+      // Fast path: this worker alone is at the limit, so all workers together are too. The tenant stays due: a
+      // finished turn here looks again, and so does the next sweep.
       const local = running.get(tenantId) ?? 0;
       if (local >= limit) return;
 
@@ -104,8 +119,12 @@ export function createScheduler(
       claimReserved = Math.min(available, limit - local);
       reserved += claimReserved;
 
+      // Read before the claim: a hint written after this read is newer than what the claim sees, so the settle
+      // below leaves it due.
+      const version = await readWakeupVersion(control, tenantId);
       const lease = await pools.acquire(tenantId);
       let remaining = 0;
+      let nextDueAt: Date | null;
       try {
         const ctx: TenantContext = { tenantId, db: lease.db };
         const executor = createTenantExecutor(lease.db, handlersFor(ctx), {
@@ -115,12 +134,13 @@ export function createScheduler(
             ? {}
             : { heartbeatEveryMs: settings.heartbeatEveryMs }),
         });
-        const tasks = await executor.claim(limit, claimReserved);
+        const claimed = await executor.claim(limit, claimReserved);
+        nextDueAt = claimed.nextDueAt;
         // Reservations turn into running turns in one step.
         reserved -= claimReserved;
         claimReserved = 0;
-        remaining = tasks.length;
-        for (const task of tasks) {
+        remaining = claimed.tasks.length;
+        for (const task of claimed.tasks) {
           running.set(tenantId, (running.get(tenantId) ?? 0) + 1);
           runningTotal++;
           const done = executor
@@ -142,6 +162,7 @@ export function createScheduler(
       } finally {
         if (remaining === 0) await lease.release();
       }
+      await settleTenantWakeup(control, tenantId, version, nextDueAt);
     } finally {
       reserved -= grant;
       reserved -= claimReserved;
@@ -168,11 +189,16 @@ export function createScheduler(
     void pump(tenantId);
   }
 
-  async function sweep(): Promise<void> {
-    if (sweeping) return sweeping;
-    sweeping = (async () => {
+  /** Look at the tenants of one kind; a sweep of that kind already running is joined, not repeated. */
+  function sweep(kind: SweepKind): Promise<void> {
+    const current = sweeping.get(kind);
+    if (current) return current;
+    const next = (async () => {
       try {
-        const tenants = await listTenants(control, { status: "active" });
+        const tenants =
+          kind === "due"
+            ? await listDueTenants(control)
+            : await listTenants(control, { status: "active" });
         const queue = [...tenants];
         const worker = async () => {
           for (let tenant = queue.shift(); tenant !== undefined; tenant = queue.shift()) {
@@ -183,33 +209,39 @@ export function createScheduler(
           Array.from({ length: Math.min(SWEEP_CONCURRENCY, tenants.length) }, worker),
         );
       } catch (error) {
-        log("warn", "sweep failed", errorFields(error));
+        log("warn", "sweep failed", { sweep: kind, ...errorFields(error) });
       } finally {
-        sweeping = undefined;
+        sweeping.delete(kind);
       }
     })();
-    return sweeping;
+    sweeping.set(kind, next);
+    return next;
   }
 
   return {
     notify,
-    sweep,
     inFlight: (tenantId) => running.get(tenantId) ?? 0,
     async start() {
       const subscription = await control.listen(
         "tenant_work",
         (payload) => notify(payload),
         // Notifications sent while disconnected are gone: look everywhere.
-        { onReconnect: () => void sweep() },
+        { onReconnect: () => void sweep("all") },
       );
       unsubscribe = () => subscription.close();
-      await sweep();
-      timer = setInterval(() => void sweep(), settings.sweepIntervalMs);
-      timer.unref();
+      await sweep("all");
+      for (const [kind, every] of [
+        ["due", settings.sweepIntervalMs],
+        ["all", settings.fullSweepIntervalMs],
+      ] as const) {
+        const timer = setInterval(() => void sweep(kind), every);
+        timer.unref();
+        timers.push(timer);
+      }
     },
     async stop(graceMs = 10_000) {
       stopping = true;
-      clearInterval(timer);
+      for (const timer of timers) clearInterval(timer);
       await unsubscribe?.();
       const drained = Promise.allSettled([...live]);
       const expired = new Promise<void>((resolve) => setTimeout(resolve, graceMs).unref());

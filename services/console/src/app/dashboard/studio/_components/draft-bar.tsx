@@ -63,7 +63,7 @@ export function DraftBar({
     });
 
   return (
-    <div className="space-y-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+    <div className="space-y-3 rounded-xl border border-line bg-panel p-4 shadow-sm">
       {notice ? (
         <Alert tone={notice.tone}>
           <span className="whitespace-pre-wrap">{notice.text}</span>
@@ -85,11 +85,11 @@ export function DraftBar({
         <button type="button" className={buttonStyles.primary} disabled={pending} onClick={save}>
           {pending ? "Working…" : "Save draft"}
         </button>
-        <span className="text-xs text-zinc-500">
+        <span className="text-xs text-muted">
           {dirty ? "Unsaved changes." : `Saved (revision ${revision}).`}
         </span>
       </div>
-      <div className="flex flex-wrap items-center gap-3 border-t border-zinc-100 pt-3">
+      <div className="flex flex-wrap items-center gap-3 border-t border-line pt-3">
         <input
           aria-label="Publish note"
           value={note}

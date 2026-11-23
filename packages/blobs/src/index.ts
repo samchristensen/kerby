@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import type { TenantContext } from "@kerby/db";
+import { isUuid, type TenantContext } from "@kerby/db";
 import { type BucketConfig, createBucket, createS3Client, tenantPrefix } from "./bucket.ts";
 
 export {
@@ -92,8 +92,9 @@ export function createBlobs(config: BucketConfig): Blobs {
     },
 
     async get(ctx, blobId) {
+      if (!isUuid(blobId)) throw new BlobNotFoundError(`blob ${blobId} not found`);
       const { rows } = await ctx.db.query<{ object_key: string; media_type: string; size: string }>(
-        "select object_key, media_type, size from blobs where id::text = $1",
+        "select object_key, media_type, size from blobs where id = $1",
         [blobId],
       );
       const row = rows[0];
@@ -112,10 +113,11 @@ export function createBlobs(config: BucketConfig): Blobs {
     },
 
     async delete(ctx, blobId) {
+      if (!isUuid(blobId)) throw new BlobNotFoundError(`blob ${blobId} not found`);
       // The tenant's prefix is part of the delete: a context pairing one tenant's id with another's database must not
       // remove across, and a row is never removed before the check.
       const { rows } = await ctx.db.query<{ object_key: string }>(
-        "delete from blobs where id::text = $1 and starts_with(object_key, $2) returning object_key",
+        "delete from blobs where id = $1 and starts_with(object_key, $2) returning object_key",
         [blobId, tenantPrefix(ctx.tenantId)],
       );
       const row = rows[0];

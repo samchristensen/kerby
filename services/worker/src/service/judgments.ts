@@ -5,7 +5,7 @@ import { DEFAULT_JUDGMENT_MODEL, parseModelId } from "@kerby/contracts";
 import { hasModelKey, recordUsage } from "@kerby/control-plane";
 import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
-import { type NewEvent, notifyDispatchers, recordEvent } from "@kerby/events";
+import { announceEvents, type NewEvent, notifyDispatchers, recordEvent } from "@kerby/events";
 import type { JudgmentOutcome, JudgmentRequest } from "@kerby/judgment";
 import { errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
@@ -82,9 +82,10 @@ export async function runJudgmentTask(
   };
   /** The judgment's one outcome event, fenced: a run that lost its task records nothing. */
   const record = async (event: NewEvent): Promise<void> => {
-    await ctx.db.transaction(async (tx) => {
-      if (await holdsRun(tx, run)) await recordEvent(tx, event);
-    });
+    const recorded = await ctx.db.transaction(
+      async (tx) => (await holdsRun(tx, run)) && (await recordEvent(tx, event)),
+    );
+    if (recorded) await announceEvents(ctx.db);
     await notifyDispatchers(deps.control, ctx.tenantId);
   };
   const common = {

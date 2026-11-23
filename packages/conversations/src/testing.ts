@@ -50,7 +50,7 @@ export async function completeTurnWith(
     },
     { workerId: "test-worker" },
   );
-  const [task] = await executor.claim(1);
+  const [task] = (await executor.claim(1)).tasks;
   if (!task) throw new Error("no turn to claim");
   await executor.execute(task);
 }

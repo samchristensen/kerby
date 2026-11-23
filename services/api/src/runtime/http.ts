@@ -36,9 +36,8 @@ import {
   ConversationFullError,
   findConversation,
   InvalidCursorError,
-  isConversationId,
 } from "@kerby/conversations";
-import type { TenantContext, TenantLease } from "@kerby/db";
+import { isUuid, type TenantContext, type TenantLease } from "@kerby/db";
 import { pollEvents } from "@kerby/events";
 import { log, withTenant } from "@kerby/observability";
 import {
@@ -64,6 +63,7 @@ import {
   type Route,
   readJson,
   TokenBuckets,
+  TurnsPerKey,
 } from "@kerby/serve";
 import { z } from "zod";
 import { createAuthenticator } from "../service/auth.ts";
@@ -108,6 +108,7 @@ import {
 } from "../service/subscriptions.ts";
 import {
   type ApiDeps,
+  LookupRefusedError,
   NotFoundError,
   type Principal,
   TenantUnavailableError,
@@ -175,11 +176,17 @@ const rateLimited = (seconds: number, message: string): Response =>
 
 /** Keys each limiter remembers: tenants, and client addresses that failed to authenticate. */
 const MAX_LIMITER_KEYS = 100_000;
+/**
+ * Key lookups one client address runs at once; the rest wait their turn. A concurrent burst of bad keys therefore gets at
+ * most `FAILED_AUTH_PER_MINUTE + LOOKUPS_PER_ADDRESS - 1` lookups, and many good keys at once only wait a moment.
+ */
+export const LOOKUPS_PER_ADDRESS = 4;
 
 export function createApiApp(deps: ApiDeps): FetchHandler {
   const auth = createAuthenticator(deps.control, deps.settings.authCacheMs);
   const requests = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
   const failedAuth = new TokenBuckets({ maxKeys: MAX_LIMITER_KEYS });
+  const lookups = new TurnsPerKey(LOOKUPS_PER_ADDRESS);
 
   /**
    * Authenticate, check the credential holds `scope`, then run `handler` with the tenant's context. The tenant id comes
@@ -217,12 +224,23 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
       }
       let principal: Principal;
       try {
-        principal = await auth.authenticate(presented);
+        // A lookup waits its turn among the address's lookups, checks the limit when its turn comes and counts a wrong
+        // key before giving its turn up, so a concurrent burst cannot all pass the check above. A credential the cache
+        // answers, or that another request is already looking up, costs no lookup.
+        principal = await auth.authenticate(presented, (lookup) =>
+          lookups.run(address, async () => {
+            const wait = failedAuth.wait(address, perMinute);
+            if (wait > 0) throw new LookupRefusedError(wait);
+            const found = await lookup();
+            if (!found) failedAuth.take(address, perMinute);
+            return found;
+          }),
+        );
       } catch (error) {
-        if (error instanceof UnauthorizedError) {
-          failedAuth.take(address, perMinute);
+        if (error instanceof LookupRefusedError)
+          return rateLimited(error.retryAfterSeconds, "too many failed authentications");
+        if (error instanceof UnauthorizedError)
           throw new HttpError(401, "unauthorized", "invalid API key");
-        }
         if (error instanceof TenantUnavailableError)
           throw new HttpError(403, "tenant_unavailable", error.message);
         throw error;
@@ -311,7 +329,7 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
 
   const conversationId = (params: Record<string, string>): string => {
     const id = params.id ?? "";
-    if (!isConversationId(id)) throw new HttpError(404, "not_found", "conversation not found");
+    if (!isUuid(id)) throw new HttpError(404, "not_found", "conversation not found");
     return id;
   };
 

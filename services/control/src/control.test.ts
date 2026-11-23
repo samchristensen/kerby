@@ -14,15 +14,20 @@ import type {
 } from "@kerby/contracts";
 import { SCOPES } from "@kerby/contracts";
 import {
+  allowEmails,
   authenticateApiKey,
+  createApiKey,
   createConsoleSession,
   createIntegration,
+  disallowEmail,
   findConsoleUser,
   getTenant,
+  hintTenantWork,
   insertConsoleUser,
   insertSubscription,
   insertTenant,
   listIntegrations,
+  MAX_API_KEYS_PER_TENANT,
   readConsoleSession,
   readTenantDbPassword,
   resolveTenantDbUrl,
@@ -386,7 +391,26 @@ describe("lifecycle", () => {
     expect((await authenticateApiKey(control.db, rotated.secret))?.integration.id).toBe(zapier.id);
   });
 
-  it("deletes everything: database, role, objects, keys; and frees the name", async () => {
+  it("refuses a key past the tenant's cap with 409 api_key_limit, and still rotates one at the cap", async () => {
+    const { call, provision, control } = await start();
+    const { tenant, apiKey } = await provision("acme");
+    // The provisioned first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      await createApiKey(control.db, tenant.id, apiKey.integrationId, `k${i}`);
+    const refused = await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: "api_key_limit" } });
+
+    const rotate = await call("POST", `/v1/operator/tenants/${tenant.id}/keys/${apiKey.id}/rotate`);
+    expect(rotate.status).toBe(201);
+    const rotated = (await rotate.json()) as CreateKeyResponse;
+    expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
+    expect(
+      (await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" })).status,
+    ).toBe(409);
+  });
+
+  it("deletes everything: database, role, objects, keys, integrations, subscriptions, wake-up hint; and frees the name", async () => {
     const { call, provision, cluster, control, blobs, buckets, tenantUrl } = await start();
     const { tenant, secret, apiKey } = await provision("acme");
     const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
@@ -419,6 +443,7 @@ describe("lifecycle", () => {
     await own.close();
     const objects = () => Array.fromAsync(buckets.primary.list(tenantPrefix(tenant.id)));
     expect((await objects()).length).toBe(1);
+    await hintTenantWork(control.db, tenant.id);
 
     expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
 
@@ -439,6 +464,10 @@ describe("lifecycle", () => {
           tenant.id,
         ])
       ).rowCount,
+    ).toBe(0);
+    expect(
+      (await control.db.query("select 1 from tenant_wakeups where tenant_id = $1", [tenant.id]))
+        .rowCount,
     ).toBe(0);
     expect((await getTenant(control.db, tenant.id))?.status).toBe("deleted");
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(404);
@@ -467,6 +496,7 @@ describe("console sign-up", () => {
 
   it("provisions a tenant with its first person and key, audited as the console", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     const response = await h.call(
       "POST",
       "/v1/console/signups",
@@ -506,6 +536,7 @@ describe("console sign-up", () => {
 
   it("refuses a taken email or workspace name, and a body that is not a sign-up", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com", "bob@example.com"], null);
     const post = (body: unknown) => h.call("POST", "/v1/console/signups", body, CONSOLE_TOKEN);
     expect((await post({ name: "acme", email: "ada@example.com", passwordHash })).status).toBe(201);
     const tenants = async () => (await h.control.db.query("select 1 from tenants")).rowCount;
@@ -531,6 +562,7 @@ describe("console sign-up", () => {
 
   it("leaves no tenant behind when another sign-up takes the email first", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     // The other sign-up lands between the check and this one's insert.
     const control = {
       ...h.deps.control,
@@ -559,6 +591,7 @@ describe("console sign-up", () => {
 
   it("deleting the tenant removes its people and sessions and frees the email", async () => {
     const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
     const post = (name: string) =>
       h.call(
         "POST",
@@ -576,6 +609,63 @@ describe("console sign-up", () => {
     expect(await readConsoleSession(h.control.db, token)).toBeUndefined();
     expect(await findConsoleUser(h.control.db, "ada@example.com")).toBeUndefined();
     expect((await post("acme")).status).toBe(201);
+  });
+
+  it("refuses an email that is not on the allowlist before provisioning anything, and lets it in once added", async () => {
+    const h = await start();
+    const post = (email: string) =>
+      h.call("POST", "/v1/console/signups", { name: "acme", email, passwordHash }, CONSOLE_TOKEN);
+    await allowEmails(h.control.db, ["ada@example.com"], null);
+
+    const refused = await post("grace@example.com");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: { code: "not_invited" } });
+    expect((await h.control.db.query("select 1 from tenants")).rowCount).toBe(0);
+    expect(await findConsoleUser(h.control.db, "grace@example.com")).toBeUndefined();
+
+    expect((await post("Ada@Example.com")).status).toBe(201);
+    // The list wins over an existing account's 409: a stranger learns nothing about who has one.
+    await disallowEmail(h.control.db, "ada@example.com");
+    expect((await post("ada@example.com")).status).toBe(403);
+  });
+
+  it("makes a console person an admin for the operator only, audited, and 404s for no such account", async () => {
+    const h = await start();
+    await allowEmails(h.control.db, ["ada@example.com"], null);
+    const created = (await (
+      await h.call(
+        "POST",
+        "/v1/console/signups",
+        { name: "acme", email: "ada@example.com", passwordHash },
+        CONSOLE_TOKEN,
+      )
+    ).json()) as ConsoleSignupResponse;
+    const token = await createConsoleSession(
+      h.control.db,
+      { id: created.userId, tenantId: created.tenantId },
+      new Date(Date.now() + 60_000),
+    );
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    const set = (email: string, admin: boolean, bearer: string | null = TOKEN) =>
+      h.call("POST", "/v1/operator/console-admins", { email, admin }, bearer);
+    expect((await set("ada@example.com", true, null)).status).toBe(401);
+    expect((await set("ada@example.com", true, CONSOLE_TOKEN)).status).toBe(401);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    expect((await set(" ADA@example.com", true)).status).toBe(200);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(true);
+    expect((await set("nobody@example.com", true)).status).toBe(404);
+    expect((await set("ada@example.com", false)).status).toBe(200);
+    expect((await readConsoleSession(h.control.db, token))?.isAdmin).toBe(false);
+
+    const { rows } = await h.control.db.query<{ actor: string; detail: unknown }>(
+      "select actor, detail from audit_log where action = 'console.admin.set' order by id",
+    );
+    expect(rows).toEqual([
+      { actor: "operator", detail: { userId: created.userId, admin: true } },
+      { actor: "operator", detail: { userId: created.userId, admin: false } },
+    ]);
   });
 });
 

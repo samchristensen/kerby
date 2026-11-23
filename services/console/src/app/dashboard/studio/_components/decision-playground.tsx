@@ -27,13 +27,11 @@ function Bar({
 }) {
   return (
     <div className="grid grid-cols-[8rem_1fr_4rem] items-center gap-2 text-sm">
-      <span className={`truncate ${strong ? "font-semibold text-zinc-900" : "text-zinc-600"}`}>
-        {label}
+      <span className={`truncate ${strong ? "font-semibold text-fg" : "text-muted"}`}>{label}</span>
+      <span className="h-2 overflow-hidden rounded-full bg-raised">
+        <span className="block h-full bg-brand" style={{ width: percent(probability) }} />
       </span>
-      <span className="h-2 overflow-hidden rounded-full bg-zinc-100">
-        <span className="block h-full bg-indigo-500" style={{ width: percent(probability) }} />
-      </span>
-      <span className="text-right tabular-nums text-zinc-700">{percent(probability)}</span>
+      <span className="text-right tabular-nums text-fg">{percent(probability)}</span>
     </div>
   );
 }
@@ -41,9 +39,9 @@ function Bar({
 function AnswerView({ name, answer }: { name: string; answer: Answer }) {
   return (
     <li className="space-y-2 py-3 first:pt-0 last:pb-0">
-      <p className="text-sm font-semibold text-zinc-900">
+      <p className="text-sm font-semibold text-fg">
         <code className="font-mono">{name}</code>{" "}
-        <span className="font-normal text-zinc-500">
+        <span className="font-normal text-muted">
           {answer.type === "noul"
             ? `yes with probability ${percent(answer.probability)}`
             : answer.type === "choice"
@@ -170,7 +168,7 @@ export function DecisionPlayground({ prompt }: { prompt: Prompt }) {
               className={`${inputClass} mt-1.5 font-mono font-normal`}
             />
           </label>
-          {error?.field ? <p className="text-sm text-red-600">{error.field}</p> : null}
+          {error?.field ? <p className="text-sm text-danger">{error.field}</p> : null}
           {error?.form ? <Alert tone="error">{error.form}</Alert> : null}
           <button
             type="button"
@@ -186,17 +184,17 @@ export function DecisionPlayground({ prompt }: { prompt: Prompt }) {
       {run ? (
         <Card title="Result">
           {running ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               {judgment?.status === "running" ? "Running…" : "Waiting for a worker…"}
             </p>
           ) : judgment?.status === "answered" ? (
             <div className="space-y-4">
-              <p className="text-xs text-zinc-500">
+              <p className="text-xs text-muted">
                 Answered by <code className="font-mono">{judgment.servedModel}</code> in{" "}
                 {((run.elapsedMs ?? 0) / 1000).toFixed(1)} s · {judgment.usage.inputTokens} input
                 and {judgment.usage.outputTokens} output tokens
               </p>
-              <ul className="divide-y divide-zinc-100">
+              <ul className="divide-y divide-line">
                 {Object.entries(judgment.answers).map(([name, answer]) => (
                   <AnswerView key={name} name={name} answer={answer} />
                 ))}

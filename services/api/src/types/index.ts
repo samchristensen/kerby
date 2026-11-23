@@ -69,6 +69,16 @@ export class TenantUnavailableError extends Error {
   override name = "TenantUnavailableError";
 }
 
+/** The caller's address has failed authentication too often: refused before any lookup. */
+export class LookupRefusedError extends Error {
+  override name = "LookupRefusedError";
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterSeconds: number) {
+    super(`too many failed authentications; retry in ${retryAfterSeconds} s`);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 export class NotFoundError extends Error {
   override name = "NotFoundError";
 }

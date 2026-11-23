@@ -76,21 +76,42 @@ console.log(r.status, await r.text());'
 
 `limits` is optional: an absent key takes the default (`maxConcurrentTurns` 4, `requestsPerMinute` 600 per api
 process, `storageBytes` 1 GiB; ARCHITECTURE.md#tenancy). The response holds the tenant's API key once. Then
-`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. Tenant migrations fan out to every
-tenant database during a release: `scripts/railway.ts deploy` calls `POST /v1/operator/migrate` inside the control
-container after control rolls out and before the api, worker and console do, and stops the release if any tenant fails, so a
-release that adds one needs no manual step. Run the call yourself (as above) to retry a failed tenant (the `migration
-fan-out failed` alert). Code must tolerate schema versions n and n-1 while it runs.
+`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. Migrations run as control's release
+command (Railway's pre-deploy command, `node services/control/src/index.ts migrate`, set in `.railway/railway.ts`): with
+the new image and control's variables it migrates the control database and fans the tenant migrations out to every tenant
+database, before the new control starts. A tenant that fails fails the command, Railway keeps the previous control running,
+and `scripts/railway.ts deploy` stops before the api, worker and console move, so a release that adds a migration needs no
+manual step and CI needs no SSH key. Call `POST /v1/operator/migrate` yourself (as above) to retry a failed tenant (the
+`migration fan-out failed` alert). Code must tolerate schema versions n and n-1 while it runs.
 
 ## The console
 
-People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)): each sign-up provisions a tenant exactly
+People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)), but only with an email on the allowlist
+(`signup_allowlist`; anything else is refused before a tenant is made). Each sign-up provisions a tenant exactly
 as `POST /v1/operator/tenants` does (audited with actor `console`, default limits) and stores its first person, who sees
 the tenant's first API key once. An operator can still provision by hand; such a tenant has no person and cannot be
 signed in to. Suspending or deleting a tenant ends its console sessions at once (deleting also removes its people).
+
+**Admins and the allowlist.** The release that added the list put every existing account's email on it. An admin edits it
+in the console under Sign-ups (`/dashboard/admin`). The first admin is made by the operator, inside the control container
+as above (the email must already have an account; `admin: false` undoes it; each call is audited):
+
+```sh
+railway ssh --service control -- node --input-type=module -e '
+const r = await fetch("http://127.0.0.1:8081/v1/operator/console-admins", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
+  body: JSON.stringify({ email: "you@example.com", admin: true }),
+});
+console.log(r.status, await r.text());'
+```
+
+The console's own database role can read the flag and never write it. Removing an address from the list stops a future
+sign-up; it does not delete or lock an account that exists.
+
 Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-ins per address and per account
-(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. There is no email
-verification, password reset or second person per tenant yet (tech debt). To see who signed up:
+(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. A tenant holds at most 50
+live API keys. There is no email verification, password reset or second person per tenant yet (tech debt). To see who signed up:
 `select email, tenant_id, created_at, last_login_at from console_users order by created_at` (psql below).
 
 ## Judgments
@@ -290,6 +311,17 @@ on purpose: a generated value there would be made again on every apply.
   user and database, which is per tenant here. Revisit when the budget outgrows one Postgres's memory: transaction
   pooling for tenant pools only, with `LISTEN` and control on `DATABASE_UNPOOLED_URL`.
 - About 1 GiB of memory per 200 tenant databases was measured locally.
+- **`NOTIFY` is sent outside writing transactions.** Postgres commits every transaction that sent a `NOTIFY` under one
+  lock for the whole cluster, held through the commit's WAL flush, so a `NOTIFY` inside a write makes every tenant's
+  writes flush one at a time. Measured on Postgres 18 (`pgbench`, 32 clients, local Docker): inserts that also notify in
+  the same transaction 9.2k/s; the same inserts with the `NOTIFY` sent after the commit 20k/s; a `NOTIFY` alone does not
+  wait for a flush (47k/s, with or without `synchronous_commit`). So a stored message is announced after its commit
+  (`announcePersisted`), and live deltas are `NOTIFY`s alone. When streaming load makes this lock show up (waits on
+  `object` locks in `pg_stat_activity`), move live events to a message bus (tech debt).
+- **Idle transactions.** A tenant database session left idle inside a transaction for 60 s is ended by the server
+  (`idle_in_transaction_session_timeout`, set by `createTenantDb`), so a process stalled mid-claim cannot hold the claim's
+  advisory lock, and every worker's claims for that tenant, until TCP gives up. Control's pools have none: the bucket
+  backup holds a control transaction (its advisory lock) for the whole copy on purpose.
 - Backups: a daily backup of the Postgres volume, kept 6 days (`railway postgres pitr schedule list --service Postgres`;
   set with `railway postgres pitr schedule set --daily`). Restore: `railway postgres pitr backup list`, then
   `railway postgres pitr backup restore <id> --service Postgres` (replaces the volume's contents: take an on-demand backup

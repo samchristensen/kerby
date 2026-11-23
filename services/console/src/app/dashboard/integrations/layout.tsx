@@ -21,7 +21,7 @@ export default async function IntegrationsLayout({ children }: { children: React
       actions={<ButtonLink href="/dashboard/integrations/new">New integration</ButtonLink>}
     >
       {integrations.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-zinc-500">
+        <p className="px-4 py-8 text-center text-sm text-muted">
           No integrations. Create one to get an API key.
         </p>
       ) : (
@@ -33,17 +33,17 @@ export default async function IntegrationsLayout({ children }: { children: React
                 className={listItemClass}
                 activeClassName={listItemActiveClass}
               >
-                <span className="block truncate text-sm font-medium text-zinc-900">
+                <span className="block truncate text-sm font-medium text-fg">
                   {integration.name}
                 </span>
                 <span className="mt-1.5 flex flex-wrap gap-1">
                   {integration.scopes.map((scope) => (
-                    <Badge key={scope} tone={scope === "admin" ? "red" : "indigo"}>
+                    <Badge key={scope} tone={scope === "admin" ? "danger" : "brand"}>
                       {scope}
                     </Badge>
                   ))}
                 </span>
-                <span className="mt-1.5 block text-xs text-zinc-500">
+                <span className="mt-1.5 block text-xs text-muted">
                   {plural(integration.activeKeys, "key")} ·{" "}
                   {plural(integration.subscriptions, "subscription")}
                 </span>

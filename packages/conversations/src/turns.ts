@@ -2,7 +2,7 @@
 import type { TURN_FAILURE_REASONS } from "@kerby/contracts";
 import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext } from "@kerby/durable";
-import { recordEvent } from "@kerby/events";
+import { announceEvents, recordEvent } from "@kerby/events";
 import type { ConversationRecord } from "./repo.ts";
 
 /** Record `turn.started` once, however many attempts the turn takes. */
@@ -17,6 +17,7 @@ export async function recordTurnStarted(
     dedupeKey: `turn:${conversation.id}:${seq}:started`,
     data: { conversationId: conversation.id, seq },
   });
+  await announceEvents(ctx.db);
 }
 
 export type TurnOutcome =
@@ -47,7 +48,7 @@ export async function recordTurnOutcome(
     integrationId: conversation.integrationId,
     dedupeKey: `turn:${conversationId}:${seq}:outcome`,
   };
-  return ctx.db.transaction(async (tx) => {
+  const recorded = await ctx.db.transaction(async (tx) => {
     if (!(await holdsRun(tx, input.run))) return false;
     switch (outcome.type) {
       case "completed":
@@ -83,4 +84,6 @@ export async function recordTurnOutcome(
     }
     return true;
   });
+  if (recorded) await announceEvents(ctx.db);
+  return recorded;
 }

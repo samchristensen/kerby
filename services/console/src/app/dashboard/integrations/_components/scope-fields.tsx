@@ -13,7 +13,7 @@ export function ScopeFields({
 }) {
   return (
     <fieldset className="space-y-2" aria-describedby={error ? "scopes-error" : undefined}>
-      <legend className="text-sm font-medium text-zinc-800">Scopes</legend>
+      <legend className="text-sm font-medium text-fg">Scopes</legend>
       {options.map((option) => (
         <label key={option.scope} className="flex items-start gap-2 text-sm">
           <input
@@ -23,13 +23,13 @@ export function ScopeFields({
             className="mt-1"
           />
           <span>
-            <span className="font-mono font-medium text-zinc-900">{option.scope}</span>
-            <span className="block text-zinc-500">{option.description}</span>
+            <span className="font-mono font-medium text-fg">{option.scope}</span>
+            <span className="block text-muted">{option.description}</span>
           </span>
         </label>
       ))}
       {error ? (
-        <p id="scopes-error" className="text-sm text-red-600">
+        <p id="scopes-error" className="text-sm text-danger">
           {error}
         </p>
       ) : null}

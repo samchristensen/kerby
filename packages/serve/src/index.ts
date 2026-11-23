@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { errorFields, log } from "@kerby/observability";
 import type { z } from "zod";
 
-export { clientAddress, TokenBuckets } from "./rate-limit.ts";
+export { clientAddress, TokenBuckets, TurnsPerKey } from "./rate-limit.ts";
 
 export class HttpError extends Error {
   override name = "HttpError";

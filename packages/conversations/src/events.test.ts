@@ -58,7 +58,7 @@ async function withRun<T>(tenant: TestTenant, fn: (run: RunContext) => Promise<T
     },
     { workerId: "w" },
   );
-  const [task] = await executor.claim(1);
+  const [task] = (await executor.claim(1)).tasks;
   if (!task) throw new Error("no turn to claim");
   await executor.execute(task);
   return result as T;

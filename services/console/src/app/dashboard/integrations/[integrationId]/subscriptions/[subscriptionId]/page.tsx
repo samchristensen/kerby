@@ -19,13 +19,13 @@ import { SubscriptionState } from "../state.tsx";
 
 export const metadata: Metadata = { title: "Subscription" };
 
-const outcomeTone = { delivered: "green", failed: "red", gone: "zinc" } as const;
+const outcomeTone = { delivered: "live", failed: "danger", gone: "neutral" } as const;
 
 function Outcome({ delivery }: { delivery: DeliveryAttempt }) {
   return <Badge tone={outcomeTone[delivery.outcome]}>{delivery.outcome}</Badge>;
 }
 
-const muted = (text: string) => <span className="text-zinc-400">{text}</span>;
+const muted = (text: string) => <span className="text-muted">{text}</span>;
 
 export default async function SubscriptionPage({
   params,
@@ -51,7 +51,7 @@ export default async function SubscriptionPage({
       <p className="mb-2 text-sm">
         <Link
           href={`/dashboard/integrations/${integrationId}`}
-          className="font-medium text-indigo-600 hover:text-indigo-500"
+          className="font-medium text-brand-text hover:text-brand-text/80"
         >
           ← Integration
         </Link>
@@ -111,7 +111,7 @@ export default async function SubscriptionPage({
         <Card title="Manage">
           <div className="space-y-5">
             <div>
-              <p className="mb-2 text-sm text-zinc-500">
+              <p className="mb-2 text-sm text-muted">
                 {enabled
                   ? "Disabling stops deliveries; enabling again resumes where it stopped, so no event in the 30 days kept is skipped."
                   : "Enabling resumes where it stopped: events since then are delivered, up to the 30 days kept."}
@@ -123,7 +123,7 @@ export default async function SubscriptionPage({
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-zinc-500">
+              <p className="mb-2 text-sm text-muted">
                 Send a <code className="font-mono">ping</code> event to the endpoint now.
               </p>
               <ButtonAction
@@ -133,7 +133,7 @@ export default async function SubscriptionPage({
               />
             </div>
             <div>
-              <p className="mb-2 text-sm text-zinc-500">
+              <p className="mb-2 text-sm text-muted">
                 A new signing secret, shown once. The old one keeps signing beside it for 24 hours.
               </p>
               <ButtonAction
@@ -143,7 +143,7 @@ export default async function SubscriptionPage({
                 secretNoun="signing secret"
               />
             </div>
-            <div className="border-t border-zinc-100 pt-5">
+            <div className="border-t border-line pt-5">
               <ConfirmAction
                 action={deleteSubscriptionAction.bind(null, integrationId, subscription.id)}
                 label="Delete subscription"
@@ -156,13 +156,13 @@ export default async function SubscriptionPage({
 
         <Card title="Delivery log">
           {log.deliveries.length === 0 ? (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted">
               {before ? "No older attempts." : "Nothing delivered yet."}
             </p>
           ) : (
             <div className="-mx-5 overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-zinc-200 text-xs text-zinc-500">
+                <thead className="border-b border-line text-xs text-muted">
                   <tr>
                     <th className="px-5 py-2 font-medium">When</th>
                     <th className="px-2 py-2 font-medium">Outcome</th>
@@ -172,14 +172,12 @@ export default async function SubscriptionPage({
                     <th className="px-5 py-2 font-medium">Error / response</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-100 align-top">
+                <tbody className="divide-y divide-line align-top">
                   {log.deliveries.map((delivery) => (
                     <tr key={delivery.id}>
-                      <td className="whitespace-nowrap px-5 py-2.5 text-zinc-600">
+                      <td className="whitespace-nowrap px-5 py-2.5 text-muted">
                         {formatDateTime(delivery.at)}
-                        <span className="block text-xs text-zinc-400">
-                          {delivery.durationMs} ms
-                        </span>
+                        <span className="block text-xs text-muted">{delivery.durationMs} ms</span>
                       </td>
                       <td className="px-2 py-2.5">
                         <Outcome delivery={delivery} />
@@ -191,14 +189,14 @@ export default async function SubscriptionPage({
                       <td className="px-2 py-2.5">{delivery.willRetry ? "Yes" : muted("No")}</td>
                       <td className="max-w-xs px-5 py-2.5">
                         {delivery.error ? (
-                          <p className="break-words text-red-700">{delivery.error}</p>
+                          <p className="break-words text-danger">{delivery.error}</p>
                         ) : null}
                         {delivery.response ? (
-                          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-zinc-50 p-1.5 font-mono text-xs text-zinc-600">
+                          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-raised p-1.5 font-mono text-xs text-muted">
                             {delivery.response}
                           </pre>
                         ) : null}
-                        <p className="mt-1 truncate font-mono text-xs text-zinc-400">
+                        <p className="mt-1 truncate font-mono text-xs text-muted">
                           {delivery.eventIds.join(", ")}
                         </p>
                       </td>
@@ -210,14 +208,14 @@ export default async function SubscriptionPage({
           )}
           <div className="mt-4 flex gap-4 text-sm">
             {before ? (
-              <Link href={page} className="font-medium text-indigo-600 hover:text-indigo-500">
+              <Link href={page} className="font-medium text-brand-text hover:text-brand-text/80">
                 ← Newest
               </Link>
             ) : null}
             {log.nextBefore ? (
               <Link
                 href={`${page}?before=${log.nextBefore}`}
-                className="font-medium text-indigo-600 hover:text-indigo-500"
+                className="font-medium text-brand-text hover:text-brand-text/80"
               >
                 Older →
               </Link>

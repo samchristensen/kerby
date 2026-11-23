@@ -1,7 +1,7 @@
 // API keys look like `kb_<id>_<secret>`. The id is public and indexes the row; only a hash of the secret is
 // stored. The secret is 256 random bits, so a plain SHA-256 is enough: there is nothing to brute-force.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { ControlQueryable } from "@kerby/db";
+import { type ControlQueryable, isUuid } from "@kerby/db";
 import { type IntegrationRecord, integrationFromRow } from "./integrations.ts";
 import { TENANT_COLUMNS, type TenantRecord, type TenantRow, tenantFromRow } from "./tenants.ts";
 
@@ -51,8 +51,20 @@ export function parseApiKey(key: string): { id: string; secret: string } | undef
 export type CreatedKey = { key: ApiKeyRecord; secret: string };
 
 /**
- * Create a key for one of the tenant's live integrations. The returned `secret` is the whole key, shown once and never
- * stored. Throws when the integration is not the tenant's or was deleted.
+ * Live (unrevoked) keys a tenant may hold: one per service, environment and CI job with room to spare. Every key is a
+ * row and a credential the api may cache, so a tenant (any signed-in console person) must not mint them without end.
+ */
+export const MAX_API_KEYS_PER_TENANT = 50;
+
+export class ApiKeyLimitError extends Error {
+  override name = "ApiKeyLimitError";
+}
+
+/**
+ * Create a key for one of the tenant's live integrations (ADR 0020). The returned `secret` is the whole key, shown once
+ * and never stored. Throws when the integration is not the tenant's or was deleted, and `ApiKeyLimitError` when the
+ * tenant already holds `MAX_API_KEYS_PER_TENANT` live keys; inside a transaction that revoked one first (rotation), that
+ * one no longer counts.
  */
 export async function createApiKey(
   db: ControlQueryable,
@@ -60,17 +72,36 @@ export async function createApiKey(
   integrationId: string,
   label = "",
 ): Promise<CreatedKey> {
+  if ("transaction" in db)
+    return db.transaction((tx) => createApiKey(tx, tenantId, integrationId, label));
+  if (!isUuid(tenantId) || !isUuid(integrationId))
+    throw new Error(`integration ${integrationId} is not a live integration of the tenant`);
+  // Key creation is serialized per tenant until the transaction ends, so concurrent creates cannot all count the
+  // same keys and pass the cap together.
+  await db.query("select pg_advisory_xact_lock(hashtext('kerby.api_keys'), hashtext($1))", [
+    tenantId,
+  ]);
+  const live = await db.query(
+    "select 1 from integrations where id = $1 and tenant_id = $2 and deleted_at is null",
+    [integrationId, tenantId],
+  );
+  if (live.rowCount !== 1)
+    throw new Error(`integration ${integrationId} is not a live integration of the tenant`);
   const id = randomBytes(6).toString("hex");
   const secret = randomBytes(32).toString("base64url");
   const { rows } = await db.query<KeyRow>(
     `insert into api_keys (id, tenant_id, integration_id, label, key_hash)
-     select $1, i.tenant_id, i.id, $4, $5 from integrations i
-      where i.id::text = $3 and i.tenant_id::text = $2 and i.deleted_at is null
+     select $1, $2::uuid, $3::uuid, $4, $5
+      where (select count(*) from api_keys where tenant_id = $2::uuid and revoked_at is null) < $6
      returning ${KEY_COLUMNS}`,
-    [id, tenantId, integrationId, label, hash(secret)],
+    [id, tenantId, integrationId, label, hash(secret), MAX_API_KEYS_PER_TENANT],
   );
   const row = rows[0];
-  if (!row) throw new Error(`integration ${integrationId} is not a live integration of the tenant`);
+  if (!row) {
+    throw new ApiKeyLimitError(
+      `a tenant may hold at most ${MAX_API_KEYS_PER_TENANT} live API keys: revoke one it no longer uses, then create the new one`,
+    );
+  }
   return { key: keyFromRow(row), secret: `kb_${id}_${secret}` };
 }
 
@@ -80,9 +111,10 @@ export async function listApiKeys(
   tenantId: string,
   integrationId?: string,
 ): Promise<ApiKeyRecord[]> {
+  if (!isUuid(tenantId) || (integrationId !== undefined && !isUuid(integrationId))) return [];
   const { rows } = await db.query<KeyRow>(
     `select ${KEY_COLUMNS} from api_keys
-      where tenant_id::text = $1 and ($2::text is null or integration_id::text = $2)
+      where tenant_id = $1 and ($2::uuid is null or integration_id = $2)
       order by created_at, id`,
     [tenantId, integrationId ?? null],
   );
@@ -95,8 +127,9 @@ export async function revokeApiKey(
   tenantId: string,
   keyId: string,
 ): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
-    "update api_keys set revoked_at = now() where id = $1 and tenant_id::text = $2 and revoked_at is null",
+    "update api_keys set revoked_at = now() where id = $1 and tenant_id = $2 and revoked_at is null",
     [keyId, tenantId],
   );
   return rowCount === 1;

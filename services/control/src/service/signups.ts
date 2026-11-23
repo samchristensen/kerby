@@ -1,17 +1,40 @@
-// Self-serve sign-up (ADR 0014): the console asks for a tenant and its first person in one call. The console checks the
-// password's strength and hashes it; control provisions as it does for an operator and stores the hash it was given.
-import { audit, EmailTakenError, findConsoleUser, insertConsoleUser } from "@kerby/control-plane";
+// Self-serve sign-up (ADR 0014): the console asks for a tenant and its first person in one call. Only an email on the
+// allowlist may sign up. The console checks the password's strength and hashes it; control provisions as it does for
+// an operator and stores the hash it was given.
+import {
+  audit,
+  EmailTakenError,
+  findConsoleUser,
+  insertConsoleUser,
+  isSignupAllowed,
+  setConsoleAdmin,
+} from "@kerby/control-plane";
 import { errorFields, log, withTenant } from "@kerby/observability";
-import { ConflictError, type ControlDeps } from "../types/index.ts";
+import { ConflictError, type ControlDeps, ForbiddenError, NotFoundError } from "../types/index.ts";
 import { deleteTenant, type Provisioned, provisionTenant } from "./tenants.ts";
 
 export type SignupRequest = { name: string; email: string; passwordHash: string };
+
+/** Mark the person with `email` an admin of the console, or not. Audited to their tenant as the operator. */
+export async function setAdmin(deps: ControlDeps, email: string, admin: boolean): Promise<void> {
+  const user = await setConsoleAdmin(deps.control, email, admin);
+  if (!user) throw new NotFoundError("no console account has this email");
+  await audit(deps.control, {
+    tenantId: user.tenantId,
+    actor: "operator",
+    action: "console.admin.set",
+    detail: { userId: user.id, admin },
+  });
+}
 
 export async function signUp(
   deps: ControlDeps,
   request: SignupRequest,
 ): Promise<Provisioned & { userId: string }> {
-  // Checked first so a taken address costs no database; the unique index below settles a race.
+  // First, and before anything is provisioned: an address that was not invited learns nothing else about us.
+  if (!(await isSignupAllowed(deps.control, request.email))) {
+    throw new ForbiddenError("sign-up is by invitation", "not_invited");
+  }
   if (await findConsoleUser(deps.control, request.email)) {
     throw new ConflictError("an account with this email exists", "email_taken");
   }

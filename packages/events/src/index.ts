@@ -15,7 +15,7 @@ import { errorFields, log } from "@kerby/observability";
 
 export const eventsMigrationsDir = join(import.meta.dirname, "..", "migrations", "tenant");
 
-/** NOTIFYed in the tenant's database by every transaction that records an event, at its commit. */
+/** NOTIFYed in the tenant's database after a transaction that recorded an event commits (`announceEvents`). */
 const EVENTS_CHANNEL = "events";
 
 /** Who an event is about, its data, and the key that records it once however often its transaction is retried. */
@@ -31,7 +31,8 @@ export type NewEvent = {
 
 /**
  * Record an event inside the caller's transaction, so it exists exactly when the change it describes does. A second
- * event with the same `dedupeKey` is ignored. Returns whether this call recorded it.
+ * event with the same `dedupeKey` is ignored. Returns whether this call recorded it. Call `announceEvents` after the
+ * commit.
  */
 export async function recordEvent(tx: TenantQueryable, event: NewEvent): Promise<boolean> {
   const conversationId = "conversationId" in event.data ? event.data.conversationId : null;
@@ -40,9 +41,23 @@ export async function recordEvent(tx: TenantQueryable, event: NewEvent): Promise
      values ($1, $2, $3, $4, $5::jsonb) on conflict (dedupe_key) do nothing`,
     [event.type, event.integrationId, conversationId, event.dedupeKey, JSON.stringify(event.data)],
   );
-  if (rowCount !== 1) return false;
-  await tx.query("select pg_notify($1, '')", [EVENTS_CHANNEL]);
-  return true;
+  return rowCount === 1;
+}
+
+/**
+ * Wake the tenant's event long-polls (`LISTEN events`) once a transaction that recorded events has committed. Never
+ * inside the writing transaction: Postgres commits every transaction that sent a NOTIFY one at a time, under a lock the
+ * whole cluster shares (see `announcePersisted` in packages/conversations). Best effort: a long-poll re-reads every
+ * second anyway, so it never throws. Callers run within their tenant's `withTenant`, which tags the warning.
+ */
+export async function announceEvents(db: TenantQueryable): Promise<void> {
+  try {
+    await db.query("select pg_notify($1, '')", [EVENTS_CHANNEL]);
+  } catch (error) {
+    log("warn", "could not announce new events; long-polls find them within a second", {
+      ...errorFields(error),
+    });
+  }
 }
 
 /**

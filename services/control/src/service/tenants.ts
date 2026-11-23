@@ -132,9 +132,8 @@ export async function resumeTenant(deps: ControlDeps, id: string): Promise<Tenan
 
 /**
  * Delete: refuse new work, drop the database and role, delete the object prefix, purge subscriptions, keys,
- * integrations, secrets and the console's
- * people and sessions. Every step is safe to repeat, so a failed delete is retried by calling it again. The row stays,
- * status `deleted`.
+ * integrations, secrets, the console's people and sessions, and the workers' wake-up hint. Every step is safe to repeat,
+ * so a failed delete is retried by calling it again. The row stays, status `deleted`.
  */
 export async function deleteTenant(deps: ControlDeps, id: string): Promise<void> {
   const { control, cluster, buckets, pools } = deps;
@@ -147,13 +146,14 @@ export async function deleteTenant(deps: ControlDeps, id: string): Promise<void>
   const objects = await buckets.primary.deletePrefix(tenantPrefix(id));
   await control.transaction(async (tx) => {
     // Foreign-key order: subscriptions and keys reference integrations.
-    await tx.query("delete from subscriptions where tenant_id::text = $1", [id]);
-    await tx.query("delete from api_keys where tenant_id::text = $1", [id]);
-    await tx.query("delete from integrations where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_secrets where tenant_id::text = $1", [id]);
-    await tx.query("delete from tenant_db_credentials where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_sessions where tenant_id::text = $1", [id]);
-    await tx.query("delete from console_users where tenant_id::text = $1", [id]);
+    await tx.query("delete from subscriptions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from api_keys where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from integrations where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_secrets where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_db_credentials where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_sessions where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from console_users where tenant_id = $1", [tenant.id]);
+    await tx.query("delete from tenant_wakeups where tenant_id = $1", [tenant.id]);
     await setTenantStatus(tx, id, "deleted");
   });
   await audit(control, {

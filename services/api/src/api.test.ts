@@ -31,6 +31,7 @@ import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createApiApp, createDestinations } from "./index.ts";
+import { LOOKUPS_PER_ADDRESS } from "./runtime/http.ts";
 import { createAuthenticator } from "./service/auth.ts";
 import type { ApiDeps } from "./types/index.ts";
 
@@ -196,7 +197,7 @@ describe("authentication", () => {
     const h = await harness();
     const t = await h.tenant("acme");
     let clock = 1_000;
-    const auth = createAuthenticator(h.control.db, 30_000, () => clock);
+    const auth = createAuthenticator(h.control.db, 30_000, { now: () => clock });
     await expect(auth.authenticate(t.secret)).resolves.toEqual({
       tenantId: t.id,
       actor: `key:${t.key.id}`,
@@ -211,6 +212,23 @@ describe("authentication", () => {
     await expect(auth.authenticate(t.secret)).resolves.toBeDefined(); // still inside the TTL
     clock += 2;
     await expect(auth.authenticate(t.secret)).rejects.toThrow(/suspended/);
+  });
+
+  it("keeps at most its bound of credentials, forgetting the least recently used", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const b = await createApiKey(h.control.db, t.id, t.integration.id);
+    const c = await createApiKey(h.control.db, t.id, t.integration.id);
+    const auth = createAuthenticator(h.control.db, 60_000, { maxEntries: 2 });
+    await auth.authenticate(t.secret);
+    await auth.authenticate(b.secret);
+    await auth.authenticate(t.secret); // a hit: b is now the least recently used
+    await auth.authenticate(c.secret); // past the bound: b is forgotten
+    await revokeApiKey(h.control.db, t.id, t.key.id);
+    await revokeApiKey(h.control.db, t.id, b.key.id);
+    // Both inside the TTL: the remembered key is still trusted, the forgotten one is looked up again and refused.
+    await expect(auth.authenticate(t.secret)).resolves.toMatchObject({ tenantId: t.id });
+    await expect(auth.authenticate(b.secret)).rejects.toThrow(/invalid API key/);
   });
 
   it("accepts a console session as the signed-in person's tenant, and ends with the session or the tenant", async () => {
@@ -964,6 +982,67 @@ describe("failed authentication limit", () => {
     expect(spoofed.status).toBe(429);
   });
 
+  it("holds under a concurrent burst of bad keys: only about the limit's worth are looked up", async () => {
+    const h = await harness({ failedAuthPerMinute: 3 });
+    const bad = (i: number) => `kb_${i.toString(16).padStart(12, "0")}_${"A".repeat(43)}`;
+    const statuses = await Promise.all(
+      Array.from(
+        { length: 24 },
+        async (_, i) => (await h.call(bad(i), "GET", "/v1/model-keys")).status,
+      ),
+    );
+    // Lookups that were already running when the limit ran out still finish: at most one turn's worth beyond it.
+    const looked = statuses.filter((status) => status === 401).length;
+    expect(looked).toBeGreaterThanOrEqual(3);
+    expect(looked).toBeLessThanOrEqual(3 + LOOKUPS_PER_ADDRESS - 1);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(24 - looked);
+  });
+
+  it("charges nothing for a key that verifies, looked up or cached", async () => {
+    const h = await harness({ failedAuthPerMinute: 2, authCacheMs: 60_000 });
+    const t = await h.tenant("acme");
+    const other = await createApiKey(h.control.db, t.id, t.integration.id);
+    // Lookups of good keys count no failure, however many run at once.
+    const statuses = await Promise.all(
+      [t.secret, other.secret, t.secret, other.secret].map(
+        async (secret) => (await h.call(secret, "GET", "/v1/model-keys")).status,
+      ),
+    );
+    expect(statuses).toEqual([200, 200, 200, 200]);
+    for (let i = 0; i < 5; i++)
+      expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(200);
+    // The whole budget is still there for mistakes.
+    for (const key of ["garbage", "garbage"])
+      expect((await h.call(key, "GET", "/v1/model-keys")).status).toBe(401);
+    expect((await h.call(t.secret, "GET", "/v1/model-keys")).status).toBe(429);
+  });
+
+  it("lets many concurrent requests with one key the cache does not hold yet share one lookup", async () => {
+    const h = await harness({ failedAuthPerMinute: 2, authCacheMs: 60_000 });
+    const t = await h.tenant("acme");
+    // A client starting many requests at once on a cold cache is not an address failing to authenticate.
+    const statuses = await Promise.all(
+      Array.from(
+        { length: 10 },
+        async () => (await h.call(t.secret, "GET", "/v1/model-keys")).status,
+      ),
+    );
+    expect(statuses).toEqual(Array.from({ length: 10 }, () => 200));
+  });
+
+  it("lets many good keys at once from one address through, past the failure limit", async () => {
+    const h = await harness({ failedAuthPerMinute: 2 });
+    const t = await h.tenant("acme");
+    const keys = [t.secret];
+    for (let i = 0; i < 11; i++)
+      keys.push((await createApiKey(h.control.db, t.id, t.integration.id)).secret);
+    // One integration holding many keys, or the console forwarding many people's sessions: not failures.
+    const statuses = await Promise.all(
+      keys.map(async (key) => (await h.call(key, "GET", "/v1/model-keys")).status),
+    );
+    expect(statuses).toEqual(keys.map(() => 200));
+  });
+
   it("behind a trusted proxy, limits the left-most X-Forwarded-For address", async () => {
     const h = await harness({ failedAuthPerMinute: 2, trustProxy: true });
     const t = await h.tenant("acme");
@@ -1019,7 +1098,7 @@ describe("judgments", () => {
   /** Claim and run the tenant's queued judgment the way a worker would, with `handler` as its body. */
   async function work(t: Tenant, handler: TaskHandlers["run-judgment"]) {
     const executor = createTenantExecutor(t.ctx.db, { "run-judgment": handler }, { workerId: "w" });
-    for (const task of await executor.claim(5)) await executor.execute(task);
+    for (const task of (await executor.claim(5)).tasks) await executor.execute(task);
   }
 
   const submit = async (h: Harness, t: Tenant, request: object = body) => {
@@ -1610,7 +1689,7 @@ describe("prompts", () => {
       },
       { workerId: "w" },
     );
-    for (const task of await executor.claim(5)) await executor.execute(task);
+    for (const task of (await executor.claim(5)).tasks) await executor.execute(task);
     expect(seen).toEqual([
       {
         model: "opencode/jev-1.14",

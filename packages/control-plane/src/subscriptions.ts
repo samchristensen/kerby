@@ -10,7 +10,7 @@ import {
   type SubscriptionScope,
   SubscriptionScopeSchema,
 } from "@kerby/contracts";
-import type { ControlQueryable } from "@kerby/db";
+import { type ControlQueryable, isUuid } from "@kerby/db";
 import { type Opener, type Sealer, secretContext } from "@kerby/secrets";
 import { integrationFromRow } from "./integrations.ts";
 
@@ -64,8 +64,6 @@ function fromRow(row: SubscriptionRow): SubscriptionRecord {
     updatedAt: row.updated_at,
   };
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Binds a sealed secret to its tenant and subscription: one opened under another's id fails. */
 const contextOf = (tenantId: string, subscriptionId: string): string =>
@@ -122,9 +120,10 @@ export async function listSubscriptions(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<SubscriptionRecord[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<SubscriptionRow>(
     `select ${COLUMNS} from subscriptions
-      where tenant_id::text = $1 and state <> 'deleted' order by created_at, id`,
+      where tenant_id = $1 and state <> 'deleted' order by created_at, id`,
     [tenantId],
   );
   return rows.map(fromRow);
@@ -136,9 +135,9 @@ export async function getSubscription(
   tenantId: string,
   id: string,
 ): Promise<SubscriptionRecord | undefined> {
-  if (!UUID.test(id)) return undefined;
+  if (!isUuid(id) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<SubscriptionRow>(
-    `select ${COLUMNS} from subscriptions where id = $1 and tenant_id::text = $2 and state <> 'deleted'`,
+    `select ${COLUMNS} from subscriptions where id = $1 and tenant_id = $2 and state <> 'deleted'`,
     [id, tenantId],
   );
   return rows[0] ? fromRow(rows[0]) : undefined;
@@ -160,7 +159,7 @@ export async function updateSubscription(
   id: string,
   change: SubscriptionChange,
 ): Promise<SubscriptionRecord | undefined> {
-  if (!UUID.test(id)) return undefined;
+  if (!isUuid(id) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<SubscriptionRow>(
     `update subscriptions set
         destination = coalesce($3::jsonb, destination),
@@ -171,7 +170,7 @@ export async function updateSubscription(
         disabled_reason = case when $7::boolean is null then disabled_reason when $7 then null else 'disabled by hand' end,
         failing_since = case when $7::boolean then null else failing_since end,
         updated_at = now()
-      where id = $1 and tenant_id::text = $2 and state <> 'deleted'
+      where id = $1 and tenant_id = $2 and state <> 'deleted'
       returning ${COLUMNS}`,
     [
       id,
@@ -196,10 +195,10 @@ export async function deleteSubscription(
   tenantId: string,
   id: string,
 ): Promise<boolean> {
-  if (!UUID.test(id)) return false;
+  if (!isUuid(id) || !isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
     `update subscriptions set state = 'deleted', updated_at = now()
-      where id = $1 and tenant_id::text = $2 and state <> 'deleted'`,
+      where id = $1 and tenant_id = $2 and state <> 'deleted'`,
     [id, tenantId],
   );
   return rowCount === 1;
@@ -217,14 +216,14 @@ export async function rotateSubscriptionSecret(
   secret: string,
   overlapMs: number,
 ): Promise<{ previousExpiresAt: Date } | undefined> {
-  if (!UUID.test(id)) return undefined;
+  if (!isUuid(id) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<{ previous_secret_expires_at: Date }>(
     `update subscriptions set
         previous_secret = secret,
         previous_secret_expires_at = now() + make_interval(secs => $4::double precision / 1000),
         secret = $3,
         updated_at = now()
-      where id = $1 and tenant_id::text = $2 and state <> 'deleted'
+      where id = $1 and tenant_id = $2 and state <> 'deleted'
       returning previous_secret_expires_at`,
     [id, tenantId, sealer.seal(secret, contextOf(tenantId, id)), overlapMs],
   );
@@ -242,6 +241,7 @@ export async function listDeliverableSubscriptions(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<DeliverableSubscription[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<
     SubscriptionRow & {
       integration_name: string;
@@ -254,7 +254,7 @@ export async function listDeliverableSubscriptions(
       .join(", ")}, i.name as integration_name, i.scopes as integration_scopes,
             i.created_at as integration_created_at
        from subscriptions s join integrations i on i.id = s.integration_id
-      where s.tenant_id::text = $1 and s.state = 'active' and i.deleted_at is null
+      where s.tenant_id = $1 and s.state = 'active' and i.deleted_at is null
       order by s.created_at, s.id`,
     [tenantId],
   );
@@ -280,7 +280,7 @@ export async function openSubscriptionForDelivery(
   tenantId: string,
   id: string,
 ): Promise<{ subscription: SubscriptionRecord; secrets: string[] } | undefined> {
-  if (!UUID.test(id)) return undefined;
+  if (!isUuid(id) || !isUuid(tenantId)) return undefined;
   const { rows } = await db.query<
     SubscriptionRow & { secret: Buffer; previous_secret: Buffer | null; previous_valid: boolean }
   >(
@@ -289,7 +289,7 @@ export async function openSubscriptionForDelivery(
       .join(", ")}, s.secret, s.previous_secret,
             coalesce(s.previous_secret_expires_at > now(), false) as previous_valid
        from subscriptions s join integrations i on i.id = s.integration_id
-      where s.id = $1 and s.tenant_id::text = $2 and s.state = 'active' and i.deleted_at is null`,
+      where s.id = $1 and s.tenant_id = $2 and s.state = 'active' and i.deleted_at is null`,
     [id, tenantId],
   );
   const row = rows[0];
@@ -355,8 +355,9 @@ export async function listDeletedSubscriptions(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<string[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<{ id: string }>(
-    "select id from subscriptions where tenant_id::text = $1 and state = 'deleted'",
+    "select id from subscriptions where tenant_id = $1 and state = 'deleted'",
     [tenantId],
   );
   return rows.map((row) => row.id);
@@ -369,8 +370,9 @@ export async function purgeSubscription(db: ControlQueryable, id: string): Promi
 
 /** Does the tenant hold any subscription, a deleted one awaiting cleanup included? Else a dispatcher skips it. */
 export async function hasSubscriptions(db: ControlQueryable, tenantId: string): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rows } = await db.query<{ found: boolean }>(
-    "select exists (select 1 from subscriptions where tenant_id::text = $1) as found",
+    "select exists (select 1 from subscriptions where tenant_id = $1) as found",
     [tenantId],
   );
   return rows[0]?.found ?? false;

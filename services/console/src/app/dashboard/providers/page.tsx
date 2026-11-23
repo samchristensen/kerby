@@ -7,24 +7,7 @@ export const metadata: Metadata = { title: "Model providers" };
 export default async function ProvidersPage() {
   await requireSession();
   return (
-    <EmptyState
-      title="Bring your own model keys"
-      icon={
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          className="size-6"
-        >
-          <path
-            strokeLinejoin="round"
-            d="M12 3 20 7.5v9L12 21l-8-4.5v-9L12 3Zm0 0v18M4 7.5l8 4.5 8-4.5"
-          />
-        </svg>
-      }
-    >
+    <EmptyState title="Bring your own model keys">
       <p>
         Kerby holds no model keys of its own: your conversations run on yours. Pick a provider to
         add a key.
@@ -35,7 +18,7 @@ export default async function ProvidersPage() {
       </p>
       <p>
         A conversation names its model as{" "}
-        <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-xs text-zinc-800">
+        <code className="rounded bg-raised px-1 py-0.5 font-mono text-xs text-fg">
           &lt;provider&gt;/&lt;model-id&gt;
         </code>{" "}
         and needs a key for that provider.

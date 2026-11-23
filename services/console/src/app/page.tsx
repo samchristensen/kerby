@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { quickstart } from "./_components/format.ts";
-import { ButtonLink, CodeBlock, Logo } from "./_components/ui.tsx";
+import { ButtonLink, CodeBlock, Logo, Mascot } from "./_components/ui.tsx";
 import { getSession } from "./_lib/session.ts";
 
 const features: { title: string; body: string; icon: ReactNode }[] = [
@@ -31,8 +31,8 @@ const features: { title: string; body: string; icon: ReactNode }[] = [
 export default async function LandingPage() {
   const session = await getSession();
   return (
-    <div className="flex min-h-screen flex-col bg-white">
-      <header className="border-b border-zinc-200">
+    <div className="flex min-h-screen flex-col bg-page">
+      <header className="border-b border-line">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
           <Logo href="/" />
           <nav className="flex items-center gap-2">
@@ -51,14 +51,17 @@ export default async function LandingPage() {
       </header>
 
       <main className="flex-1">
-        <section className="bg-gradient-to-b from-indigo-50/60 to-white">
+        <section className="bg-gradient-to-b from-brand/10 to-page">
           <div className="mx-auto grid max-w-6xl items-center gap-12 px-6 py-20 lg:grid-cols-2">
             <div>
-              <p className="text-sm font-semibold text-indigo-600">Agent runtime as a service</p>
-              <h1 className="mt-3 text-4xl font-semibold tracking-tight text-zinc-900 sm:text-5xl">
+              <div className="mb-6">
+                <Mascot state="friendly" size={180} large />
+              </div>
+              <p className="text-sm font-semibold text-brand-text">Agent runtime as a service</p>
+              <h1 className="mt-3 text-4xl font-semibold tracking-tight text-fg sm:text-5xl">
                 Durable agents on your own model keys
               </h1>
-              <p className="mt-5 text-lg text-zinc-600">
+              <p className="mt-5 text-lg text-muted">
                 Kerby runs your agents' conversations so they survive crashes, stream live, and stay
                 isolated per tenant. You bring the model keys; we keep every turn safe.
               </p>
@@ -69,12 +72,12 @@ export default async function LandingPage() {
                 </ButtonLink>
               </div>
             </div>
-            <div className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 shadow-xl">
-              <div className="flex items-center gap-1.5 border-b border-zinc-800 px-4 py-3">
-                <span className="size-2.5 rounded-full bg-zinc-700" />
-                <span className="size-2.5 rounded-full bg-zinc-700" />
-                <span className="size-2.5 rounded-full bg-zinc-700" />
-                <span className="ml-2 text-xs text-zinc-500">quickstart.sh</span>
+            <div className="min-w-0 rounded-xl border border-line bg-ink shadow-xl">
+              <div className="flex items-center gap-1.5 border-b border-line px-4 py-3">
+                <span className="size-2.5 rounded-full bg-line" />
+                <span className="size-2.5 rounded-full bg-line" />
+                <span className="size-2.5 rounded-full bg-line" />
+                <span className="ml-2 text-xs text-muted">quickstart.sh</span>
               </div>
               <CodeBlock>{quickstart("https://<api>")}</CodeBlock>
             </div>
@@ -82,16 +85,16 @@ export default async function LandingPage() {
         </section>
 
         <section className="mx-auto max-w-6xl px-6 pt-8 pb-20">
-          <h2 className="text-2xl font-semibold tracking-tight text-zinc-900">
+          <h2 className="text-2xl font-semibold tracking-tight text-fg">
             Built for agents that must not lose work
           </h2>
           <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             {features.map((feature) => (
               <div
                 key={feature.title}
-                className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm"
+                className="rounded-xl border border-line bg-panel p-6 shadow-sm"
               >
-                <div className="inline-flex rounded-lg bg-indigo-50 p-2 text-indigo-600">
+                <div className="inline-flex rounded-lg bg-brand/10 p-2 text-brand-text">
                   <svg
                     aria-hidden="true"
                     viewBox="0 0 24 24"
@@ -105,16 +108,16 @@ export default async function LandingPage() {
                     {feature.icon}
                   </svg>
                 </div>
-                <h3 className="mt-4 font-semibold text-zinc-900">{feature.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-600">{feature.body}</p>
+                <h3 className="mt-4 font-semibold text-fg">{feature.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-muted">{feature.body}</p>
               </div>
             ))}
           </div>
         </section>
       </main>
 
-      <footer className="border-t border-zinc-200">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-8 text-sm text-zinc-500">
+      <footer className="border-t border-line">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-8 text-sm text-muted">
           <Logo />
           <p>© {new Date().getFullYear()} Kerby. Durable agents, your keys.</p>
         </div>

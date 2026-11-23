@@ -36,11 +36,13 @@ export {
   setIntegrationScopes,
 } from "./integrations.ts";
 export {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   authenticateApiKey,
   type CreatedKey,
   createApiKey,
   listApiKeys,
+  MAX_API_KEYS_PER_TENANT,
   parseApiKey,
   revokeApiKey,
 } from "./keys.ts";
@@ -54,6 +56,13 @@ export {
   putModelKey,
   readModelKey,
 } from "./secrets.ts";
+export {
+  allowEmails,
+  disallowEmail,
+  isSignupAllowed,
+  listAllowedEmails,
+  setConsoleAdmin,
+} from "./signup-allowlist.ts";
 export {
   type DeliverableSubscription,
   deleteSubscription,
@@ -85,3 +94,9 @@ export {
   type TenantRecord,
 } from "./tenants.ts";
 export { recordUsage } from "./usage.ts";
+export {
+  hintTenantWork,
+  listDueTenants,
+  readWakeupVersion,
+  settleTenantWakeup,
+} from "./wakeups.ts";

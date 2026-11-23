@@ -44,8 +44,13 @@ export const workerConfigSchema = z
     opencodeSystemoneBaseUrl: z.url({ protocol: /^https?$/ }).optional(),
     /** Port of the liveness endpoint (`GET /healthz`) for the container health check. */
     healthPort: z.coerce.number().int().min(0).default(8082),
-    /** How often to look at every active tenant for work a notification missed. */
+    /** How often to look at the tenants whose work is due (hinted by the api, or a retry's or lease's time come). */
     sweepIntervalSeconds: z.coerce.number().positive().default(10),
+    /**
+     * How often to look at every active tenant, the backstop for a hint lost between the api's commit and its write.
+     * Also done at start and when the control connection's LISTEN reconnects.
+     */
+    fullSweepIntervalSeconds: z.coerce.number().positive().default(300),
     /** Lease length; a heartbeat extends it for as long as a turn runs. */
     claimTimeoutSeconds: z.coerce.number().int().positive().default(120),
     /**

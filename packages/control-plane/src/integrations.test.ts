@@ -65,7 +65,7 @@ describe("the integrations migration", () => {
     const db = createControlDb(database.url, { max: 1 });
     try {
       const migrations = readMigrations([controlMigrationsDir]);
-      const at = migrations.findIndex((m) => m.name.endsWith("0007_integrations.sql"));
+      const at = migrations.findIndex((m) => m.name.endsWith("0009_integrations.sql"));
       expect(at).toBeGreaterThan(0);
       for (const migration of migrations.slice(0, at)) await db.query(migration.sql);
       const tenant = await insertTenant(db, newTenant("acme"));

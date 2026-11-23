@@ -12,15 +12,13 @@ export function SignUpForm({ signedIn }: { signedIn: boolean }) {
   if (state?.ok) {
     return (
       <div>
-        <div className="mb-4 inline-flex rounded-full bg-emerald-50 p-2 text-emerald-600">
+        <div className="mb-4 inline-flex rounded-full bg-live/10 p-2 text-live-text">
           <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" className="size-5">
             <path d="M16.7 5.3a1 1 0 0 1 0 1.4l-8 8a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.4L8 12.6l7.3-7.3a1 1 0 0 1 1.4 0Z" />
           </svg>
         </div>
-        <h1 className="text-xl font-semibold tracking-tight text-zinc-900">
-          Your workspace is ready
-        </h1>
-        <p className="mt-1 mb-6 text-sm text-zinc-500">
+        <h1 className="text-xl font-semibold tracking-tight text-fg">Your workspace is ready</h1>
+        <p className="mt-1 mb-6 text-sm text-muted">
           Here is your first API key. Send it as{" "}
           <code className="font-mono">Authorization: Bearer …</code> to call the API.
         </p>
@@ -35,12 +33,8 @@ export function SignUpForm({ signedIn }: { signedIn: boolean }) {
   if (signedIn) {
     return (
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-zinc-900">
-          You are already signed in
-        </h1>
-        <p className="mt-1 mb-6 text-sm text-zinc-500">
-          Sign out first to create another workspace.
-        </p>
+        <h1 className="text-xl font-semibold tracking-tight text-fg">You are already signed in</h1>
+        <p className="mt-1 mb-6 text-sm text-muted">Sign out first to create another workspace.</p>
         <ButtonLink href="/dashboard">Open dashboard</ButtonLink>
       </div>
     );
@@ -49,8 +43,8 @@ export function SignUpForm({ signedIn }: { signedIn: boolean }) {
   const fields = state?.fields ?? {};
   return (
     <div>
-      <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Create your workspace</h1>
-      <p className="mt-1 text-sm text-zinc-500">Start running durable agents in a few minutes.</p>
+      <h1 className="text-xl font-semibold tracking-tight text-fg">Create your workspace</h1>
+      <p className="mt-1 text-sm text-muted">Start running durable agents in a few minutes.</p>
       <form action={action} className="mt-6 space-y-4">
         <Field
           label="Workspace name"
@@ -85,9 +79,9 @@ export function SignUpForm({ signedIn }: { signedIn: boolean }) {
           Create workspace
         </SubmitButton>
       </form>
-      <p className="mt-6 text-center text-sm text-zinc-500">
+      <p className="mt-6 text-center text-sm text-muted">
         Already have an account?{" "}
-        <Link href="/login" className="font-medium text-indigo-600 hover:text-indigo-500">
+        <Link href="/login" className="font-medium text-brand-text hover:text-brand-text/80">
           Sign in
         </Link>
       </p>

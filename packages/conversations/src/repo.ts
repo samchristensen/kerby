@@ -1,6 +1,6 @@
 import type { Guardrail, PinnedPrompt, Visibility } from "@kerby/contracts";
-import type { TenantDb, TenantQueryable } from "@kerby/db";
-import { recordEvent } from "@kerby/events";
+import { isUuid, type TenantDb, type TenantQueryable } from "@kerby/db";
+import { announceEvents, recordEvent } from "@kerby/events";
 import { InvalidCursorError } from "./errors.ts";
 
 export type ConversationRecord = {
@@ -139,10 +139,6 @@ export async function listConversations(
   };
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** A conversation id from a URL is only ever looked up as a uuid; anything else is simply not found. */
-export const isConversationId = (value: string): boolean => UUID.test(value);
-
 /** Insert a conversation and its `conversation.created` event, in one transaction. */
 export async function insertConversation(
   db: TenantDb,
@@ -157,7 +153,7 @@ export async function insertConversation(
     prompt?: PinnedPrompt | undefined;
   },
 ): Promise<ConversationRecord> {
-  return db.transaction(async (tx) => {
+  const record = await db.transaction(async (tx) => {
     const { rows } = await tx.query<ConversationRow>(
       `insert into conversations (integration_id, external_user_id, model, system, guardrails, prompt_name, prompt_version)
        values ($1, $2, $3, $4, $5::jsonb, $6, $7) returning ${COLUMNS}`,
@@ -181,6 +177,8 @@ export async function insertConversation(
     });
     return fromRow(row);
   });
+  await announceEvents(db);
+  return record;
 }
 
 /** A conversation `visibility` sees, or undefined: another integration's is not found, like one that does not exist. */
@@ -189,7 +187,7 @@ export async function findConversation(
   id: string,
   visibility: Visibility,
 ): Promise<ConversationRecord | undefined> {
-  if (!isConversationId(id)) return undefined;
+  if (!isUuid(id)) return undefined;
   const { rows } = await db.query<ConversationRow>(
     `select ${COLUMNS} from conversations where id = $1 and ($2::uuid is null or integration_id = $2)`,
     [id, visibleTo(visibility)],

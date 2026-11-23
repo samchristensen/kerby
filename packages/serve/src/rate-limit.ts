@@ -61,6 +61,43 @@ export class TokenBuckets {
 }
 
 /**
+ * Work that takes turns per key: at most `perKey` runs of one key at once, the rest wait in arrival order; other keys
+ * are not held up. A limiter that counts outcomes (failed authentications) checks its count when a run's turn comes,
+ * so a concurrent burst cannot all pass the check before the first outcome is known, while honest concurrency waits a
+ * moment instead of being refused. Keys are forgotten when nothing runs or waits for them.
+ */
+export class TurnsPerKey {
+  readonly #perKey: number;
+  readonly #keys = new Map<string, { running: number; waiting: (() => void)[] }>();
+
+  constructor(perKey: number) {
+    this.#perKey = perKey;
+  }
+
+  async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    let turns = this.#keys.get(key);
+    if (!turns) {
+      turns = { running: 0, waiting: [] };
+      this.#keys.set(key, turns);
+    }
+    if (turns.running < this.#perKey) turns.running++;
+    else {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      turns.waiting.push(resolve);
+      await promise;
+    }
+    try {
+      return await fn();
+    } finally {
+      // The finished run's place goes to the longest-waiting one, or is given up.
+      const next = turns.waiting.shift();
+      if (next) next();
+      else if (--turns.running === 0) this.#keys.delete(key);
+    }
+  }
+}
+
+/**
  * The client's address. Behind a trusted proxy (Railway's edge overwrites `X-Forwarded-For` and puts the client
  * first), the left-most entry of `forwardedFor`; otherwise the socket's peer, since anyone can send the header.
  */

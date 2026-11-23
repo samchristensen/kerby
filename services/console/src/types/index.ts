@@ -25,7 +25,7 @@ export type SignupClient = (request: {
   passwordHash: string;
 }) => Promise<
   | { ok: true; tenantId: string; userId: string; secret: string }
-  | { ok: false; code: "name_taken" | "email_taken" }
+  | { ok: false; code: "name_taken" | "email_taken" | "not_invited" }
 >;
 
 /**
@@ -79,6 +79,8 @@ export type Session = {
   email: string;
   tenantId: string;
   tenantName: string;
+  /** The platform owner's flag (set by the operator, never by the console): may edit who can sign up. */
+  isAdmin: boolean;
 };
 
 /** Form fields as the browser sent them (`Object.fromEntries(formData)`); the service parses them. */
@@ -125,6 +127,8 @@ export type EventTypeOptions = {
   all: EventTypeOption;
   families: { family: string; wildcard: EventTypeOption; types: EventTypeOption[] }[];
 };
+/** One address on the sign-up allowlist. */
+export type AllowedEmailView = { email: string; addedAt: string; signedUp: boolean };
 
 export type ProviderView = {
   /** As a model id spells it: `anthropic` in `anthropic/<model>`. */
@@ -199,6 +203,15 @@ export type ConsoleService = {
   logOut(token: string): Promise<void>;
   /** The session for a cookie's token; undefined when it is unknown, expired, or its tenant is not active. */
   session(token: string): Promise<Session | undefined>;
+  /** The allowlist, oldest first. Admins only. */
+  signupAllowlist(session: Session): Promise<AllowedEmailView[]>;
+  /** Allow the emails in `form.emails` (separated by whitespace, commas or semicolons) to sign up. Admins only. */
+  allowSignups(
+    session: Session,
+    form: FormInput,
+  ): Promise<{ ok: true; added: number } | FormFailure>;
+  /** Stop allowing `email`; an account it already made stays. False when it was not on the list. Admins only. */
+  disallowSignup(session: Session, email: string): Promise<boolean>;
   overview(session: Session): Promise<Overview>;
 
   // Integrations (ADR 0020) and their keys, in the control database; audited as `user:<id>`. The pages cannot import

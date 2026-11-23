@@ -3,8 +3,10 @@
 // keys. Their subscriptions live behind the api (service/subscriptions.ts); the list here only counts them.
 import { IntegrationNameSchema, SCOPE_DESCRIPTIONS, SCOPES, type Scope } from "@kerby/contracts";
 import {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   audit,
+  type CreatedKey,
   createApiKey,
   createIntegration,
   deleteIntegration,
@@ -13,6 +15,7 @@ import {
   type IntegrationRecord,
   listApiKeys,
   listIntegrations,
+  MAX_API_KEYS_PER_TENANT,
   revokeApiKey,
   setIntegrationScopes,
 } from "@kerby/control-plane";
@@ -192,12 +195,17 @@ export function createIntegrations(deps: ConsoleDeps): Integrations {
       if (!(await getIntegration(control, session.tenantId, integrationId))) {
         return refuse("This integration no longer exists.");
       }
-      const created = await createApiKey(
-        control,
-        session.tenantId,
-        integrationId,
-        parsed.data.label,
-      );
+      let created: CreatedKey;
+      try {
+        created = await createApiKey(control, session.tenantId, integrationId, parsed.data.label);
+      } catch (error) {
+        if (error instanceof ApiKeyLimitError) {
+          return refuse(
+            `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
+          );
+        }
+        throw error;
+      }
       await audit(control, {
         tenantId: session.tenantId,
         actor: actor(session),

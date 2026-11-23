@@ -79,6 +79,10 @@ export default defineRailway((ctx) => {
   const control = service("control", {
     source: source("control"),
     healthcheck: "/healthz",
+    // The release command: migrates the control database and every tenant database with the release's code, and fails
+    // the release if any tenant fails, before control (and so the api, worker and console after it) moves.
+    // Railway takes one command line here (a list of more than one item is refused).
+    preDeployCommand: "node services/control/src/index.ts migrate",
     env: {
       // Every address: the console reaches control over the private network, which may be IPv6.
       HOST: "::",

@@ -74,3 +74,9 @@ tenant-wide SSE stream, a CLI that forwards events to localhost, an API for inte
 - Unexplained, once in about eight full runs: `packages/conversations` "records conversation.created and message.created
   ... once each" read the assistant's `message.created` before `conversation.created` (an older transaction id for a
   later write). Not reproduced in 180 probe sequences under load; cursor completeness does not depend on it.
+- 2026-11-23 Merged `main` (sign-up allowlist, console rebrand, architecture review, pre-deploy migrations). The control
+  migration is now `0009_integrations.sql`. Events are still recorded in the writing transaction, but every `NOTIFY` moved
+  after the commit (`announceEvents`), following the review's finding that a `NOTIFY` in a writing transaction
+  serializes commits cluster-wide. Integration and subscription lookups compare uuids with `isUuid` guards (rule
+  `queries`). Keys keep the 50-per-tenant cap (the console's integration page explains the refusal). The integration
+  pages use the Operator tokens. `make check` and `make test` green (514 tests).

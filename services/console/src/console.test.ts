@@ -7,7 +7,9 @@ import {
   insertSubscription,
   insertTenant,
   listSubscriptions,
+  MAX_API_KEYS_PER_TENANT,
   readModelKey,
+  setConsoleAdmin,
   setTenantStatus,
 } from "@kerby/control-plane";
 import {
@@ -85,7 +87,7 @@ async function harness(
     const session = (await service.session(result.token)) ?? expect.fail("no session");
     return { ...result, session };
   };
-  return { control, service, signUp, opener: createOpener([pair.privateKey]) };
+  return { control, asConsole, service, signUp, opener: createOpener([pair.privateKey]) };
 }
 
 describe("passwords", () => {
@@ -194,6 +196,36 @@ describe("accounts", () => {
     ).toBe(true);
   });
 
+  it("checks at most the account's limit of a concurrent burst of wrong passwords", async () => {
+    const h = await harness({ failedLoginsPerMinute: 4, failedLoginsPerAccountPerHour: 3 });
+    await h.signUp("acme", "ada@example.com");
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        h.service.logIn({ email: "ada@example.com", password: "wrong" }, `192.0.2.${i % 2}`),
+      ),
+    );
+    const errors = results.map((result) => (result.ok ? "signed in" : result.error));
+    expect(errors.filter((error) => error === "Wrong email or password.")).toHaveLength(3);
+    expect(errors.filter((error) => error?.startsWith("Too many failed sign-ins"))).toHaveLength(7);
+  });
+
+  it("charges nothing for a right password", async () => {
+    const h = await harness({ failedLoginsPerMinute: 2, failedLoginsPerAccountPerHour: 2 });
+    await h.signUp("acme", "ada@example.com");
+    const logIn = (password: string) =>
+      h.service.logIn({ email: "ada@example.com", password }, "192.0.2.1");
+    // Up to the limit at once, then more one after another.
+    const rights = [...(await Promise.all([logIn(PASSWORD), logIn(PASSWORD)]))];
+    for (let i = 0; i < 3; i++) rights.push(await logIn(PASSWORD));
+    expect(rights.map((result) => result.ok)).toEqual([true, true, true, true, true]);
+    // The whole budget is still there for mistakes.
+    for (let i = 0; i < 2; i++)
+      expect(await logIn("wrong")).toEqual({ ok: false, error: "Wrong email or password." });
+    expect(await logIn(PASSWORD)).toMatchObject({
+      error: expect.stringMatching(/^Too many failed sign-ins/),
+    });
+  });
+
   it("ends a suspended tenant's sessions at once and refuses its sign-ins", async () => {
     const h = await harness();
     const { token, session } = await h.signUp("acme");
@@ -205,7 +237,100 @@ describe("accounts", () => {
   });
 });
 
+describe("sign-up allowlist", () => {
+  /** A signed-up person the operator then made an admin, as control's operator route does. */
+  async function adminHarness() {
+    const h = await harness();
+    const { token } = await h.signUp("owner");
+    await setConsoleAdmin(h.control.db, "owner@example.com", true);
+    const admin = (await h.service.session(token)) ?? expect.fail("no session");
+    return { ...h, admin };
+  }
+
+  it("is edited by an admin only, and the console's database role cannot make one", async () => {
+    const h = await adminHarness();
+    const { session: stranger } = await h.signUp("other");
+    expect(h.admin.isAdmin).toBe(true);
+    expect(stranger.isAdmin).toBe(false);
+    await expect(h.service.signupAllowlist(stranger)).rejects.toThrow(/only an admin/);
+    await expect(h.service.allowSignups(stranger, { emails: "x@example.com" })).rejects.toThrow(
+      /only an admin/,
+    );
+    await expect(h.service.disallowSignup(stranger, "owner@example.com")).rejects.toThrow(
+      /only an admin/,
+    );
+    // Only the operator writes the flag; the console's role reads it.
+    await expect(
+      h.asConsole.query(
+        "update console_users set is_admin = true where email = 'other@example.com'",
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("adds many addresses at once, normalized and without repeats, and says which input is wrong", async () => {
+    const h = await adminHarness();
+    expect(
+      await h.service.allowSignups(h.admin, {
+        emails:
+          " Ada@Example.com, grace@example.com;\nada@example.com  bob@example.com owner@example.com",
+      }),
+    ).toEqual({ ok: true, added: 4 });
+    expect(await h.service.allowSignups(h.admin, { emails: "ada@example.com" })).toEqual({
+      ok: true,
+      added: 0,
+    });
+    const list = await h.service.signupAllowlist(h.admin);
+    expect(list.map((entry) => [entry.email, entry.signedUp]).sort()).toEqual([
+      ["ada@example.com", false],
+      ["bob@example.com", false],
+      ["grace@example.com", false],
+      ["owner@example.com", true],
+    ]);
+
+    for (const emails of ["", "   ", "ada@example.com, not-an-email"]) {
+      const refused = await h.service.allowSignups(h.admin, { emails });
+      expect(refused, emails).toMatchObject({ ok: false, fields: { emails: expect.any(String) } });
+    }
+    expect(await h.service.signupAllowlist(h.admin)).toHaveLength(4);
+  });
+
+  it("removes an address, and audits each change without the address", async () => {
+    const h = await adminHarness();
+    await h.service.allowSignups(h.admin, { emails: "ada@example.com" });
+    expect(await h.service.disallowSignup(h.admin, "ADA@example.com")).toBe(true);
+    expect(await h.service.disallowSignup(h.admin, "ada@example.com")).toBe(false);
+    expect(await h.service.disallowSignup(h.admin, "not an email")).toBe(false);
+    const { rows } = await h.control.db.query<{ actor: string; action: string; detail: unknown }>(
+      "select actor, action, detail from audit_log where action like 'console.allowlist.%' order by id",
+    );
+    expect(rows).toEqual([
+      { actor: `user:${h.admin.userId}`, action: "console.allowlist.add", detail: { added: 1 } },
+      { actor: `user:${h.admin.userId}`, action: "console.allowlist.remove", detail: {} },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain("ada@");
+  });
+});
+
 describe("workspace", () => {
+  it("says why a key past the tenant's cap is refused, and creates one again after a revoke", async () => {
+    const h = await harness();
+    const { session } = await h.signUp("acme");
+    const integration = await ensureDefaultIntegration(h.control.db, session.tenantId);
+    // The sign-up's first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      expect((await h.service.createApiKey(session, integration.id, { label: `k${i}` })).ok).toBe(
+        true,
+      );
+    expect(await h.service.createApiKey(session, integration.id, { label: "one more" })).toEqual({
+      ok: false,
+      error: `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
+    });
+    const newest = (await h.service.integration(session, integration.id))?.keys[0];
+    expect(await h.service.revokeApiKey(session, newest?.id ?? "")).toBe(true);
+    expect((await h.service.createApiKey(session, integration.id, { label: "one more" })).ok).toBe(
+      true,
+    );
+  });
   it("seals a model key for a supported provider and removes it", async () => {
     const h = await harness();
     const { session } = await h.signUp("acme");
