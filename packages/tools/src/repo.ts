@@ -160,14 +160,14 @@ const BUILTIN_REFUSAL =
 
 /** A new remote server, `syncing` until a worker lists its tools. At most `MAX_TOOL_SERVERS` per tenant. */
 export async function createToolServer(
-  db: TenantDb,
+  db: TenantQueryable,
   input: { slug: string; url: string; auth: ToolServerAuth },
 ): Promise<ToolServerRecord> {
   if (input.slug === BUILTIN_TOOL_SERVER)
     throw new ToolServerTakenError(
       `"${BUILTIN_TOOL_SERVER}" is Kerby's own server: choose another slug`,
     );
-  return db.transaction(async (tx) => {
+  return atomically(db, async (tx) => {
     // Creations serialize, so two at once cannot both take the last place under the limit.
     await tx.query("select pg_advisory_xact_lock(hashtext('kerby.tool_servers.create'))");
     const { rows: counted } = await tx.query<{ count: number }>(
