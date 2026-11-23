@@ -1,12 +1,26 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down
+.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
+
+
+# worktree: a checkout under worktrees/<NAME> with its own compose project and ports, so stacks run side by side.
+worktree: ## New git worktree for parallel work: make worktree NAME=<name> [BASE=main]; own branch, deps, compose project, ports
+	@test -n "$(NAME)" || (echo "usage: make worktree NAME=<name> [BASE=main]" && exit 1)
+	@echo "$(NAME)" | grep -Eq '^[a-z0-9][a-z0-9-]*$$' || (echo "NAME must be lowercase letters, digits and dashes" && exit 1)
+	@dir=worktrees/$(NAME); test ! -e $$dir || (echo "$$dir already exists" && exit 1)
+	git worktree add -b $(NAME) worktrees/$(NAME) $(or $(BASE),main)
+	@cd worktrees/$(NAME) && pnpm install --frozen-lockfile && git config core.hooksPath .githooks
+	@base=$$((20000 + $$(printf %s "$(NAME)" | cksum | cut -d' ' -f1) % 20000 * 2)) && \
+	  printf 'KERBY_PROJECT=kerby-%s\nKERBY_API_PORT=%s\nKERBY_CONSOLE_PORT=%s\n' "$(NAME)" $$base $$((base + 1)) > worktrees/$(NAME)/.env && \
+	  echo "" && echo "Worktree: worktrees/$(NAME) (branch $(NAME))" && \
+	  echo "Stack: cd worktrees/$(NAME) && make up   (API :$$base, console :$$((base + 1)), project kerby-$(NAME))" && \
+	  echo "Remove: make down-v inside it, then git worktree remove worktrees/$(NAME)"
 
 setup: ## Install dependencies and git hooks
 	pnpm install --frozen-lockfile
