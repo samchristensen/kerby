@@ -107,8 +107,9 @@ in the conversation's `lastError`. There is no alert; judgments `failed` after f
 ## Tools
 
 [ADR 0019](adr/0019-tools-and-integrations.md). A tenant's admin registers remote MCP servers (`/v1/tool-servers`, or the
-console's Tools) and grants their tools to restricted integrations; conversations name the tools they may call. Only a
-`worker` talks to an MCP server, through the egress guard, so it needs outbound HTTP(S) to whatever public hosts tenants
+console's Tools) and grants their tools to restricted integrations; conversations name the tools they may call. The
+`worker` (listings, calls, token refresh) and the `api` (OAuth discovery and code exchange) reach tenants' MCP and
+authorization servers, always through the egress guard, so both need outbound HTTP(S) to whatever public hosts tenants
 register, and nothing private: never set `EGRESS_ALLOWED_HOSTS` here (worker and api refuse it outside development).
 `TOOL_CALL_TIMEOUT_MS` (worker, default 60000) bounds one listing or call. Listing a server is a `sync-tool-server` task on
 the `turns` queue (it counts against `maxConcurrentTurns`); a server that failed shows `status: error` and why in
