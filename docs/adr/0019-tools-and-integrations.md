@@ -57,14 +57,20 @@ session id); servers on 2025-11-25 and older still expect a session.
 - **The worker lists tools; nothing else can.** Making a server, changing its URL or credential, or
   `POST /v1/tool-servers/:slug/sync` enqueues a `sync-tool-server` task on the `turns` queue (the only queue workers
   claim; like a judgment it counts against concurrent turns). The worker opens the credential and calls `tools/list`
-  through `createEgressFetch` (30 s, 1 MiB), then:
+  through `createEgressFetch` (30 s and 1 MiB a page; at most 200 tools and 4 MiB a listing, stopped as soon as either
+  is past, so a tenant's server cannot fill a shared worker's memory; an input schema is at most 64 KiB), then:
   - a new tool arrives disabled, pinned to what was listed;
   - a disabled tool's pinned definition follows the listing;
   - an enabled tool whose definition changed keeps its pinned one and is `drifted` until an admin accepts the new one
     (`PATCH .../tools/:name { acceptDefinition: true }`): **the model never sees a definition no admin enabled**;
   - a tool missing from the listing gets `removed_at` and is not offered.
 
-  Nothing syncs on a schedule yet.
+  A listing is fenced: it is recorded only if the server's `updated_at` (moved by every change of URL, auth, credential
+  or a sync request) is still what it was when the listing began, so a slow listing of an old URL or credential never
+  overwrites a newer one. A failure before listing (the credential could not be read) retries, and the last attempt
+  records the error, so a server never stays `syncing`. Enabling or accepting may carry `expectedDefinition` (the
+  `listedHash` the admin was shown; the console always sends it): when the server lists something else by then, 409
+  `definition_changed`. Nothing syncs on a schedule yet.
 - **Tools are explicit.** `POST /v1/conversations { tools: ["github/*", "zendesk/search_tickets", "kerby/judge"] }`; with
   no `tools`, none are offered. A chat prompt ([ADR 0017](0017-prompts.md)) carries `tools` and sets them with the system
   prompt, model and guardrails. The api resolves each pattern to a server id when the conversation is made (an unknown
@@ -85,8 +91,12 @@ session id); servers on 2025-11-25 and older still expect a session.
   per server per run opened on first use, the call id in `_meta` (`kerby/callId`) for servers that deduplicate, and no
   client capabilities (no sampling, roots or elicitation: a server cannot spend the tenant's model key or ask a person
   anything). Text and `structuredContent` (as JSON text) reach the model; other content becomes a note naming its kind; a
-  result is cut at 256 KiB with a note. An egress refusal, a timeout, an HTTP or MCP error is an error result the model
-  reads, not a turn retry; on a `write` tool a timeout or broken connection says the call may have taken effect.
+  result is cut at 256 KiB with a note (a response is read up to 4 MiB), an error result at 16 KiB. An egress refusal, a
+  timeout, an HTTP or MCP error is an error result the model reads, not a turn retry; on a `write` tool a failure after
+  the server took the request (a timeout, a broken connection or stream, a malformed answer, HTTP 502/503/504) says the
+  call may have taken effect. Kerby never follows a redirect from a tenant's MCP server (a credential in a custom header
+  would go with it): a 3xx is an error naming where it pointed. A credential `<scheme> <token>` is scrubbed whole and as
+  its token; an address the guard refused is named by host only, never by the private address it resolved to.
 - **The interrupted-write rule.** `recordToolExecution` counts runs inside the step. When it finds an earlier execution
   (an attempt began the call and never stored a result), a `write` tool is not called again: the model gets an error
   result saying the call was interrupted and may or may not have taken effect. A `read` tool runs again. A tool's
@@ -101,7 +111,9 @@ session id); servers on 2025-11-25 and older still expect a session.
   console calls these with the person's session token, as the Studio does, and adds Tools pages (servers, credential,
   sync, enable, effect, drift review, the integrations granted), an Integrations page in place of API keys (role, keys,
   grants) and a tool picker in chat and the Studio. Every change is audited (`tool_server.*`, `tool.update`,
-  `integration.*`) with ids, slugs and patterns only.
+  `integration.*`) with ids, slugs, patterns and a server URL's origin only (some servers put a secret in the path).
+- **Schema n-1 is tolerated.** A tenant whose tool migration has not run yet answers as one with no tools: reads of an
+  empty tool list run no query, and `listConversationTools` treats a missing table as none.
 - **OAuth, for the whole tenant** (`auth: { kind: "oauth", scope? }`), per MCP's authorization spec (2026-07-28). An
   admin starts it (`POST /v1/tool-servers/:slug/oauth/start` → `{ authorizationUrl }`; the console's Connect button): the
   api, through egress and never following a redirect, finds the protected resource metadata (the 401's
