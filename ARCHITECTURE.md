@@ -119,11 +119,9 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `kerby_console`: API keys (never their hashes), model keys, people and sessions, appending to the audit log as
   `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
   account (failed sign-ins an hour), per process like the api's limits; sign-ins to one account take turns and an
-  address checks four at once, each looking at the limits when its turn comes, so a concurrent burst cannot outrun them. Since every sign-up is a whole database, control also caps
-  sign-ups across every address and process (`SIGNUP_BUDGET_PER_HOUR`, 30, counted from the audit log's
-  `console.signup.attempt` rows under a lock): past it, 429 `signups_paused` with `Retry-After`. A tenant holds at most
-  50 live API keys (`MAX_API_KEYS_PER_TENANT`; 409 `api_key_limit` from control, a message in the console); rotating a
-  key at the cap works.
+  address checks four at once, each looking at the limits when its turn comes, so a concurrent burst cannot outrun them.
+  A tenant holds at most 50 live API keys (`MAX_API_KEYS_PER_TENANT`; 409 `api_key_limit` from control, a message in
+  the console); rotating a key at the cap works.
 - Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is

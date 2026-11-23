@@ -15,7 +15,6 @@ export {
   findConsoleUser,
   insertConsoleUser,
   readConsoleSession,
-  reserveConsoleSignup,
 } from "./console.ts";
 export {
   listTenantsWithoutDbPassword,

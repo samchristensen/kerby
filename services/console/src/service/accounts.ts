@@ -72,8 +72,6 @@ export function createAccounts(deps: ConsoleDeps) {
         passwordHash: await hashPassword(password, settings.passwordCost),
       });
       if (!created.ok) {
-        if (created.code === "signups_paused")
-          return refuse("Sign-ups are paused for now; try again later.");
         return created.code === "name_taken"
           ? { ok: false, fields: { name: "This workspace name is taken" } }
           : { ok: false, fields: { email: "An account with this email exists. Sign in instead." } };

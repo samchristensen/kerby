@@ -1,4 +1,4 @@
-// When each tenant's queue next needs a worker to look (`tenant_wakeups`, migration 0007; ADR 0004). The api hints
+// When each tenant's queue next needs a worker to look (`tenant_wakeups`, migration 0008; ADR 0004). The api hints
 // after it enqueues; a worker reads the hint's version, claims, then settles the next due time unless another hint
 // arrived meanwhile. Workers sweep only tenants that are due; a slow full sweep is the backstop.
 import { type ControlQueryable, isUuid } from "@kerby/db";

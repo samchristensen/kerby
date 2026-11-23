@@ -234,8 +234,9 @@ An outside review of security, performance and design; each finding checked in c
   keys at once from one address (`make multitenant`'s load run caught it).
 - [x] **J3 Unbounded auth cache, unlimited API keys.** The cache kept every credential ever seen; any signed-in person
   could mint keys without end. LRU of 10,000; 50 live keys per tenant.
-- [x] **J4 Sign-up capacity.** Each sign-up is a database and a sweep slot; the only limit was per address and process.
-  Control's `SIGNUP_BUDGET_PER_HOUR` (30) across all of them.
+- [x] **J4 Sign-up capacity.** Each open sign-up is a database and a sweep slot; the only limit was per address and
+  process. Closed by sign-up by invitation (the allowlist, PR #21), which landed meanwhile; a global budget built here was
+  dropped before merging as a second mechanism for the same risk.
 - [x] **J5 Usage lost on a retried turn.** An attempt that died between persisting an answer and billing it never billed
   it (the harness does not report a persisted message again); a turn now bills what it already holds first.
 - [x] **J6 Every sweep visited every tenant.** ADR 0004 said the worker sweeps a bounded set; the code swept all active

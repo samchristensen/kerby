@@ -93,10 +93,7 @@ async function endSessions(role: string): Promise<void> {
   await sleep(100); // pools drop the clients the server ended
 }
 
-async function start(
-  wrap?: (cluster: ClusterAdmin) => ClusterAdmin,
-  settings: Partial<ControlDeps["settings"]> = {},
-) {
+async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
   const realCluster = createClusterAdmin(adminUrl());
@@ -131,8 +128,6 @@ async function start(
       clusterPort: Number(adminHost.port),
       templateDatabase,
       pgDumpPath: "pg_dump",
-      signupBudgetPerHour: 100,
-      ...settings,
     },
   };
   await ensureTemplate(deps);
@@ -436,7 +431,6 @@ describe("console sign-up", () => {
       "select action, actor from audit_log order by id",
     );
     expect(rows).toEqual([
-      { action: "console.signup.attempt", actor: "console" },
       { action: "tenant.create", actor: "console" },
       { action: "console.signup", actor: "console" },
     ]);
@@ -504,35 +498,6 @@ describe("console sign-up", () => {
     expect(acme.rows[0]?.status).toBe("deleted");
     expect(await h.cluster.databaseExists(acme.rows[0]?.db_name ?? "")).toBe(false);
     expect((await h.control.db.query("select 1 from api_keys")).rowCount).toBe(0);
-  });
-
-  it("refuses sign-ups past the hour's budget with 429 signups_paused, whoever asks, and counts failed ones", async () => {
-    const h = await start(undefined, { signupBudgetPerHour: 3 });
-    const post = (name: string, email = `${name}@example.com`) =>
-      h.call("POST", "/v1/console/signups", { name, email, passwordHash }, CONSOLE_TOKEN);
-    expect((await post("acme")).status).toBe(201);
-    // A taken name provisions nothing, but it started a sign-up: it counts.
-    expect((await post("acme", "bob@example.com")).status).toBe(409);
-    // A taken email is refused before the budget: it does not.
-    expect((await post("globex", "acme@example.com")).status).toBe(409);
-    // Concurrent sign-ups take the last place once between them.
-    const statuses = await Promise.all(["b1", "b2", "b3"].map(async (n) => (await post(n)).status));
-    expect(statuses.filter((status) => status === 201)).toHaveLength(1);
-    expect(statuses.filter((status) => status === 429)).toHaveLength(2);
-
-    const paused = await post("initech");
-    expect(paused.status).toBe(429);
-    expect(await paused.json()).toMatchObject({ error: { code: "signups_paused" } });
-    const retryAfter = Number(paused.headers.get("retry-after"));
-    expect(retryAfter).toBeGreaterThan(3500);
-    expect(retryAfter).toBeLessThanOrEqual(3600);
-    expect((await h.control.db.query("select 1 from tenants")).rowCount).toBe(2);
-
-    // An hour later the oldest place is free again.
-    await h.control.db.query(
-      "update audit_log set at = at - interval '61 minutes' where id = (select min(id) from audit_log where action = 'console.signup.attempt')",
-    );
-    expect((await post("initech")).status).toBe(201);
   });
 
   it("deleting the tenant removes its people and sessions and frees the email", async () => {

@@ -84,11 +84,9 @@ People sign up at the console's domain ([ADR 0014](adr/0014-tenant-console.md)):
 as `POST /v1/operator/tenants` does (audited with actor `console`, default limits) and stores its first person, who sees
 the tenant's first API key once. An operator can still provision by hand; such a tenant has no person and cannot be
 signed in to. Suspending or deleting a tenant ends its console sessions at once (deleting also removes its people).
-Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5, on `console`) and failed sign-ins per address and per
-account (`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process; control also caps
-sign-ups across every address (`SIGNUP_BUDGET_PER_HOUR`, 30, on `control`; 429 `signups_paused`, the console says sign-ups
-are paused). Raise the budget on `control` when real demand meets it. A tenant holds at most 50 live API keys. There is no email
-verification, password reset or second person per tenant yet (tech debt). To see who signed up:
+Sign-ups are limited per client address (`SIGNUPS_PER_HOUR`, 5) and failed sign-ins per address and per account
+(`FAILED_LOGINS_PER_MINUTE` 10, `FAILED_LOGINS_PER_ACCOUNT_PER_HOUR` 20), per console process. A tenant holds at most 50
+live API keys. There is no email verification, password reset or second person per tenant yet (tech debt). To see who signed up:
 `select email, tenant_id, created_at, last_login_at from console_users order by created_at` (psql below).
 
 ## Judgments
