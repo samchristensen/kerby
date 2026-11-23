@@ -85,7 +85,15 @@ export function removeStale(alive: (pid: number) => boolean = isAlive): void {
       const pid = Number(owner);
       return Number.isInteger(pid) && pid > 0 && alive(pid) ? [] : [id];
     });
-  if (stale.length > 0) docker("rm", "-f", ...stale);
+  for (const id of stale) {
+    try {
+      docker("rm", "-f", id);
+    } catch (error) {
+      // Two runs starting together both find the same orphan: the other one's removal wins, and that is fine.
+      const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+      if (!/already in progress|No such container/.test(stderr)) throw error;
+    }
+  }
 }
 
 /** @public vitest.config.ts names this file as `globalSetup`; vitest calls its default export. */
