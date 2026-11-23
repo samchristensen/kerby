@@ -10,8 +10,9 @@ export const formatDate = (iso: string): string => dateFormat.format(new Date(is
 export const formatDateTime = (iso: string): string =>
   `${dateTimeFormat.format(new Date(iso))} UTC`;
 
+/** Binary units, as the limits are written (`storageBytes` defaults to 1 GiB). */
 export function formatBytes(bytes: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
   let value = bytes;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
