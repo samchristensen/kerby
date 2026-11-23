@@ -14,7 +14,7 @@ import type {
   StreamInclude,
 } from "@kerby/contracts";
 import { DEFAULT_JUDGMENT_MODEL, PublicMessageSchema, parseModelId } from "@kerby/contracts";
-import { hasModelKey } from "@kerby/control-plane";
+import { hasModelKey, hintTenantWork } from "@kerby/control-plane";
 import {
   ConversationNotFoundError,
   conversationChannel,
@@ -152,12 +152,11 @@ export async function postMessage(
       throw new NotFoundError("conversation not found");
     throw error;
   }
-  // At-least-once: the worker's periodic sweep finds the turn even if this notification is lost.
-  await deps.control
-    .query("select pg_notify('tenant_work', $1)", [ctx.tenantId])
-    .catch((error: unknown) => {
-      log("warn", "could not notify workers; the sweep will find the turn", errorFields(error));
-    });
+  // After the commit, so a worker that sees the hint can claim the turn. At-least-once: if the hint is lost, the
+  // worker's full sweep finds the turn.
+  await hintTenantWork(deps.control, ctx.tenantId).catch((error: unknown) => {
+    log("warn", "could not hint workers; the full sweep will find the turn", errorFields(error));
+  });
   return { seq };
 }
 

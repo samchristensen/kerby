@@ -1,6 +1,7 @@
 // The console's one call to another service (ADR 0014): at sign-up, control provisions a tenant and its first person.
 // The console's own token (CONSOLE_TOKEN) opens this route and nothing else. A refusal is 409 `name_taken` or
-// `email_taken`, or 400 for a body this schema refuses.
+// `email_taken`, 429 `signups_paused` (with `Retry-After`) once the hour's sign-up budget (control's SIGNUP_BUDGET_PER_HOUR)
+// is spent, or 400 for a body this schema refuses.
 import { z } from "zod";
 import { TenantNameSchema } from "./operator.ts";
 

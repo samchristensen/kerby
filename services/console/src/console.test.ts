@@ -3,6 +3,7 @@ import {
   createApiKey,
   insertConsoleUser,
   insertTenant,
+  MAX_API_KEYS_PER_TENANT,
   readModelKey,
   setRolePassword,
   setTenantStatus,
@@ -10,7 +11,9 @@ import {
 import { createTestControlDb, type TestControlDb } from "@kerby/control-plane/testing";
 import { createControlDb } from "@kerby/db";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
+import { json, serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
+import { createSignupClient } from "./runtime/control-client.ts";
 import { createConsoleService } from "./service/index.ts";
 import { hashPassword, verifyPassword } from "./service/passwords.ts";
 import type { ApiClient, ConsoleDeps, ConsoleService, SignupClient } from "./types/index.ts";
@@ -26,11 +29,13 @@ const PASSWORD = "correct horse battery";
 
 /**
  * The console as it runs: the service over the control database as the `kerby_console` role. Control's sign-up route
- * is played by `signups`, which writes what control writes (a tenant, its first key, its person) as the admin.
+ * is played by `signups`, which writes what control writes (a tenant, its first key, its person) as the admin, unless a
+ * test brings its own.
  */
 async function harness(
   settings: Partial<ConsoleDeps["settings"]> = {},
   api: ApiClient = () => Promise.reject(new Error("the test made no api available")),
+  signupClient?: SignupClient,
 ) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
@@ -62,7 +67,7 @@ async function harness(
   const service: ConsoleService = createConsoleService({
     control: asConsole,
     sealer: createSealer(pair.publicKey),
-    signups,
+    signups: signupClient ?? signups,
     api,
     settings: {
       modelProviders: ["anthropic", "openai", "opencode"],
@@ -191,6 +196,58 @@ describe("accounts", () => {
     ).toBe(true);
   });
 
+  it("says sign-ups are paused when control's hourly budget is spent", async () => {
+    // Control as it answers past SIGNUP_BUDGET_PER_HOUR.
+    const control = await serve(
+      async () =>
+        json(
+          429,
+          { error: { code: "signups_paused", message: "sign-ups are paused" } },
+          { "retry-after": "60" },
+        ),
+      { host: "127.0.0.1", port: 0 },
+    );
+    cleanups.push(() => control.close());
+    const client = createSignupClient(`http://127.0.0.1:${control.port}`, "console-token");
+    const h = await harness({}, undefined, client);
+    expect(
+      await h.service.signUp(
+        { name: "acme", email: "ada@example.com", password: PASSWORD },
+        "203.0.113.1",
+      ),
+    ).toEqual({ ok: false, error: "Sign-ups are paused for now; try again later." });
+  });
+
+  it("checks at most the account's limit of a concurrent burst of wrong passwords", async () => {
+    const h = await harness({ failedLoginsPerMinute: 4, failedLoginsPerAccountPerHour: 3 });
+    await h.signUp("acme", "ada@example.com");
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        h.service.logIn({ email: "ada@example.com", password: "wrong" }, `192.0.2.${i % 2}`),
+      ),
+    );
+    const errors = results.map((result) => (result.ok ? "signed in" : result.error));
+    expect(errors.filter((error) => error === "Wrong email or password.")).toHaveLength(3);
+    expect(errors.filter((error) => error?.startsWith("Too many failed sign-ins"))).toHaveLength(7);
+  });
+
+  it("charges nothing for a right password", async () => {
+    const h = await harness({ failedLoginsPerMinute: 2, failedLoginsPerAccountPerHour: 2 });
+    await h.signUp("acme", "ada@example.com");
+    const logIn = (password: string) =>
+      h.service.logIn({ email: "ada@example.com", password }, "192.0.2.1");
+    // Up to the limit at once (each holds a reservation while its password is checked), then more one after another.
+    const rights = [...(await Promise.all([logIn(PASSWORD), logIn(PASSWORD)]))];
+    for (let i = 0; i < 3; i++) rights.push(await logIn(PASSWORD));
+    expect(rights.map((result) => result.ok)).toEqual([true, true, true, true, true]);
+    // The whole budget is still there for mistakes.
+    for (let i = 0; i < 2; i++)
+      expect(await logIn("wrong")).toEqual({ ok: false, error: "Wrong email or password." });
+    expect(await logIn(PASSWORD)).toMatchObject({
+      error: expect.stringMatching(/^Too many failed sign-ins/),
+    });
+  });
+
   it("ends a suspended tenant's sessions at once and refuses its sign-ins", async () => {
     const h = await harness();
     const { token, session } = await h.signUp("acme");
@@ -225,6 +282,21 @@ describe("workspace", () => {
     expect(await h.service.revokeApiKey(a.session, created.key.id)).toBe(true);
     expect(await authenticateApiKey(h.control.db, created.secret)).toBeUndefined();
     expect((await h.service.overview(a.session)).activeApiKeys).toBe(1);
+  });
+
+  it("says why a key past the tenant's cap is refused, and creates one again after a revoke", async () => {
+    const h = await harness();
+    const { session } = await h.signUp("acme");
+    // The sign-up's first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      expect((await h.service.createApiKey(session, { label: `k${i}` })).ok).toBe(true);
+    expect(await h.service.createApiKey(session, { label: "one more" })).toEqual({
+      ok: false,
+      error: `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
+    });
+    const [newest] = await h.service.apiKeys(session);
+    expect(await h.service.revokeApiKey(session, newest?.id ?? "")).toBe(true);
+    expect((await h.service.createApiKey(session, { label: "one more" })).ok).toBe(true);
   });
 
   it("seals a model key for a supported provider and removes it", async () => {

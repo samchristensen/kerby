@@ -1,5 +1,5 @@
 import type { Guardrail, PinnedPrompt } from "@kerby/contracts";
-import type { TenantQueryable } from "@kerby/db";
+import { isUuid, type TenantQueryable } from "@kerby/db";
 import { InvalidCursorError } from "./errors.ts";
 
 export type ConversationRecord = {
@@ -120,10 +120,6 @@ export async function listConversations(
   };
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** A conversation id from a URL is only ever looked up as a uuid; anything else is simply not found. */
-export const isConversationId = (value: string): boolean => UUID.test(value);
-
 export async function insertConversation(
   db: TenantQueryable,
   input: {
@@ -156,7 +152,7 @@ export async function findConversation(
   db: TenantQueryable,
   id: string,
 ): Promise<ConversationRecord | undefined> {
-  if (!isConversationId(id)) return undefined;
+  if (!isUuid(id)) return undefined;
   const { rows } = await db.query<ConversationRow>(
     `select ${COLUMNS} from conversations where id = $1`,
     [id],

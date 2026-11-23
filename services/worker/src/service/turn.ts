@@ -115,6 +115,27 @@ export async function runTurn(
     });
   }
   let nextSeq = history.lastSeq + 1;
+
+  /** Bill an answer once: the dedupe key is its position. */
+  const meter = async (seq: number, message: AgentMessage): Promise<void> => {
+    if (message.role !== "assistant" || !message.usage) return;
+    const usage = message.usage;
+    await recordUsage(deps.control, {
+      tenantId: ctx.tenantId,
+      dedupeKey: `${conversationId}:${seq}`,
+      model: message.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      costUsd: usage.costUsd,
+    });
+  };
+  // An earlier attempt may have persisted an answer of this turn and died before billing it; the harness never reports
+  // a persisted message again, so bill what this turn already holds before anything else. Repeats are no-ops.
+  for (const stored of history.messages) {
+    if (stored.seq > params.seq) await meter(stored.seq, stored.message);
+  }
   const tools = tenantTools({
     enableEcho: deps.settings.enableEchoTool,
     judge: await judgeTool(deps, ctx.tenantId, conversationId),
@@ -240,19 +261,7 @@ export async function runTurn(
         trace.record({ type: "message_end", seq, role: event.message.role });
         await trace.flush();
       }
-      if (event.message.role === "assistant" && event.message.usage) {
-        const usage = event.message.usage;
-        await recordUsage(deps.control, {
-          tenantId: ctx.tenantId,
-          dedupeKey: `${conversationId}:${seq}`,
-          model: event.message.model,
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          cacheReadTokens: usage.cacheReadTokens,
-          cacheWriteTokens: usage.cacheWriteTokens,
-          costUsd: usage.costUsd,
-        });
-      }
+      await meter(seq, event.message);
     }
     log("info", "turn completed", {
       durationMs: Math.round(performance.now() - started),

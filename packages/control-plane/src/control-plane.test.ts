@@ -14,6 +14,7 @@ it("the control migrations create the control tables, and keys belong to a tenan
     "schema_migrations",
     "tenant_db_credentials",
     "tenant_secrets",
+    "tenant_wakeups",
     "tenants",
     "usage",
   ]);

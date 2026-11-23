@@ -50,7 +50,10 @@ routes in `src/app`, and its checker needs TypeScript's JavaScript API, which Ty
   (`@kerby/runtime-pi-durable/providers`, imported by `src/index.ts`).
 - **Before sign-in, bounded work**: sign-ups per address per hour (each makes a database; default 5), failed sign-ins
   per address per minute (10) and per account per hour (20). Per process, like the api's limits (`TokenBuckets`, now in
-  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist.
+  `@kerby/serve`). An unknown email costs a hash too, so timing does not say which emails exist. Amended 2026-11-23:
+  sign-ins to one account take turns (an address checks four at once) and look at the limits when their turn comes, so concurrent attempts cannot outrun them; control caps
+  sign-ups across all addresses (`SIGNUP_BUDGET_PER_HOUR`, 30), since rotating addresses defeats a per-address limit and
+  each sign-up is a database; a tenant holds at most 50 live API keys.
 - **Hosting.** A Railway service `console` with a generated domain, from the image CI builds (ADR 0011). Control listens on
   `::` so the console reaches it over the private network. `scripts/railway.ts secrets` creates `CONSOLE_TOKEN` and
   `CONSOLE_DATABASE_PASSWORD` once; `domains` adds the public domains; the release runs both.

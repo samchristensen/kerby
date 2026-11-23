@@ -42,13 +42,25 @@ export type ExecutorOptions = {
   heartbeatEveryMs?: number;
 };
 
+/** What one claim took, and when the tenant's queue next needs a look. */
+type ClaimResult = {
+  /** Each must be passed to `execute`. */
+  tasks: ClaimedRun[];
+  /**
+   * When a claim could next take something, as of this claim's commit: the earliest a waiting run becomes claimable
+   * (now or past for runs ready but over the limit; a retry's backoff; a delay) or a running run's lease lapses (a
+   * crashed worker's run is failed and retried by a claim). Null: nothing waits, until new work is spawned.
+   */
+  nextDueAt: Date | null;
+};
+
 export interface TenantExecutor {
   /**
    * Claim runnable tasks while fewer than `limit` of this tenant's turns run, counted across every worker on the
    * tenant's database, and never more than `max` at once (the caller's own free capacity: a claimed task that is not
    * run sits until its lease lapses). Each claimed task must be passed to `execute`.
    */
-  claim(limit: number, max?: number): Promise<ClaimedRun[]>;
+  claim(limit: number, max?: number): Promise<ClaimResult>;
   /** Run a claimed task to completion. Never throws: failures are recorded on the task and retried by Absurd. */
   execute(task: ClaimedRun): Promise<void>;
 }
@@ -117,7 +129,6 @@ export function createTenantExecutor(
 
   return {
     async claim(limit, max = Number.POSITIVE_INFINITY) {
-      if (limit <= 0 || max <= 0) return [];
       // Count and claim in one transaction holding a per-database lock: every worker's claim for this tenant waits
       // its turn and sees the runs the previous one committed. A lapsed lease no longer counts; the claim below
       // fails that run and may hand its task to this worker.
@@ -141,8 +152,20 @@ export function createTenantExecutor(
                 .bindToConnection(client)
                 .claimTasks({ batchSize: free, claimTimeout, workerId: options.workerId })
             : [];
+        // What `absurd.claim_task` would take next: a waiting run once `available_at` passes (a sleep forever on an
+        // event is 'infinity': only the event wakes it), or a running run once its lease lapses.
+        const due = await client.query<{ next_due_at: Date | null }>(
+          `select least(
+             (select min(r.available_at) from absurd.r_${QUEUE} r
+                join absurd.t_${QUEUE} t on t.task_id = r.task_id
+               where r.state in ('pending', 'sleeping') and t.state in ('pending', 'sleeping', 'running')
+                 and r.available_at < 'infinity'),
+             (select min(claim_expires_at) from absurd.r_${QUEUE}
+               where state = 'running' and claim_expires_at is not null)
+           ) as next_due_at`,
+        );
         await client.query("commit");
-        return tasks;
+        return { tasks, nextDueAt: due.rows[0]?.next_due_at ?? null };
       } catch (error) {
         await client.query("rollback").catch((rollbackError: unknown) => {
           // The connection is unusable: release it with the error so the pool discards it.

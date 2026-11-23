@@ -19,6 +19,7 @@ export const RULES = [
   "providers",
   "config",
   "docker",
+  "queries",
 ] as const;
 type Rule = (typeof RULES)[number];
 export type Violation = { rule: Rule; file: string; message: string };
@@ -44,6 +45,8 @@ const BUILTINS = new Set(builtinModules);
 const READS_ENV =
   /\bprocess\s*(?:\.|\?\.)\s*env\b|\bprocess\s*\[\s*["']env["']\s*\]|import\s*\{[^}]*\benv\b[^}]*\}\s*from\s*["'](?:node:)?process["']/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+/** A uuid column compared as text (`id::text = $1`, `tenant_id::text in (...)`): no index can serve it. */
+const UUID_AS_TEXT = /\b\w*id::text\s*(?:=|<>|!=|\bin\b)/;
 
 /**
  * External systems, each behind exactly one package. A dependency listed here may be imported only by
@@ -228,6 +231,13 @@ export function checkArchitecture(root: string): Violation[] {
             `reads the process environment directly. Fix: declare the setting in the service's config schema and read it from the object loadConfig (@kerby/config) returns; config is read once at startup. See ARCHITECTURE.md#configuration`,
           );
         }
+      }
+      if (ws.kind !== "scripts" && !file.endsWith(".test.ts") && UUID_AS_TEXT.test(text)) {
+        add(
+          "queries",
+          file,
+          "compares a uuid column as text (`id::text = $1`), which no index serves: every call scans the whole table. Fix: compare as uuid (`id = $1`) and check the value with isUuid (@kerby/db) first, treating anything else as not found. See ARCHITECTURE.md#layers",
+        );
       }
       const importerLayer =
         ws.kind === "services" && !file.endsWith(".test.ts")

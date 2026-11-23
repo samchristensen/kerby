@@ -2,13 +2,16 @@
 // tenant, and each change is audited as `user:<id>`, never with a key's value.
 import { CreateKeyRequestSchema, PutModelKeyRequestSchema } from "@kerby/contracts";
 import {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   audit,
+  type CreatedKey,
   createApiKey,
   deleteModelKey,
   getTenant,
   listApiKeys,
   listModelKeys,
+  MAX_API_KEYS_PER_TENANT,
   ModelKeyLimitError,
   putModelKey,
   revokeApiKey,
@@ -78,7 +81,17 @@ export function createWorkspace(deps: ConsoleDeps) {
     ): Promise<{ ok: true; key: ApiKeyView; secret: string } | FormFailure> {
       const parsed = parseForm(CreateKeyForm, form);
       if (!parsed.ok) return parsed;
-      const created = await createApiKey(control, session.tenantId, parsed.data.label);
+      let created: CreatedKey;
+      try {
+        created = await createApiKey(control, session.tenantId, parsed.data.label);
+      } catch (error) {
+        if (error instanceof ApiKeyLimitError) {
+          return refuse(
+            `This workspace already has ${MAX_API_KEYS_PER_TENANT} active API keys, the most it may hold. Revoke one you no longer use, then create the new one.`,
+          );
+        }
+        throw error;
+      }
       await audit(control, {
         tenantId: session.tenantId,
         actor: actor(session),

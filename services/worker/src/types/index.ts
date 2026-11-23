@@ -25,7 +25,10 @@ export type WorkerDeps = {
     defaultMaxConcurrentTurns: number;
     /** Turns this worker runs at once across every tenant (`MAX_RUNNING_TURNS`); bounds its tenant pools. */
     maxRunningTurns: number;
+    /** Look at the tenants whose work is due (`SWEEP_INTERVAL_SECONDS`). */
     sweepIntervalMs: number;
+    /** Look at every active tenant, the backstop for a lost hint (`FULL_SWEEP_INTERVAL_SECONDS`). */
+    fullSweepIntervalMs: number;
     enableEchoTool: boolean;
     /** Bytes of message bodies a turn starts with; older whole turns past it are left out (`readHistory`). */
     historyBudgetBytes: number;

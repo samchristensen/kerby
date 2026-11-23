@@ -82,6 +82,7 @@ async function startControl(config: ControlConfig) {
       tenantDbSslmode: config.tenantDbSslmode,
       templateDatabase: config.templateDatabase,
       pgDumpPath: config.pgDumpPath,
+      signupBudgetPerHour: config.signupBudgetPerHour,
     },
   };
   await ensureTemplate(deps);

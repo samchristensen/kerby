@@ -14,11 +14,14 @@ import type {
 } from "@kerby/contracts";
 import {
   authenticateApiKey,
+  createApiKey,
   createConsoleSession,
   findConsoleUser,
   getTenant,
+  hintTenantWork,
   insertConsoleUser,
   insertTenant,
+  MAX_API_KEYS_PER_TENANT,
   readConsoleSession,
   readTenantDbPassword,
   resolveTenantDbUrl,
@@ -90,7 +93,10 @@ async function endSessions(role: string): Promise<void> {
   await sleep(100); // pools drop the clients the server ended
 }
 
-async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
+async function start(
+  wrap?: (cluster: ClusterAdmin) => ClusterAdmin,
+  settings: Partial<ControlDeps["settings"]> = {},
+) {
   const control: TestControlDb = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
   const realCluster = createClusterAdmin(adminUrl());
@@ -125,6 +131,8 @@ async function start(wrap?: (cluster: ClusterAdmin) => ClusterAdmin) {
       clusterPort: Number(adminHost.port),
       templateDatabase,
       pgDumpPath: "pg_dump",
+      signupBudgetPerHour: 100,
+      ...settings,
     },
   };
   await ensureTemplate(deps);
@@ -322,7 +330,26 @@ describe("lifecycle", () => {
     expect(await authenticateApiKey(control.db, extra.secret)).toBeUndefined();
   });
 
-  it("deletes everything: database, role, objects, keys; and frees the name", async () => {
+  it("refuses a key past the tenant's cap with 409 api_key_limit, and still rotates one at the cap", async () => {
+    const { call, provision, control } = await start();
+    const { tenant, apiKey } = await provision("acme");
+    // The provisioned first key is one of them.
+    for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
+      await createApiKey(control.db, tenant.id, `k${i}`);
+    const refused = await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: "api_key_limit" } });
+
+    const rotate = await call("POST", `/v1/operator/tenants/${tenant.id}/keys/${apiKey.id}/rotate`);
+    expect(rotate.status).toBe(201);
+    const rotated = (await rotate.json()) as CreateKeyResponse;
+    expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
+    expect(
+      (await call("POST", `/v1/operator/tenants/${tenant.id}/keys`, { label: "x" })).status,
+    ).toBe(409);
+  });
+
+  it("deletes everything: database, role, objects, keys, wake-up hint; and frees the name", async () => {
     const { call, provision, cluster, control, blobs, buckets, tenantUrl } = await start();
     const { tenant, secret } = await provision("acme");
     const row = (await getTenant(control.db, tenant.id)) ?? expect.fail("no tenant row");
@@ -339,6 +366,7 @@ describe("lifecycle", () => {
     await own.close();
     const objects = () => Array.fromAsync(buckets.primary.list(tenantPrefix(tenant.id)));
     expect((await objects()).length).toBe(1);
+    await hintTenantWork(control.db, tenant.id);
 
     expect((await call("DELETE", `/v1/operator/tenants/${tenant.id}`)).status).toBe(204);
 
@@ -355,6 +383,10 @@ describe("lifecycle", () => {
           tenant.id,
         ])
       ).rowCount,
+    ).toBe(0);
+    expect(
+      (await control.db.query("select 1 from tenant_wakeups where tenant_id = $1", [tenant.id]))
+        .rowCount,
     ).toBe(0);
     expect((await getTenant(control.db, tenant.id))?.status).toBe("deleted");
     expect((await call("GET", `/v1/operator/tenants/${tenant.id}`)).status).toBe(404);
@@ -404,6 +436,7 @@ describe("console sign-up", () => {
       "select action, actor from audit_log order by id",
     );
     expect(rows).toEqual([
+      { action: "console.signup.attempt", actor: "console" },
       { action: "tenant.create", actor: "console" },
       { action: "console.signup", actor: "console" },
     ]);
@@ -471,6 +504,35 @@ describe("console sign-up", () => {
     expect(acme.rows[0]?.status).toBe("deleted");
     expect(await h.cluster.databaseExists(acme.rows[0]?.db_name ?? "")).toBe(false);
     expect((await h.control.db.query("select 1 from api_keys")).rowCount).toBe(0);
+  });
+
+  it("refuses sign-ups past the hour's budget with 429 signups_paused, whoever asks, and counts failed ones", async () => {
+    const h = await start(undefined, { signupBudgetPerHour: 3 });
+    const post = (name: string, email = `${name}@example.com`) =>
+      h.call("POST", "/v1/console/signups", { name, email, passwordHash }, CONSOLE_TOKEN);
+    expect((await post("acme")).status).toBe(201);
+    // A taken name provisions nothing, but it started a sign-up: it counts.
+    expect((await post("acme", "bob@example.com")).status).toBe(409);
+    // A taken email is refused before the budget: it does not.
+    expect((await post("globex", "acme@example.com")).status).toBe(409);
+    // Concurrent sign-ups take the last place once between them.
+    const statuses = await Promise.all(["b1", "b2", "b3"].map(async (n) => (await post(n)).status));
+    expect(statuses.filter((status) => status === 201)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(2);
+
+    const paused = await post("initech");
+    expect(paused.status).toBe(429);
+    expect(await paused.json()).toMatchObject({ error: { code: "signups_paused" } });
+    const retryAfter = Number(paused.headers.get("retry-after"));
+    expect(retryAfter).toBeGreaterThan(3500);
+    expect(retryAfter).toBeLessThanOrEqual(3600);
+    expect((await h.control.db.query("select 1 from tenants")).rowCount).toBe(2);
+
+    // An hour later the oldest place is free again.
+    await h.control.db.query(
+      "update audit_log set at = at - interval '61 minutes' where id = (select min(id) from audit_log where action = 'console.signup.attempt')",
+    );
+    expect((await post("initech")).status).toBe(201);
   });
 
   it("deleting the tenant removes its people and sessions and frees the email", async () => {

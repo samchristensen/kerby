@@ -3,7 +3,14 @@ import type { AgentEvent, AgentMessage, AgentRuntime } from "@kerby/agent";
 import type { Blobs } from "@kerby/blobs";
 import { createTestBlobs } from "@kerby/blobs/testing";
 import type { Limits } from "@kerby/contracts";
-import { createApiKey, insertTenant, putModelKey, setTenantStatus } from "@kerby/control-plane";
+import {
+  createApiKey,
+  hintTenantWork,
+  insertTenant,
+  putModelKey,
+  readWakeupVersion,
+  setTenantStatus,
+} from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import {
   conversationChannel,
@@ -16,7 +23,7 @@ import {
   readTrace,
 } from "@kerby/conversations";
 import { createTestTenant } from "@kerby/conversations/testing";
-import { type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
+import { type ControlDb, type TenantContext, type TenantDb, TenantPools } from "@kerby/db";
 import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
 import type {
   JudgmentOutcome,
@@ -71,6 +78,8 @@ type Options = {
   judgments?: WorkerDeps["judgments"];
   /** Wrap the object store the worker and the test share, to make part of it fail. */
   wrapBlobs?: (blobs: Blobs) => Blobs;
+  /** Wrap the control database the worker uses (the test keeps the real one), to make part of it fail. */
+  wrapControl?: (control: ControlDb) => ControlDb;
 };
 
 async function harness(options: Options = {}) {
@@ -85,7 +94,7 @@ async function harness(options: Options = {}) {
   cleanups.push(() => pools.close());
   const runtime = options.runtime ?? createDevelopmentRuntime();
   const deps: WorkerDeps = {
-    control: control.db,
+    control: options.wrapControl ? options.wrapControl(control.db) : control.db,
     pools,
     blobs,
     runtime,
@@ -97,6 +106,8 @@ async function harness(options: Options = {}) {
       defaultMaxConcurrentTurns: options.maxConcurrent ?? 4,
       maxRunningTurns: 50,
       sweepIntervalMs: 200,
+      // Out of reach of a test: work no hint announced is found only by the full sweep at start.
+      fullSweepIntervalMs: 600_000,
       enableEchoTool: options.echo ?? true,
       historyBudgetBytes: 8 * 1024 * 1024,
       ...options.settings,
@@ -116,17 +127,22 @@ async function harness(options: Options = {}) {
     return { id: row.id, ctx: { tenantId: row.id, db: database.db } };
   }
 
-  /** Post a user message the way the API does, optionally without the notification (the sweep must find it). */
+  /**
+   * Post a user message the way the API does: `hint` marks the tenant due and notifies (`hintTenantWork`);
+   * `hint-only` marks it due as if the NOTIFY were lost (the due sweep must find it); `none` neither, as if the
+   * api failed after its commit (only a full sweep finds it).
+   */
   async function post(
     t: Awaited<ReturnType<typeof tenant>>,
     conversationId: string,
     text: string,
-    notify = true,
+    announce: "hint" | "hint-only" | "none" = "hint",
   ) {
     const posted = await postUserMessage(t.ctx, blobs, conversationId, [{ type: "text", text }], {
       storageBytes: 1024 ** 3,
     });
-    if (notify) await control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    if (announce === "hint") await hintTenantWork(control.db, t.id);
+    if (announce === "hint-only") await hintWithoutNotify(control.db, t.id);
     return posted.seq;
   }
 
@@ -219,11 +235,25 @@ describe("a turn", () => {
     expect(types.indexOf("persisted:2")).toBeGreaterThan(types.indexOf("run_start"));
   });
 
-  it("finds work by its sweep when no notification arrives", async () => {
+  it("finds hinted work by its due sweep when no notification arrives", async () => {
     const h = await harness();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "quiet", false);
+    await h.post(t, conversation.id, "quiet", "hint-only");
+    expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
+  });
+
+  it("leaves work no hint announced to the full sweep, which finds it", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "lost hint", "none");
+    // Several due sweeps pass and none looks at the tenant.
+    await sleep(1000);
+    const { rows } = await t.ctx.db.query<{ state: string }>("select state from absurd.t_turns");
+    expect(rows).toEqual([{ state: "pending" }]);
+    // A worker's full sweep (here the one at start) looks at every active tenant.
+    await h.extraWorker({ runtime: createDevelopmentRuntime() });
     expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
   });
 
@@ -246,6 +276,56 @@ describe("a turn", () => {
     expect((executions.rows[0]?.first_at ?? new Date(0)).getTime()).toBeGreaterThanOrEqual(
       requested.rows[0]?.created_at.getTime() ?? Infinity,
     );
+  });
+});
+
+describe("wake-ups", () => {
+  it("runs a retry when its backoff ends, with no new hint or notification", async () => {
+    const h = await harness({ runtime: crashingOnce(createDevelopmentRuntime()) });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "echo ping", "none");
+    await t.ctx.db.query(
+      `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":1}'::jsonb`,
+    );
+    await hintTenantWork(h.control.db, t.id);
+
+    // The first attempt dies; the second waits a second, then a due sweep finds it from the time the worker recorded.
+    const all = await h.settled(t, conversation.id, 4);
+    expect(all.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    const attempts = await t.ctx.db.query<{ attempts: number }>(
+      "select attempts from absurd.t_turns",
+    );
+    expect(attempts.rows).toEqual([{ attempts: 2 }]);
+    expect(await readWakeupVersion(h.control.db, t.id)).toBe("1");
+  });
+
+  it("keeps a tenant due when a hint arrives while its claim runs", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    const pools = h.deps.pools;
+    const acquire = pools.acquire.bind(pools);
+    let arrived = false;
+    pools.acquire = async (tenantId) => {
+      const lease = await acquire(tenantId);
+      return {
+        db: lease.db,
+        // Released after the claim, before the worker records the tenant's next due time: a turn is posted and
+        // hinted meanwhile, its NOTIFY lost. The claim saw nothing; the hint must win.
+        release: async () => {
+          if (!arrived) {
+            arrived = true;
+            await h.post(t, conversation.id, "meanwhile", "hint-only");
+          }
+          await lease.release();
+        },
+      };
+    };
+
+    h.scheduler.notify(t.id); // nothing queued yet
+    expect((await h.settled(t, conversation.id, 2)).length).toBe(2);
+    expect(arrived).toBe(true);
   });
 });
 
@@ -273,6 +353,15 @@ async function retryFast(
 ) {
   await t.ctx.db.query(
     `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb, max_attempts = ${maxAttempts}`,
+  );
+}
+
+/** The api's hint without its NOTIFY: the tenant is due, but no worker is told. */
+async function hintWithoutNotify(db: ControlDb, tenantId: string) {
+  await db.query(
+    `insert into tenant_wakeups (tenant_id, due_at, version) values ($1, now(), 1)
+     on conflict (tenant_id) do update set due_at = now(), version = tenant_wakeups.version + 1`,
+    [tenantId],
   );
 }
 
@@ -352,9 +441,9 @@ describe("recovery", () => {
     const h = await harness({ runtime: crashingOnce(real) });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "echo ping", false);
+    await h.post(t, conversation.id, "echo ping", "none");
     await retryFast(t);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     const all = await h.settled(t, conversation.id, 4);
     expect(all.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
@@ -372,6 +461,37 @@ describe("recovery", () => {
     expect(seqs.rows.map((r) => r.seq)).toEqual([1, 2, 3, 4]);
   });
 
+  it("bills an answer whose attempt died between persisting and billing it, once, on the retry", async () => {
+    /** The worker's first usage insert fails, as if the control database went away for a moment. */
+    const failingFirstUsage = (db: ControlDb): ControlDb => {
+      let failed = false;
+      const query: ControlDb["query"] = (text, params) => {
+        if (!failed && text.trimStart().startsWith("insert into usage")) {
+          failed = true;
+          return Promise.reject(new Error("control database unreachable"));
+        }
+        return db.query(text, params);
+      };
+      return { ...db, query };
+    };
+    const h = await harness({ wrapControl: failingFirstUsage });
+    const t = await h.tenant("acme");
+    const conversation = await h.conversation(t);
+    await h.post(t, conversation.id, "hello", "none");
+    await retryFast(t);
+    await hintTenantWork(h.control.db, t.id);
+
+    const all = await h.settled(t, conversation.id, 2);
+    expect(all.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
+      { attempts: 2 },
+    ]);
+    const usage = await h.control.db.query("select dedupe_key from usage where tenant_id = $1", [
+      t.id,
+    ]);
+    expect(usage.rows).toEqual([{ dedupe_key: `${conversation.id}:2` }]);
+  });
+
   it("records why a turn failed for good, and is not busy afterwards", async () => {
     const failing: AgentRuntime = {
       name: "failing",
@@ -384,9 +504,9 @@ describe("recovery", () => {
     const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     await eventually("the turn to fail", async () => {
       const { rows } = await t.ctx.db.query<{ last_error: string | null }>(
@@ -519,9 +639,9 @@ describe("trace", () => {
     const h = await harness({ runtime: crashingOnce(createDevelopmentRuntime()) });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "echo ping", false);
+    await h.post(t, conversation.id, "echo ping", "none");
     await retryFast(t);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await h.settled(t, conversation.id, 4);
 
     const entries = await trace(h.blobs, t, conversation.id);
@@ -549,9 +669,9 @@ describe("trace", () => {
     });
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
 
     const lastError = await eventually("the turn to fail", async () => {
       const { rows } = await t.ctx.db.query<{ last_error: string | null }>(
@@ -657,9 +777,9 @@ describe("bring your own key", () => {
     const h = await harness({ runtime: failing, modelKeys: async () => secret });
     const t = await h.tenant("acme");
     const conversation = await insertConversation(t.ctx.db, { model: "anthropic/x", system: "s" });
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await retryFast(t, 2);
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await eventually("the turn to fail", () => lastError(t).then((e) => e ?? false));
     const runs = await t.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
     expect(runs.rows.length).toBeGreaterThan(0);
@@ -700,11 +820,11 @@ describe("fencing", () => {
     const logs = captureLogs();
     const t = await h.tenant("acme");
     const conversation = await h.conversation(t);
-    await h.post(t, conversation.id, "hello", false);
+    await h.post(t, conversation.id, "hello", "none");
     await t.ctx.db.query(
       `update absurd.t_turns set retry_strategy = '{"kind":"fixed","base_seconds":0}'::jsonb`,
     );
-    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    await hintTenantWork(h.control.db, t.id);
     await reachedGate.promise;
 
     // The second worker takes the turn over once the first lease lapses, and is held up before it answers.
@@ -908,12 +1028,12 @@ describe("judgments", () => {
     h: Harness,
     t: Tenant,
     body: TaskParams["run-judgment"] = request,
-    notify = true,
+    hint = true,
   ) {
     const { taskId } = await t.ctx.db.transaction((tx) =>
       spawnInTx(tx, "run-judgment", body, { idempotencyKey: `judgment:${crypto.randomUUID()}` }),
     );
-    if (notify) await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    if (hint) await hintTenantWork(h.control.db, t.id);
     return taskId;
   }
 
@@ -1012,7 +1132,7 @@ describe("judgments", () => {
     const b = await throwing.tenant("thrown");
     const id = await submit(throwing, b, request, false);
     await retryFast(b, 2);
-    await throwing.control.db.query("select pg_notify('tenant_work', $1)", [b.id]);
+    await hintTenantWork(throwing.control.db, b.id);
     expect((await finished(b, id)).state).toBe("failed");
     const runs = await b.ctx.db.query("select to_jsonb(r)::text as row from absurd.r_turns r");
     expect(JSON.stringify(runs.rows)).toContain("[redacted]");
@@ -1218,9 +1338,9 @@ describe("judgments", () => {
         system: "s",
         guardrails: [jailbreak],
       });
-      await h.post(t, conversation.id, "hello", false);
+      await h.post(t, conversation.id, "hello", "none");
       await retryFast(t, 2);
-      await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+      await hintTenantWork(h.control.db, t.id);
       await eventually("the turn to fail", () => lastError(t).then((e) => e ?? false));
       expect(await lastError(t)).toBe("the turn failed after 2 attempts");
       expect(histories).toEqual([]);

@@ -29,6 +29,12 @@ const controlConfigSchema = z.object({
    * route refuses everyone.
    */
   consoleToken: z.string().min(16).optional(),
+  /**
+   * Console sign-ups started in any hour, across every control process: each provisions a whole tenant database. Past
+   * it sign-up answers 429 `signups_paused` until the oldest of the hour's sign-ups ages out. Not the console's
+   * `SIGNUPS_PER_HOUR`, which counts one client address.
+   */
+  signupBudgetPerHour: z.coerce.number().int().positive().default(30),
   /** The database tenant databases are copied from; created and migrated at startup. */
   templateDatabase: z
     .string()

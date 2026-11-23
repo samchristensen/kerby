@@ -50,7 +50,9 @@ operations on one database.
 
 - Measured (plan 0001 log): the SDK claims on demand (`claimTasks`); 1000 tenant databases provision from a template in
   22 ms each; an LRU of 50 pools serves 1000 databases with 5.7 ms cold opens. A full sweep of 1000 tenants costs about 4 s, so the
-  worker claims for hinted tenants and sweeps a bounded set. Not yet measured: 10k tenants, Postgres backend memory, cross-host latency.
+  worker claims for hinted tenants: the api marks a tenant due in `tenant_wakeups` when it enqueues, a claim records when
+  the queue next needs a look, and the frequent sweep reads only due tenants; a full sweep runs every five minutes as the
+  backstop (amended 2026-11-23: until then every sweep was full). Not yet measured: 10k tenants, Postgres backend memory, cross-host latency.
 - New service `services/control` (operator API, provisioning, migration fan-out). Public `services/api` and
   `services/worker` stay tenant-agnostic code.
 - Cross-tenant queries (usage, billing) read the control plane, which the worker feeds from each assistant message's usage.

@@ -1,6 +1,6 @@
 // A tenant's model keys (bring your own key): one sealed row per provider in `tenant_secrets`, named
 // `model-key/<provider>`. The api seals (public key only); the worker opens inside a run.
-import type { ControlQueryable } from "@kerby/db";
+import { type ControlQueryable, isUuid } from "@kerby/db";
 import { type Opener, type Sealer, secretContext } from "@kerby/secrets";
 
 /** More providers than any tenant needs; stops a tenant filling the table with made-up names. */
@@ -50,8 +50,9 @@ export async function listModelKeys(
   db: ControlQueryable,
   tenantId: string,
 ): Promise<{ provider: string; createdAt: Date }[]> {
+  if (!isUuid(tenantId)) return [];
   const { rows } = await db.query<{ name: string; created_at: Date }>(
-    "select name, created_at from tenant_secrets where tenant_id::text = $1 and name like $2 order by name",
+    "select name, created_at from tenant_secrets where tenant_id = $1 and name like $2 order by name",
     [tenantId, `${PREFIX}%`],
   );
   return rows.map((row) => ({
@@ -65,8 +66,9 @@ export async function hasModelKey(
   tenantId: string,
   provider: string,
 ): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
-    "select 1 from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "select 1 from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, secretName(provider)],
   );
   return rowCount === 1;
@@ -78,8 +80,9 @@ export async function deleteModelKey(
   tenantId: string,
   provider: string,
 ): Promise<boolean> {
+  if (!isUuid(tenantId)) return false;
   const { rowCount } = await db.query(
-    "delete from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "delete from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, secretName(provider)],
   );
   return rowCount === 1;
@@ -93,8 +96,9 @@ export async function readModelKey(
   provider: string,
 ): Promise<string | undefined> {
   const name = secretName(provider);
+  if (!isUuid(tenantId)) return undefined;
   const { rows } = await db.query<{ ciphertext: Buffer }>(
-    "select ciphertext from tenant_secrets where tenant_id::text = $1 and name = $2",
+    "select ciphertext from tenant_secrets where tenant_id = $1 and name = $2",
     [tenantId, name],
   );
   const row = rows[0];

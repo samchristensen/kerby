@@ -22,7 +22,7 @@ export type SignupClient = (request: {
   passwordHash: string;
 }) => Promise<
   | { ok: true; tenantId: string; userId: string; secret: string }
-  | { ok: false; code: "name_taken" | "email_taken" }
+  | { ok: false; code: "name_taken" | "email_taken" | "signups_paused" }
 >;
 
 /**

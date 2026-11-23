@@ -220,6 +220,34 @@ flowchart LR
   in the dashboard (Observability, a widget's menu, Add monitor) and tested them (2026-11-22). They are not in the IaC
   file: its types have no setting for them.
 
+## J. Architecture review (2026-11-23)
+
+An outside review of security, performance and design; each finding checked in code (and measured where it said so).
+
+- [x] **J1 Lookups by id scanned whole tables.** `id::text = $1` on uuid primary keys (blobs, tenants, keys, secrets,
+  credentials) matches no index: measured 5.7 ms against 0.02 ms per blob lookup at 100k rows, and a rehydrate looks up
+  every message body. Compared as uuid after `isUuid` (`@kerby/db`); rule `queries` refuses the cast.
+- [x] **J2 Failed-auth limits outrun by concurrency.** Api and console checked the limit, did the lookup or the hash,
+  then counted the failure, so a burst passed. Now lookups (sign-ins) take turns per address, four at once, one at a time
+  per console account (`TurnsPerKey`), check the limit when their turn comes and count a failure before giving it up;
+  concurrent requests with one credential share one lookup. A first try that held a token per lookup refused 200 good
+  keys at once from one address (`make multitenant`'s load run caught it).
+- [x] **J3 Unbounded auth cache, unlimited API keys.** The cache kept every credential ever seen; any signed-in person
+  could mint keys without end. LRU of 10,000; 50 live keys per tenant.
+- [x] **J4 Sign-up capacity.** Each sign-up is a database and a sweep slot; the only limit was per address and process.
+  Control's `SIGNUP_BUDGET_PER_HOUR` (30) across all of them.
+- [x] **J5 Usage lost on a retried turn.** An attempt that died between persisting an answer and billing it never billed
+  it (the harness does not report a persisted message again); a turn now bills what it already holds first.
+- [x] **J6 Every sweep visited every tenant.** ADR 0004 said the worker sweeps a bounded set; the code swept all active
+  tenants every 10 s, cold-opening a pool per tenant past 50. `tenant_wakeups` hints; full sweep every 5 minutes.
+- [x] **J7 `NOTIFY` inside writing transactions.** Such commits serialize across the cluster (9.2k against 20k writes/s,
+  measured); a stored message is announced after its commit. Live deltas, already alone, stay on `pg_notify` until a
+  trigger (parked "Live events bus").
+- [x] **J8 Idle tenant transactions.** A stalled process could hold a claim's advisory lock until TCP gave up; tenant
+  sessions now end after 60 s idle in a transaction.
+- Recorded, not built: the stored-bytes sums and the bus (parked below), sign-up enumeration and the per-account lockout
+  (with "Console accounts"), large tool results in checkpoints and tool idempotency keys (plan 0001, M7).
+
 ## Parked behind a trigger
 
 No work until the trigger; the debt line stays and names it.
@@ -238,7 +266,9 @@ No work until the trigger; the debt line stays and names it.
   re-seals it, and audits it.
 - **Console accounts** ("The console (ADR 0014) has open sign-up"). Trigger: the console is advertised, a second console
   process, or the first sign-up abuse. Fix then: an email provider (a dependency and an ADR line) for verification and
-  password reset, a CAPTCHA or an edge on sign-up, and the sign-up and sign-in counters shared like the api's.
+  password reset, a CAPTCHA or an edge on sign-up, and the sign-up and sign-in counters shared like the api's; with email,
+  sign-up answers the same whether or not the address has an account (the email says which), and a reset link gets an
+  owner past a spent per-account limit.
 - **Chat gaps** ("The console's chat renders plain text"). Trigger: the first tenant asks. Fix then: a markdown renderer (a
   dependency and an ADR line), `DELETE /v1/conversations/:id` and rename, a title backfill for conversations older than
   `conversations/0003_browsing.sql`, and the first post of a new chat made atomic with its conversation.
@@ -255,6 +285,15 @@ No work until the trigger; the debt line stays and names it.
 - **Orphan bucket** ("IaC and buckets: an orphan bucket"). Trigger: a `railway` pin bump (retry `railway bucket delete -b
   modular-safe-wx5G -e production`), or Railway support offering to delete it. It has no instance, so it holds no data;
   `railway api` lists it in the project (id `d69d20f7-679d-4f10-90cd-d35aec412921`) and the dashboard does not.
+- **Stored-bytes total** ("The storage quota sums the tenant's whole blob index"). Trigger: a profile shows `storedBytes`
+  in post latency, or a tenant passes 100k blobs. Fix then: a one-row running total in the tenant database kept by
+  triggers on `blobs`, `prompts` and `prompt_versions` (contention is bounded by the tenant's concurrent turns), with a
+  backfill, read instead of the sums.
+- **Live events bus** ("Live events (text deltas, tool events) ride `pg_notify`"). Trigger: waits on the `NOTIFY` lock
+  (`object` locks in `pg_stat_activity`) under streaming load, or `api` running more than one process (then the same
+  store serves the shared counters of "Edge and shared counters"). Fix then: an ADR for Redis (pub/sub for live events,
+  counters with TTLs) behind one package; persisted notices may move too, so the api holds no `LISTEN` on tenant
+  databases; a bus that is down costs live deltas only, the 5 s poll still delivers stored messages.
 - **Handed to plan 0001**, no work here: stored bytes reported to `usage` (the other half of G2, M8); an operator endpoint
   for tenant limits (M9).
 
@@ -357,3 +396,11 @@ No work until the trigger; the debt line stays and names it.
 - 2026-11-22 C6 and I6 closed. The orphan bucket is still in the project: the API lists it (no instance), the dashboard does
   not, and the CLI, the API and an environment patch cannot delete it; parked with a retry trigger. The owner added the
   Monitors and tested them. The plan stays in `active/` because the parked items have no other home.
+- 2026-11-23 J1 to J8 (an architecture review). Measured first: the blob lookup scan (100k rows), and `NOTIFY` cost with
+  `pgbench` on Postgres 18, which disproved the review's first idea (`synchronous_commit = off` for deltas changes
+  nothing: a `NOTIFY` alone does not wait for a flush) and found the real cost (a `NOTIFY` inside a write). Redis stays
+  out until the "Live events bus" trigger fires (the owner's call).
+  Proof on a worktree stack: `make e2e` green (a worker killed mid-turn; the other took the turn when its lease's due time
+  came); `make multitenant` green (200 tenants, one turn each in 3.5 s, post to answer p95 907 ms, peak 211 connections);
+  60 concurrent requests with one good key on a cold cache all 200; 60 distinct bad keys at once: 30 looked up (401),
+  30 refused (429).

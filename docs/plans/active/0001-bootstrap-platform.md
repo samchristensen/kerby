@@ -66,6 +66,11 @@ Decisions: ADRs 0001-0004.
 
 - [ ] Per-tenant tool registry (MCP URL plus auth) with credentials in `secrets`; every call through `egress`
 - [ ] `executeTool` as a keyed step; the interrupted-write rule from lochmoore
+- [ ] A tool result goes to S3 (size-capped) and its step checkpoint holds the reference: checkpoint values stay small
+  (ARCHITECTURE.md), and today `executeTool` checkpoints the whole result, which only `echo` and `judge` keep small
+- [ ] Each MCP call carries an idempotency key (`<taskId>:<callId>`): a stalled worker and the one that took its lease
+  can both run a tool step before either checkpoints it (spike S2 measured the overlap; Absurd refuses the stale
+  checkpoint only after the side effect), so only the tool's server can drop the repeat
 
 ### M8 Limits and operations
 

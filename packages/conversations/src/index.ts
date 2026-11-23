@@ -38,7 +38,6 @@ export {
   findConversation,
   insertConversation,
   isBusy,
-  isConversationId,
   listConversations,
   recordToolExecution,
   setLastError,

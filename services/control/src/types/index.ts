@@ -26,11 +26,24 @@ export type ControlDeps = {
     tenantDbSslmode?: "disable" | "require" | "verify-full" | undefined;
     templateDatabase: string;
     pgDumpPath: string;
+    /** Console sign-ups started in any hour, across every control process (SIGNUP_BUDGET_PER_HOUR). */
+    signupBudgetPerHour: number;
   };
 };
 
 export class NotFoundError extends Error {
   override name = "NotFoundError";
+}
+
+/** The sign-up budget for the hour is spent; one place frees up in `retryAfterSeconds`. */
+export class SignupsPausedError extends Error {
+  override name = "SignupsPausedError";
+  readonly retryAfterSeconds: number;
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
 }
 
 /** A request that conflicts with the state of things; `code` is the error code the response carries. */

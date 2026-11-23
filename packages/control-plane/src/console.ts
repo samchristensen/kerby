@@ -2,12 +2,40 @@
 // their tenant at sign-up; the console reads people to check a password and keeps sessions. A session token is 256
 // random bits that only the browser holds (a cookie); the table keeps its SHA-256, so reading it signs no one in.
 import { createHash, randomBytes } from "node:crypto";
-import type { ControlQueryable } from "@kerby/db";
+import type { ControlDb, ControlQueryable } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
+import { audit } from "./audit.ts";
 import { TENANT_COLUMNS, type TenantRecord, type TenantRow, tenantFromRow } from "./tenants.ts";
 
 export class EmailTakenError extends Error {
   override name = "EmailTakenError";
+}
+
+/** The audit action holding a sign-up's place in the hourly budget; migration 0008 indexes it. */
+const SIGNUP_ATTEMPT = "console.signup.attempt";
+
+/**
+ * Take a place in the sign-up budget: at most `perHour` sign-ups started in any hour, counted across every control
+ * process. A place is an audit row written before anything is provisioned, so a sign-up that fails still counts. The
+ * count and the insert run under one lock, so concurrent sign-ups cannot all count the same rows. 0 when the place is
+ * taken, else the seconds until one frees up.
+ */
+export async function reserveConsoleSignup(db: ControlDb, perHour: number): Promise<number> {
+  return db.transaction(async (tx) => {
+    await tx.query("select pg_advisory_xact_lock(hashtext('kerby.console_signups'))");
+    const { rows } = await tx.query<{ left: number }>(
+      `select extract(epoch from at + interval '1 hour' - now())::float8 as left
+         from audit_log
+        where action = '${SIGNUP_ATTEMPT}' and at > now() - interval '1 hour'
+        order by at desc
+        limit $1`,
+      [perHour],
+    );
+    const freesFirst = rows[perHour - 1];
+    if (freesFirst) return Math.max(1, Math.ceil(freesFirst.left));
+    await audit(tx, { tenantId: null, actor: "console", action: SIGNUP_ATTEMPT });
+    return 0;
+  });
 }
 
 export type ConsoleUser = {

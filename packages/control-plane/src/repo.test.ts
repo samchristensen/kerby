@@ -1,4 +1,4 @@
-import { createControlDb } from "@kerby/db";
+import { type ControlDb, createControlDb } from "@kerby/db";
 import {
   createOpener,
   createSealer,
@@ -9,6 +9,7 @@ import {
 } from "@kerby/secrets";
 import { describe, expect, it } from "vitest";
 import {
+  ApiKeyLimitError,
   audit,
   authenticateApiKey,
   authenticateConsoleSession,
@@ -20,12 +21,15 @@ import {
   findConsoleUser,
   getTenant,
   hasModelKey,
+  hintTenantWork,
   insertConsoleUser,
   insertTenant,
   listApiKeys,
+  listDueTenants,
   listModelKeys,
   listTenants,
   listTenantsWithoutDbPassword,
+  MAX_API_KEYS_PER_TENANT,
   MAX_MODEL_KEYS_PER_TENANT,
   ModelKeyLimitError,
   newTenantDbPassword,
@@ -34,12 +38,14 @@ import {
   readConsoleSession,
   readModelKey,
   readTenantDbPassword,
+  readWakeupVersion,
   recordUsage,
   resealTenantDbPasswords,
   resolveTenantDbUrl,
   revokeApiKey,
   setRolePassword,
   setTenantStatus,
+  settleTenantWakeup,
   storeTenantDbPassword,
   TenantNameTakenError,
 } from "./index.ts";
@@ -191,6 +197,100 @@ describe("api keys", () => {
     expect(await revokeApiKey(control.db, b.id, key.id)).toBe(false);
     expect((await authenticateApiKey(control.db, secret))?.tenant.id).toBe(a.id);
   });
+
+  it("caps a tenant's live keys, even created at once, and a key revoked in the same transaction frees its place", async () => {
+    await using control = await createTestControlDb();
+    const tenant = await insertTenant(control.db, newTenant("acme"));
+    const other = await insertTenant(control.db, newTenant("other"));
+    const settled = await Promise.allSettled(
+      Array.from({ length: MAX_API_KEYS_PER_TENANT + 5 }, () =>
+        createApiKey(control.db, tenant.id),
+      ),
+    );
+    const refused = settled.filter((result) => result.status === "rejected");
+    expect(refused).toHaveLength(5);
+    for (const result of refused) expect(result.reason).toBeInstanceOf(ApiKeyLimitError);
+    const live = await listApiKeys(control.db, tenant.id);
+    expect(live).toHaveLength(MAX_API_KEYS_PER_TENANT);
+    // Another tenant's cap is its own.
+    await createApiKey(control.db, other.id);
+
+    // Rotation at the cap: revoke and create in one transaction.
+    const oldest = live[0] ?? expect.fail("no key");
+    const rotated = await control.db.transaction(async (tx) => {
+      expect(await revokeApiKey(tx, tenant.id, oldest.id)).toBe(true);
+      return createApiKey(tx, tenant.id, "rotated");
+    });
+    expect((await authenticateApiKey(control.db, rotated.secret))?.tenant.id).toBe(tenant.id);
+    await expect(createApiKey(control.db, tenant.id)).rejects.toBeInstanceOf(ApiKeyLimitError);
+    // A revoked key no longer counts.
+    expect(await revokeApiKey(control.db, tenant.id, rotated.key.id)).toBe(true);
+    await createApiKey(control.db, tenant.id);
+  });
+});
+
+describe("tenant wakeups", () => {
+  const active = async (db: ControlDb, name: string) => {
+    const tenant = await insertTenant(db, newTenant(name));
+    await setTenantStatus(db, tenant.id, "active");
+    return tenant;
+  };
+  /** Sorted: two hints in the same instant have no order. */
+  const dueNames = async (db: ControlDb) => (await listDueTenants(db)).map((t) => t.name).sort();
+
+  it("lists active tenants that were hinted, until a worker settles them", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    const b = await active(control.db, "b");
+    const suspended = await active(control.db, "s");
+    expect(await dueNames(control.db)).toEqual([]);
+    await hintTenantWork(control.db, a.id);
+    await hintTenantWork(control.db, b.id);
+    await hintTenantWork(control.db, suspended.id);
+    await setTenantStatus(control.db, suspended.id, "suspended");
+    expect(await dueNames(control.db)).toEqual(["a", "b"]);
+
+    const version = await readWakeupVersion(control.db, a.id);
+    expect(await settleTenantWakeup(control.db, a.id, version, null)).toBe(true);
+    expect(await dueNames(control.db)).toEqual(["b"]);
+    // A due time in the future is not due yet; one in the past is.
+    const bVersion = await readWakeupVersion(control.db, b.id);
+    await settleTenantWakeup(control.db, b.id, bVersion, new Date(Date.now() + 60_000));
+    expect(await dueNames(control.db)).toEqual([]);
+    await settleTenantWakeup(control.db, b.id, bVersion, new Date(Date.now() - 1000));
+    expect(await dueNames(control.db)).toEqual(["b"]);
+  });
+
+  it("never lets a settle overwrite a hint that arrived after its version was read", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    await hintTenantWork(control.db, a.id);
+    const before = await readWakeupVersion(control.db, a.id);
+    await hintTenantWork(control.db, a.id); // arrives while the worker claims
+    expect(await settleTenantWakeup(control.db, a.id, before, null)).toBe(false);
+    expect(await dueNames(control.db)).toEqual(["a"]);
+  });
+
+  it("settles a tenant with no hint yet, and a hint racing that first settle still wins", async () => {
+    await using control = await createTestControlDb();
+    const a = await active(control.db, "a");
+    const b = await active(control.db, "b");
+    expect(await readWakeupVersion(control.db, a.id)).toBe("0");
+    expect(await settleTenantWakeup(control.db, a.id, "0", new Date(Date.now() - 1000))).toBe(true);
+    expect(await dueNames(control.db)).toEqual(["a"]);
+
+    const none = await readWakeupVersion(control.db, b.id);
+    await hintTenantWork(control.db, b.id);
+    expect(await settleTenantWakeup(control.db, b.id, none, null)).toBe(false);
+    expect(await dueNames(control.db)).toEqual(["a", "b"]);
+  });
+
+  it("treats an id that is not a uuid as no tenant", async () => {
+    await using control = await createTestControlDb();
+    await hintTenantWork(control.db, "not-a-uuid");
+    expect(await readWakeupVersion(control.db, "not-a-uuid")).toBe("0");
+    expect(await settleTenantWakeup(control.db, "not-a-uuid", "0", null)).toBe(false);
+  });
 });
 
 /** A handle on the control database as one of the limited service roles, given a password the way control does. */
@@ -227,7 +327,12 @@ describe("the limited app role (what api and worker connect as)", () => {
           outputTokens: 1,
         }),
       ).toBe(true);
-      await app.query("select pg_notify('tenant_work', 'x')");
+      // api: hint a tenant's work and ring the doorbell; worker: list due tenants, read and settle the hint
+      await hintTenantWork(app, tenant.id);
+      expect((await listDueTenants(app)).map((t) => t.name)).toEqual(["acme"]);
+      const version = await readWakeupVersion(app, tenant.id);
+      expect(await settleTenantWakeup(app, tenant.id, version, null)).toBe(true);
+      expect(await listDueTenants(app)).toEqual([]);
       // api and worker: open the tenant's database with its stored password
       expect(new URL(await resolveTenantDbUrl(app, box, tenant.id)).password).toBe(
         "tenant-db-password",
@@ -245,6 +350,7 @@ describe("the limited app role (what api and worker connect as)", () => {
         "delete from audit_log",
         "update tenant_db_credentials set ciphertext = '\\x00'",
         "delete from tenant_db_credentials",
+        "delete from tenant_wakeups",
       ]) {
         await expect(app.query(sql), sql).rejects.toThrow(/permission denied/);
       }

@@ -15,6 +15,7 @@ export {
   findConsoleUser,
   insertConsoleUser,
   readConsoleSession,
+  reserveConsoleSignup,
 } from "./console.ts";
 export {
   listTenantsWithoutDbPassword,
@@ -26,11 +27,13 @@ export {
   storeTenantDbPassword,
 } from "./db-credentials.ts";
 export {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   authenticateApiKey,
   type CreatedKey,
   createApiKey,
   listApiKeys,
+  MAX_API_KEYS_PER_TENANT,
   parseApiKey,
   revokeApiKey,
 } from "./keys.ts";
@@ -55,3 +58,9 @@ export {
   type TenantRecord,
 } from "./tenants.ts";
 export { recordUsage } from "./usage.ts";
+export {
+  hintTenantWork,
+  listDueTenants,
+  readWakeupVersion,
+  settleTenantWakeup,
+} from "./wakeups.ts";

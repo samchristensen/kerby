@@ -43,7 +43,12 @@ import {
   resumeTenant,
   suspendTenant,
 } from "../service/tenants.ts";
-import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
+import {
+  ConflictError,
+  type ControlDeps,
+  NotFoundError,
+  SignupsPausedError,
+} from "../types/index.ts";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
 
@@ -78,6 +83,13 @@ function mapErrors(handler: Route[2]): Route[2] {
     } catch (error) {
       if (error instanceof NotFoundError) throw new HttpError(404, "not_found", error.message);
       if (error instanceof ConflictError) throw new HttpError(409, error.code, error.message);
+      if (error instanceof SignupsPausedError) {
+        return json(
+          429,
+          { error: { code: "signups_paused", message: error.message } },
+          { "retry-after": String(error.retryAfterSeconds) },
+        );
+      }
       throw error;
     }
   };

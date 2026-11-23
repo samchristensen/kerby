@@ -1,8 +1,14 @@
 // Self-serve sign-up (ADR 0014): the console asks for a tenant and its first person in one call. The console checks the
 // password's strength and hashes it; control provisions as it does for an operator and stores the hash it was given.
-import { audit, EmailTakenError, findConsoleUser, insertConsoleUser } from "@kerby/control-plane";
+import {
+  audit,
+  EmailTakenError,
+  findConsoleUser,
+  insertConsoleUser,
+  reserveConsoleSignup,
+} from "@kerby/control-plane";
 import { errorFields, log, withTenant } from "@kerby/observability";
-import { ConflictError, type ControlDeps } from "../types/index.ts";
+import { ConflictError, type ControlDeps, SignupsPausedError } from "../types/index.ts";
 import { deleteTenant, type Provisioned, provisionTenant } from "./tenants.ts";
 
 export type SignupRequest = { name: string; email: string; passwordHash: string };
@@ -14,6 +20,15 @@ export async function signUp(
   // Checked first so a taken address costs no database; the unique index below settles a race.
   if (await findConsoleUser(deps.control, request.email)) {
     throw new ConflictError("an account with this email exists", "email_taken");
+  }
+  // Every sign-up provisions a whole database: past the hour's budget (SIGNUP_BUDGET_PER_HOUR, shared by every control
+  // process) none starts, whoever asks.
+  const wait = await reserveConsoleSignup(deps.control, deps.settings.signupBudgetPerHour);
+  if (wait > 0) {
+    throw new SignupsPausedError(
+      `sign-ups are paused: ${deps.settings.signupBudgetPerHour} started in the last hour (SIGNUP_BUDGET_PER_HOUR); retry in ${wait} s`,
+      wait,
+    );
   }
   const provisioned = await provisionTenant(deps, { name: request.name }, "console");
   const tenantId = provisioned.tenant.id;

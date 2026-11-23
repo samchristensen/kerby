@@ -25,6 +25,7 @@ export function createSignupClient(controlUrl: string, token: string): SignupCli
     if (response.status === 409 && (code === "name_taken" || code === "email_taken")) {
       return { ok: false, code };
     }
+    if (response.status === 429 && code === "signups_paused") return { ok: false, code };
     // Anything else is a fault on our side (a bad token, control down): the person sees an error page, the log says why.
     throw new Error(`control refused a sign-up: ${response.status} ${code ?? "(no error code)"}`);
   };

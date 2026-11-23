@@ -1,4 +1,5 @@
 import {
+  ApiKeyLimitError,
   type ApiKeyRecord,
   audit,
   type CreatedKey,
@@ -6,7 +7,7 @@ import {
   listApiKeys,
   revokeApiKey,
 } from "@kerby/control-plane";
-import { type ControlDeps, NotFoundError } from "../types/index.ts";
+import { ConflictError, type ControlDeps, NotFoundError } from "../types/index.ts";
 import { getTenantRecord } from "./tenants.ts";
 
 const ACTOR = "operator";
@@ -17,7 +18,10 @@ export async function createKey(
   label?: string,
 ): Promise<CreatedKey> {
   await getTenantRecord(deps, tenantId);
-  const created = await createApiKey(deps.control, tenantId, label);
+  const created = await createApiKey(deps.control, tenantId, label).catch((error: unknown) => {
+    if (error instanceof ApiKeyLimitError) throw new ConflictError(error.message, "api_key_limit");
+    throw error;
+  });
   await audit(deps.control, {
     tenantId,
     actor: ACTOR,
