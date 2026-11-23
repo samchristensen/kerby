@@ -72,9 +72,11 @@ console.log(r.status, await r.text());'
 
 `limits` is optional: an absent key takes the default (`maxConcurrentTurns` 4, `requestsPerMinute` 600 per api
 process, `storageBytes` 1 GiB; ARCHITECTURE.md#tenancy). The response holds the tenant's API key once. Then
-`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. After a release that adds tenant
-migrations, fan them out with `POST /v1/operator/migrate` the same way: code must tolerate schema versions n and n-1
-while it runs.
+`curl https://<api domain>/v1/conversations -H "authorization: Bearer <key>" -d '{}'`. Tenant migrations fan out to every
+tenant database during a release: `scripts/railway.ts deploy` calls `POST /v1/operator/migrate` inside the control
+container after control rolls out and before the api, worker and console do, and stops the release if any tenant fails, so a
+release that adds one needs no manual step. Run the call yourself (as above) to retry a failed tenant (the `migration
+fan-out failed` alert). Code must tolerate schema versions n and n-1 while it runs.
 
 ## The console
 
