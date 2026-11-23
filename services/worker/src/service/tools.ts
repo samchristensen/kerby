@@ -33,7 +33,7 @@ export interface TurnTools {
    * Opens what a call needs before it counts as begun: a remote tool's credential and session. A credential that cannot
    * be read throws here, so the retried turn does not take the call for one that began and report a write as interrupted.
    */
-  prepare(name: string): Promise<void>;
+  prepare(name: string, signal: AbortSignal): Promise<void>;
   /** Runs a call. A failure of the tool or its server is an error result; only a lost run (`signal`) throws. */
   execute(call: ToolCall, signal: AbortSignal): Promise<ToolResult>;
   /** `text` without any tool credential this run opened. */
@@ -198,9 +198,9 @@ function runnable(
     specs: offered.map(specOf),
     repeatable: (name) => byName.get(name)?.effect === "read",
     scrub,
-    async prepare(name) {
+    async prepare(name, signal) {
       const tool = byName.get(name);
-      if (tool && tool.server.kind !== "builtin") await sessionFor(tool.server);
+      if (tool && tool.server.kind !== "builtin") await sessionFor(tool.server, signal);
     },
     async execute(call, signal) {
       const tool = byName.get(call.name);
