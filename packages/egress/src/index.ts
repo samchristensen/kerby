@@ -97,6 +97,12 @@ export type EgressOptions = {
   readonly maxRequestBytes?: number;
   /** Decoded bytes; default 16 MiB. */
   readonly maxResponseBytes?: number;
+  /**
+   * Host names (exact, case-insensitive) whose addresses skip the range check: a local MCP server for the proof on the
+   * Compose stack. Development only; the services refuse it outside `KERBY_ENVIRONMENT=development` (ADR 0019). A
+   * redirect away from one is checked like any other hop.
+   */
+  readonly allowedHosts?: readonly string[];
 };
 
 export type EgressFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -276,6 +282,7 @@ export function createEgressFetch(options: EgressOptions = {}): EgressFetch {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const maxRequestBytes = options.maxRequestBytes ?? 8 * MiB;
   const maxResponseBytes = options.maxResponseBytes ?? 16 * MiB;
+  const allowedHosts = new Set((options.allowedHosts ?? []).map((host) => host.toLowerCase()));
   // Own agents: a pooled socket was opened to an address these rules allowed.
   const agents = {
     http: new http.Agent({ keepAlive: true }),
@@ -295,6 +302,7 @@ export function createEgressFetch(options: EgressOptions = {}): EgressFetch {
       }
       if (addresses.length === 0) throw new EgressError("dns", `${hostname} has no addresses`);
     }
+    if (allowedHosts.has(hostname.toLowerCase())) return addresses;
     for (const { address } of addresses) {
       if (!isIP(address)) throw new EgressError("dns", `${hostname} resolved to "${address}"`);
       const why = blockedBy(rules, address);

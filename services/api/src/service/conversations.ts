@@ -30,21 +30,26 @@ import {
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { errorFields, log } from "@kerby/observability";
-import { type ApiDeps, NotFoundError } from "../types/index.ts";
+import { listConversationTools, setConversationTools, toolPatterns } from "@kerby/tools";
+import { type ApiDeps, NotFoundError, type Principal } from "../types/index.ts";
 import { assertJudgmentModel, InvalidModelError } from "./models.ts";
 import { renderChatPrompt } from "./prompts.ts";
+import { assertHolds, conversationToolRefs } from "./tools.ts";
 
-function conversationResource(record: {
-  id: string;
-  externalUserId: string | null;
-  model: string;
-  system: string;
-  title: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-  guardrails: Conversation["guardrails"];
-  prompt: Conversation["prompt"];
-}): Conversation {
+function conversationResource(
+  record: {
+    id: string;
+    externalUserId: string | null;
+    model: string;
+    system: string;
+    title: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    guardrails: Conversation["guardrails"];
+    prompt: Conversation["prompt"];
+  },
+  tools: string[],
+): Conversation {
   return {
     id: record.id,
     externalUserId: record.externalUserId,
@@ -55,7 +60,7 @@ function conversationResource(record: {
     updatedAt: record.updatedAt.toISOString(),
     guardrails: record.guardrails,
     prompt: record.prompt,
-    tools: [],
+    tools,
   };
 }
 
@@ -87,6 +92,7 @@ export async function listTenantConversations(
 export async function createConversation(
   deps: ApiDeps,
   ctx: TenantContext,
+  principal: Principal,
   request: CreateConversationRequest,
 ): Promise<Conversation> {
   const fromPrompt = request.prompt && (await renderChatPrompt(ctx, request.prompt));
@@ -117,14 +123,21 @@ export async function createConversation(
   const guardrails = fromPrompt?.guardrails ?? request.guardrails ?? [];
   for (const model of new Set(guardrails.map((g) => g.model ?? DEFAULT_JUDGMENT_MODEL)))
     await assertJudgmentModel(deps, ctx.tenantId, model);
-  const record = await insertConversation(ctx.db, {
-    externalUserId: request.externalUserId,
-    model,
-    system: fromPrompt?.text ?? request.system ?? deps.settings.defaultSystem,
-    guardrails,
-    prompt: fromPrompt && { name: fromPrompt.name, version: fromPrompt.version },
+  // Tools are named, never implied: resolved to server ids now, checked against the caller's grants, and stored with
+  // the conversation in one transaction.
+  const patterns = fromPrompt?.tools ?? request.tools ?? [];
+  return ctx.db.transaction(async (tx) => {
+    const refs = await conversationToolRefs(deps, tx, ctx.tenantId, principal, patterns);
+    const record = await insertConversation(tx, {
+      externalUserId: request.externalUserId,
+      model,
+      system: fromPrompt?.text ?? request.system ?? deps.settings.defaultSystem,
+      guardrails,
+      prompt: fromPrompt && { name: fromPrompt.name, version: fromPrompt.version },
+    });
+    await setConversationTools(tx, record.id, refs);
+    return conversationResource(record, await toolPatterns(tx, refs));
   });
-  return conversationResource(record);
 }
 
 const asParts = (content: PostMessageRequest["content"]): ContentPart[] =>
@@ -132,17 +145,21 @@ const asParts = (content: PostMessageRequest["content"]): ContentPart[] =>
 
 /**
  * Append the message, enqueue its turn, and tell the workers there is work for this tenant. Refused when the tenant's
- * stored bytes, with this message, would pass `storageBytes`.
+ * stored bytes, with this message, would pass `storageBytes`, or when the caller does not hold every tool the
+ * conversation names (so a restricted key cannot push someone else's conversation into tools it was not given).
  */
 export async function postMessage(
   deps: ApiDeps,
   ctx: TenantContext,
+  principal: Principal,
   conversationId: string,
   request: PostMessageRequest,
   storageBytes: number,
 ): Promise<PostMessageResponse> {
   if (!(await findConversation(ctx.db, conversationId)))
     throw new NotFoundError("conversation not found");
+  if (principal.role !== "admin")
+    await assertHolds(ctx.db, principal, await listConversationTools(ctx.db, conversationId));
   let seq: number;
   try {
     ({ seq } = await postUserMessage(ctx, deps.blobs, conversationId, asParts(request.content), {
@@ -181,8 +198,9 @@ export async function getConversation(
     readMessages(ctx, deps.blobs, conversationId, page),
     isBusy(ctx.db, conversationId),
   ]);
+  const tools = await toolPatterns(ctx.db, await listConversationTools(ctx.db, conversationId));
   return {
-    conversation: conversationResource(record),
+    conversation: conversationResource(record, tools),
     messages: messages.map(toPublic),
     nextAfter,
     busy,

@@ -34,6 +34,8 @@ export type ApiDeps = {
     failedAuthPerMinute: number;
     /** Take the client address from the left-most `X-Forwarded-For` entry (behind Railway's proxy) instead of the socket. */
     trustProxy: boolean;
+    /** Conversations may name `kerby/echo`, a development tool (ADR 0019). Off in production. */
+    enableEchoTool: boolean;
   };
 };
 
