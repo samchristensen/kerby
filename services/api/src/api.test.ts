@@ -15,6 +15,7 @@ import {
   ListToolServersResponseSchema,
   MAX_CONVERSATION_TOOLS,
   MAX_TOOL_SERVERS,
+  StartToolServerOAuthResponseSchema,
   ToolGrantsSchema,
   ToolSchema,
   ToolServerSchema,
@@ -38,6 +39,9 @@ import { appendTrace, notifyLive } from "@kerby/conversations";
 import { completeTurnWith, createTestTenant, type TestTenant } from "@kerby/conversations/testing";
 import { LISTEN_APPLICATION_NAME, TenantPools } from "@kerby/db";
 import { createTenantExecutor, type TaskHandlers } from "@kerby/durable";
+import { createEgressFetch } from "@kerby/egress";
+import { parseOAuthCredential } from "@kerby/mcp";
+import { startOAuthFixture } from "@kerby/mcp/testing";
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { serve } from "@kerby/serve";
 import { findToolServer, recordSync, updateTool } from "@kerby/tools";
@@ -65,6 +69,8 @@ async function harness(
     trustProxy?: boolean;
     enableEchoTool?: boolean;
     maxStreamsPerProcess?: number;
+    /** The console's public address; default an https one. Null: unset. */
+    consolePublicUrl?: string | null;
   } = {},
 ) {
   const keys = generateSecretsKeyPair();
@@ -81,6 +87,8 @@ async function harness(
     pools,
     blobs,
     sealer: createSealer(keys.publicKey),
+    // The egress guard as production builds it, letting the loopback OAuth fixture through.
+    toolFetch: createEgressFetch({ blockedRanges: [] }),
     settings: {
       defaultModel: "faux/faux-1",
       modelProviders: options.providers ?? ["anthropic", "openai", "opencode"],
@@ -96,6 +104,11 @@ async function harness(
       failedAuthPerMinute: options.failedAuthPerMinute ?? 1000,
       trustProxy: options.trustProxy ?? false,
       enableEchoTool: options.enableEchoTool ?? false,
+      consolePublicUrl:
+        options.consolePublicUrl === null
+          ? undefined
+          : (options.consolePublicUrl ?? "https://console.kerby.test"),
+      insecureOAuthHosts: ["127.0.0.1"],
     },
   };
   const server = await serve(createApiApp(deps), { host: "127.0.0.1", port: 0 });
@@ -2205,5 +2218,295 @@ describe("tools (ADR 0019)", () => {
       await (await h.call(t.secret, "GET", "/v1/tools")).json(),
     );
     expect(available.tools.map((tool) => tool.pattern)).toEqual(["kerby/echo"]);
+  });
+});
+
+describe("OAuth connections to tool servers (ADR 0019)", () => {
+  const CALLBACK = "https://console.kerby.test/dashboard/tools/oauth/callback";
+
+  async function oauthFixture(options: Parameters<typeof startOAuthFixture>[0] = {}) {
+    const fixture = await startOAuthFixture({ tools: [{ name: "search" }], ...options });
+    cleanups.push(() => fixture.close());
+    return fixture;
+  }
+
+  async function oauthServer(h: Harness, t: Tenant, url: string, slug = "crm") {
+    const response = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug,
+      url,
+      auth: { kind: "oauth" },
+    });
+    expect(response.status).toBe(201);
+    return ToolServerSchema.parse(await response.json());
+  }
+
+  async function start(h: Harness, secret: string, slug = "crm"): Promise<URL> {
+    const response = await h.call(secret, "POST", `/v1/tool-servers/${slug}/oauth/start`);
+    expect(response.status).toBe(200);
+    return new URL(
+      StartToolServerOAuthResponseSchema.parse(await response.json()).authorizationUrl,
+    );
+  }
+
+  /** The person's browser at the authorization server, which approves at once: what it brings back to the callback. */
+  async function approve(url: URL) {
+    const response = await fetch(url, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const back = new URL(response.headers.get("location") ?? "");
+    expect(`${back.origin}${back.pathname}`).toBe(CALLBACK);
+    const query = back.searchParams;
+    const value = (name: string) => query.get(name) ?? undefined;
+    return {
+      state: value("state"),
+      iss: value("iss"),
+      code: value("code"),
+      error: value("error"),
+      errorDescription: value("error_description"),
+    };
+  }
+
+  const finish = (h: Harness, secret: string, body: object) =>
+    h.call(secret, "POST", "/v1/tool-servers/oauth/callback", body);
+
+  const ErrorBody = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
+  const errorOf = async (response: Response) => ErrorBody.parse(await response.json()).error;
+
+  const syncCount = async (t: Tenant) =>
+    (await t.ctx.db.query("select 1 from absurd.t_turns where task_name = 'sync-tool-server'"))
+      .rowCount;
+
+  it("connects with dynamic registration, PKCE, state and resource; seals the tokens and lists the tools again", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const fixture = await oauthFixture();
+    const created = await oauthServer(h, t, fixture.mcp.url);
+    expect(created).toMatchObject({
+      auth: { kind: "oauth" },
+      hasCredential: false,
+      status: "syncing",
+    });
+    expect(await syncCount(t)).toBe(1);
+
+    const url = await start(h, t.secret);
+    expect(fixture.registrations).toEqual([
+      expect.objectContaining({ redirect_uris: [CALLBACK], token_endpoint_auth_method: "none" }),
+    ]);
+    const query = url.searchParams;
+    expect(query.get("client_id")).toMatch(/^client-/);
+    expect(query.get("response_type")).toBe("code");
+    expect(query.get("redirect_uri")).toBe(CALLBACK);
+    expect(query.get("code_challenge_method")).toBe("S256");
+    expect(query.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(query.get("state")?.length).toBeGreaterThanOrEqual(43);
+    expect(query.get("resource")).toBe(fixture.mcp.url);
+    expect(query.has("scope")).toBe(false);
+    // The flow is kept by the state's hash, never the state itself.
+    const flows = await t.ctx.db.query<{ state_hash: string }>(
+      "select state_hash from tool_oauth_flows",
+    );
+    expect(flows.rows).toHaveLength(1);
+    expect(flows.rows[0]?.state_hash).not.toBe(query.get("state"));
+
+    const answer = await approve(url);
+    const finished = await finish(h, t.secret, answer);
+    expect(finished.status).toBe(200);
+    const raw = await finished.text();
+    const server = ToolServerSchema.parse(JSON.parse(raw));
+    expect(server).toMatchObject({ slug: "crm", hasCredential: true, status: "syncing" });
+    expect(await syncCount(t)).toBe(2);
+    expect((await t.ctx.db.query("select 1 from tool_oauth_flows")).rowCount).toBe(0);
+
+    const exchange = fixture.tokenRequests[0];
+    expect(exchange?.get("grant_type")).toBe("authorization_code");
+    expect(exchange?.get("resource")).toBe(fixture.mcp.url);
+    expect(exchange?.get("code_verifier")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // Sealed: only the private key opens it, and nothing returns it.
+    const record = await findToolServer(t.ctx.db, "crm");
+    const opened = await readToolCredential(
+      h.control.db,
+      createOpener([h.keys.privateKey]),
+      t.id,
+      record?.id ?? "",
+    );
+    const credential = parseOAuthCredential(opened ?? "");
+    expect(credential).toMatchObject({
+      kind: "oauth",
+      issuer: fixture.issuer,
+      tokenEndpoint: `${fixture.issuer}/token`,
+      clientId: query.get("client_id"),
+      clientAuth: "none",
+      resource: fixture.mcp.url,
+    });
+    const tokens = [credential?.accessToken ?? "?", credential?.refreshToken ?? "?"];
+    const responses = [
+      raw,
+      await (await h.call(t.secret, "GET", "/v1/tool-servers/crm")).text(),
+      await (await h.call(t.secret, "GET", "/v1/tool-servers")).text(),
+    ];
+    const audit = await h.control.db.query<{ action: string; detail: object }>(
+      "select action, detail from audit_log where action like 'tool_server%' order by id",
+    );
+    for (const token of tokens) {
+      for (const text of [...responses, JSON.stringify(audit.rows)])
+        expect(text).not.toContain(token);
+    }
+    expect(audit.rows.at(-1)).toEqual({
+      action: "tool_server.oauth",
+      detail: { serverId: record?.id, slug: "crm" },
+    });
+
+    // An answer finishes its connection once.
+    const again = await finish(h, t.secret, answer);
+    expect(again.status).toBe(400);
+    expect((await errorOf(again)).code).toBe("oauth_state_unknown");
+  });
+
+  it("uses Kerby's Client ID Metadata Document where the authorization server takes one", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const fixture = await oauthFixture({ clientIdMetadataDocuments: true });
+    await oauthServer(h, t, fixture.mcp.url);
+    const url = await start(h, t.secret);
+    expect(url.searchParams.get("client_id")).toBe(
+      "https://console.kerby.test/oauth/client-metadata.json",
+    );
+    expect(fixture.registrations).toEqual([]);
+    expect((await finish(h, t.secret, await approve(url))).status).toBe(200);
+
+    // A console on plain http cannot publish one: registration, and without it a refusal that says why.
+    const local = await harness({ consolePublicUrl: "http://127.0.0.1:3000" });
+    const u = await local.tenant("local");
+    const cimdOnly = await oauthFixture({ clientIdMetadataDocuments: true, registration: false });
+    await oauthServer(local, u, cimdOnly.mcp.url);
+    const refused = await local.call(u.secret, "POST", "/v1/tool-servers/crm/oauth/start");
+    expect(refused.status).toBe(400);
+    expect(await errorOf(refused)).toMatchObject({
+      code: "oauth_failed",
+      message: expect.stringMatching(/must be served over https/),
+    });
+  });
+
+  it("refuses a wrong or missing iss, an expired flow and another tenant's state; shows the server's error only after the iss check", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const other = await h.tenant("globex");
+    const fixture = await oauthFixture();
+    await oauthServer(h, t, fixture.mcp.url);
+    await oauthServer(h, other, fixture.mcp.url);
+    const crm = await findToolServer(t.ctx.db, "crm");
+    const refusal = async (secret: string, body: object, code: string) => {
+      const response = await finish(h, secret, body);
+      expect(response.status).toBe(400);
+      const error = await errorOf(response);
+      expect(error.code).toBe(code);
+      return error.message;
+    };
+
+    // Another tenant cannot finish this tenant's connection; its owner still can.
+    const mine = await approve(await start(h, t.secret));
+    await refusal(other.secret, mine, "oauth_state_unknown");
+    expect(await hasToolCredential(h.control.db, other.id, crm?.id ?? "")).toBe(false);
+    expect((await finish(h, t.secret, mine)).status).toBe(200);
+    const exchanges = fixture.tokenRequests.length;
+
+    // A mix-up: an iss other than the issuer's, or none from an issuer that always sends one. No code is exchanged.
+    const wrong = await approve(await start(h, other.secret));
+    await refusal(other.secret, { ...wrong, iss: "https://evil.example" }, "oauth_issuer_mismatch");
+    const missing = await approve(await start(h, other.secret));
+    await refusal(other.secret, { ...missing, iss: undefined }, "oauth_issuer_mismatch");
+    expect(fixture.tokenRequests).toHaveLength(exchanges);
+    expect(await hasToolCredential(h.control.db, other.id, crm?.id ?? "")).toBe(false);
+
+    // The authorization server's error is shown when its iss checks out, and only then.
+    fixture.setDenying(true);
+    const denied = await approve(await start(h, other.secret));
+    expect(await refusal(other.secret, denied, "oauth_denied")).toMatch(/access_denied/);
+    fixture.setIss("https://evil.example");
+    const forged = await approve(await start(h, other.secret));
+    expect(await refusal(other.secret, forged, "oauth_issuer_mismatch")).not.toMatch(
+      /access_denied/,
+    );
+    fixture.setIss(null);
+    fixture.setDenying(false);
+
+    // Ten minutes to approve.
+    const late = await approve(await start(h, other.secret));
+    await other.ctx.db.query(
+      "update tool_oauth_flows set expires_at = now() - interval '1 second'",
+    );
+    await refusal(other.secret, late, "oauth_state_expired");
+    expect(fixture.tokenRequests).toHaveLength(exchanges);
+  });
+
+  it("refuses what cannot be connected, and drops a connection when the server moves", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const fixture = await oauthFixture();
+    // https, but for a development host
+    const plain = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "plain",
+      url: "http://mcp.example.com/mcp",
+      auth: { kind: "oauth" },
+    });
+    expect(plain.status).toBe(400);
+    expect((await errorOf(plain)).message).toMatch(/must use https/);
+    const header = await h.call(t.secret, "POST", "/v1/tool-servers", {
+      slug: "keyed",
+      url: "https://keyed.example.com/mcp",
+      auth: { kind: "header", header: "Authorization" },
+      credential: "Bearer k",
+    });
+    expect(header.status).toBe(201);
+    const notOAuth = await h.call(t.secret, "POST", "/v1/tool-servers/keyed/oauth/start");
+    expect(notOAuth.status).toBe(400);
+    expect((await errorOf(notOAuth)).message).toMatch(/does not use OAuth/);
+
+    await oauthServer(h, t, fixture.mcp.url);
+    const put = await h.call(t.secret, "PUT", "/v1/tool-servers/crm/credential", {
+      value: "Bearer x",
+    });
+    expect(put.status).toBe(400);
+    expect((await errorOf(put)).message).toMatch(/oauth\/start/);
+
+    // Only an admin connects.
+    const integration = await createIntegration(h.control.db, {
+      tenantId: t.id,
+      name: "bots",
+      role: "restricted",
+    });
+    const restricted = (await createApiKey(h.control.db, t.id, integration.id)).secret;
+    expect((await h.call(restricted, "POST", "/v1/tool-servers/crm/oauth/start")).status).toBe(403);
+    expect((await finish(h, restricted, { state: "x", code: "y" })).status).toBe(403);
+
+    // A connection survives a new scope; a new URL drops it (its tokens are bound to the old address), and a
+    // connection begun before the move cannot finish after it.
+    expect((await finish(h, t.secret, await approve(await start(h, t.secret)))).status).toBe(200);
+    const rescoped = await h.call(t.secret, "PATCH", "/v1/tool-servers/crm", {
+      auth: { kind: "oauth", scope: "crm:read" },
+    });
+    expect(ToolServerSchema.parse(await rescoped.json())).toMatchObject({
+      auth: { kind: "oauth", scope: "crm:read" },
+      hasCredential: true,
+    });
+    const pending = await approve(await start(h, t.secret));
+    expect(fixture.authorizations.at(-1)?.get("scope")).toBe("crm:read");
+    const moved = await h.call(t.secret, "PATCH", "/v1/tool-servers/crm", {
+      url: `${fixture.mcp.url}/v2`,
+    });
+    expect(ToolServerSchema.parse(await moved.json()).hasCredential).toBe(false);
+    const late = await finish(h, t.secret, pending);
+    expect((await errorOf(late)).code).toBe("oauth_state_unknown");
+
+    // No console address, no OAuth.
+    const bare = await harness({ consolePublicUrl: null });
+    const u = await bare.tenant("bare");
+    await oauthServer(bare, u, fixture.mcp.url);
+    const unset = await bare.call(u.secret, "POST", "/v1/tool-servers/crm/oauth/start");
+    expect(unset.status).toBe(400);
+    expect(await errorOf(unset)).toMatchObject({
+      code: "oauth_not_configured",
+      message: expect.stringMatching(/CONSOLE_PUBLIC_URL/),
+    });
   });
 });

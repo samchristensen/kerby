@@ -4,17 +4,19 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ConfirmAction } from "../../../_components/client.tsx";
 import { formatDateTime } from "../../../_components/format.ts";
-import { Badge, Card, CodeBlock, DetailList, PageHeader } from "../../../_components/ui.tsx";
+import { Alert, Badge, Card, CodeBlock, DetailList, PageHeader } from "../../../_components/ui.tsx";
 import { consoleService } from "../../../_lib/console.ts";
 import { requireChatAccess } from "../../../_lib/session.ts";
 import { Workspace } from "../../_components/panes.tsx";
 import {
+  connectToolServerAction,
   deleteToolServerAction,
   replaceToolCredentialAction,
   syncToolServerAction,
   updateToolServerAction,
 } from "../actions.ts";
 import {
+  ConnectButton,
   CredentialForm,
   EditServerForm,
   RefreshWhileSyncing,
@@ -104,9 +106,16 @@ function ToolItem({ slug, tool, builtin }: { slug: string; tool: Tool; builtin: 
   );
 }
 
-export default async function ToolServerPage({ params }: { params: Promise<{ slug: string }> }) {
+export default async function ToolServerPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ connected?: string }>;
+}) {
   const access = await requireChatAccess();
   const { slug } = await params;
+  const { connected } = await searchParams;
   const server = await consoleService().toolServer(access, slug);
   if (!server) notFound();
   const builtin = server.kind === "builtin";
@@ -119,6 +128,28 @@ export default async function ToolServerPage({ params }: { params: Promise<{ slu
         actions={<ServerStatus status={server.status} kind={server.kind} />}
       />
       <div className="space-y-6">
+        {server.auth.kind === "oauth" ? (
+          <Card
+            title="Connection"
+            actions={
+              <ConnectButton
+                action={connectToolServerAction.bind(null, server.slug)}
+                connected={server.hasCredential}
+              />
+            }
+          >
+            <div className="space-y-3">
+              {connected === "1" && server.hasCredential ? (
+                <Alert tone="success">Connected. Its tools are being listed again.</Alert>
+              ) : null}
+              <p className="text-sm text-zinc-600">
+                {server.hasCredential
+                  ? "Connected with OAuth for the whole workspace. Kerby keeps the tokens sealed, refreshes them, and never shows them."
+                  : "Not connected: listing and calling its tools fail until you connect it. Connect sends you to the server's sign-in to approve Kerby, once for the whole workspace."}
+              </p>
+            </div>
+          </Card>
+        ) : null}
         <Card
           title="Status"
           actions={

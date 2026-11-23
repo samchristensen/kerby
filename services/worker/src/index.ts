@@ -2,7 +2,12 @@
 // the real adapters, including the agent harness behind the AgentRuntime port.
 import type { AgentRuntime } from "@kerby/agent";
 import { createBlobs } from "@kerby/blobs";
-import { readModelKey, readToolCredential, resolveTenantDbUrl } from "@kerby/control-plane";
+import {
+  readModelKey,
+  readToolCredential,
+  resolveTenantDbUrl,
+  updateToolCredential,
+} from "@kerby/control-plane";
 import { createControlDb, TenantPools } from "@kerby/db";
 import { createEgressFetch } from "@kerby/egress";
 import { createSystemOneJudgments } from "@kerby/judgment-systemone";
@@ -12,7 +17,13 @@ import {
   createPiDurableRuntime,
   createTenantModels,
 } from "@kerby/runtime-pi-durable";
-import { createOpener, createSecretBox, splitKeys } from "@kerby/secrets";
+import {
+  createOpener,
+  createSealer,
+  createSecretBox,
+  publicKeyOf,
+  splitKeys,
+} from "@kerby/secrets";
 import { createRouter, json, serve } from "@kerby/serve";
 import { loadWorkerConfig, type WorkerConfig } from "./config/index.ts";
 import { createHandlers } from "./runtime/handlers.ts";
@@ -51,9 +62,13 @@ async function startWorker(config: WorkerConfig): Promise<{
   });
   // Sealed tenant secrets open only here (ADR 0008). Tool credentials need the key even with the fake model, which
   // only stands in for the model.
-  const opener = config.secretsPrivateKeys
-    ? createOpener(splitKeys(config.secretsPrivateKeys))
-    : undefined;
+  const privateKeys = config.secretsPrivateKeys ? splitKeys(config.secretsPrivateKeys) : [];
+  const opener = privateKeys[0] === undefined ? undefined : createOpener(privateKeys);
+  // A refreshed OAuth token is sealed again, to the public half of the key new secrets are sealed to (the first).
+  const keys =
+    opener && privateKeys[0] !== undefined
+      ? { opener, sealer: createSealer(publicKeyOf(privateKeys[0])) }
+      : undefined;
   // Real runs use the tenant's own key for the model's provider; only the development fake model needs none.
   const modelOpener = config.kerbyFakeModel ? undefined : opener;
   const deps: WorkerDeps = {
@@ -63,8 +78,13 @@ async function startWorker(config: WorkerConfig): Promise<{
     modelKeys: modelOpener
       ? (tenantId, provider) => readModelKey(control, modelOpener, tenantId, provider)
       : undefined,
-    toolCredentials: opener
-      ? (tenantId, serverId) => readToolCredential(control, opener, tenantId, serverId)
+    toolCredentials: keys
+      ? {
+          read: (tenantId, serverId) =>
+            readToolCredential(control, keys.opener, tenantId, serverId),
+          update: (tenantId, serverId, change) =>
+            updateToolCredential(control, keys, tenantId, serverId, change),
+        }
       : undefined,
     // Every call to a tenant's MCP server goes through the egress guard (ADR 0010): public addresses only, but for the
     // hosts a development stack names.

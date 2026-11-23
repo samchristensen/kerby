@@ -4,6 +4,7 @@ import {
   CreateConversationRequestSchema,
   CreatePromptRequestSchema,
   CreateToolServerRequestSchema,
+  FinishToolServerOAuthRequestSchema,
   GetConversationQuerySchema,
   GetTraceQuerySchema,
   type IntegrationRole,
@@ -100,6 +101,11 @@ import {
   saveTenantDraft,
   setTenantPromptLabel,
 } from "../service/prompts.ts";
+import {
+  finishToolServerOAuth,
+  OAuthFlowError,
+  startToolServerOAuth,
+} from "../service/tool-oauth.ts";
 import {
   createTenantToolServer,
   deleteTenantToolServer,
@@ -323,6 +329,8 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
               throw new HttpError(400, "tool_not_usable", error.message);
             if (error instanceof ToolServerRequestError)
               throw new HttpError(400, "invalid_request", error.message);
+            if (error instanceof OAuthFlowError)
+              throw new HttpError(400, error.code, error.message);
             throw error;
           }
         });
@@ -857,6 +865,38 @@ export function createApiApp(deps: ApiDeps): FetchHandler {
           return json(
             202,
             await inTenant(principal, (ctx) => syncTenantToolServer(deps, principal, ctx, slug)),
+          );
+        },
+      ),
+    ],
+    [
+      "POST",
+      "/v1/tool-servers/:slug/oauth/start",
+      authed(
+        "POST /v1/tool-servers/:slug/oauth/start",
+        ADMIN_ONLY,
+        async (_request, params, principal) => {
+          const slug = serverSlug(params);
+          return json(
+            200,
+            await inTenant(principal, (ctx) => startToolServerOAuth(deps, ctx, slug)),
+          );
+        },
+      ),
+    ],
+    [
+      "POST",
+      "/v1/tool-servers/oauth/callback",
+      authed(
+        "POST /v1/tool-servers/oauth/callback",
+        ADMIN_ONLY,
+        async (request, _params, principal) => {
+          const body = await readJson(request, FinishToolServerOAuthRequestSchema, {
+            maxBytes: 16_384,
+          });
+          return json(
+            200,
+            await inTenant(principal, (ctx) => finishToolServerOAuth(deps, principal, ctx, body)),
           );
         },
       ),

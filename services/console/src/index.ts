@@ -1,6 +1,7 @@
 // The tenant console: Next.js pages over the control plane (ADR 0014). This file is the composition root: it reads the
 // config, builds the real adapters natively (Next.js never bundles them) and installs the service the pages call.
 import { join } from "node:path";
+import { kerbyOAuthClient } from "@kerby/contracts";
 import { createControlDb } from "@kerby/db";
 import { JUDGMENT_PROVIDERS } from "@kerby/judgment-systemone/providers";
 import { log } from "@kerby/observability";
@@ -44,6 +45,8 @@ async function startConsole(config: ConsoleConfig) {
     dir: join(import.meta.dirname, ".."),
     dev: config.devServer,
     trustProxy: config.trustProxy,
+    clientMetadata:
+      config.publicUrl === undefined ? undefined : kerbyOAuthClient(config.publicUrl).metadata,
   });
   log("info", "console listening", { port: server.port, dev: config.devServer });
   return {

@@ -1,5 +1,6 @@
 // A real MCP server on node:http for tests, in either era: `stateless` (2026-07-28: every request carries its version,
-// no initialize, no session) or `session` (2025-11-25: initialize, Mcp-Session-Id, DELETE). Not for production.
+// no initialize, no session) or `session` (2025-11-25: initialize, Mcp-Session-Id, DELETE); and the same server behind
+// OAuth with its authorization server (`startOAuthFixture`). Not for production.
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -22,6 +23,8 @@ import {
   MODERN_VERSION,
   UNSUPPORTED_PROTOCOL_VERSION,
 } from "./protocol.ts";
+
+export { type OAuthFixture, startOAuthFixture } from "./oauth-fixture.ts";
 
 type FixtureToolResult = { content: McpContent[]; structuredContent?: unknown; isError?: boolean };
 
@@ -117,11 +120,20 @@ export type McpFixtureOptions = {
   pageSize?: number;
   /** Every request without this exact header value gets 401. */
   requiredHeader?: { name: string; value: string };
+  /**
+   * Sees every request first, after it is recorded (its body read): returns true when it answered it (an OAuth
+   * fixture's metadata documents and 401s), false to let MCP answer.
+   */
+  intercept?: (req: IncomingMessage, res: ServerResponse) => boolean;
+  /** The address to listen on; default 127.0.0.1. */
+  listenHost?: string;
+  /** The host name in `url`; default the listen address (a container reaches the host as `host.docker.internal`). */
+  urlHost?: string;
 };
 
 /** Starts the fixture on an ephemeral loopback port. */
 export async function startMcpFixture(options: McpFixtureOptions): Promise<McpFixture> {
-  const { mode, requiredHeader } = options;
+  const { mode, requiredHeader, intercept } = options;
   const sse = options.encoding === "sse";
   let tools = options.tools ?? [];
   const requests: FixtureRequest[] = [];
@@ -413,6 +425,7 @@ export async function startMcpFixture(options: McpFixtureOptions): Promise<McpFi
       headers: req.headers,
     };
     requests.push(record);
+    if (intercept?.(req, res)) return;
     if (requiredHeader && header(req, requiredHeader.name.toLowerCase()) !== requiredHeader.value) {
       res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
       return;
@@ -452,7 +465,8 @@ export async function startMcpFixture(options: McpFixtureOptions): Promise<McpFi
       res.end(error instanceof Error ? error.message : String(error));
     });
   });
-  server.listen(0, "127.0.0.1");
+  const listenHost = options.listenHost ?? "127.0.0.1";
+  server.listen(0, listenHost);
   await once(server, "listening");
   const { port } = server.address() as AddressInfo;
 
@@ -467,7 +481,7 @@ export async function startMcpFixture(options: McpFixtureOptions): Promise<McpFi
   };
 
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
+    url: `http://${options.urlHost ?? listenHost}:${port}/mcp`,
     requests,
     calls,
     sessions: () => [...sessions.keys()],

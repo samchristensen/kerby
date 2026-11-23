@@ -1,8 +1,9 @@
-// A tool server's credential (ADR 0019): the value of the header it authenticates with, sealed like a model key in
-// `tenant_secrets` under `tool-credential/<serverId>`. The name is authenticated data and carries the server's id, not
-// its slug, so a deleted server's leftover row never opens for a new server under the same slug. The api and console
-// seal (public key only); the worker opens inside the step that calls the server.
-import type { ControlQueryable } from "@kerby/db";
+// A tool server's credential (ADR 0019): the value of the header it authenticates with, or the JSON of an OAuth
+// connection's tokens, sealed like a model key in `tenant_secrets` under `tool-credential/<serverId>`. The name is
+// authenticated data and carries the server's id, not its slug, so a deleted server's leftover row never opens for a new
+// server under the same slug. The api and console seal (public key only); the worker opens inside the step that calls
+// the server, and replaces an OAuth connection's tokens when it refreshes them (`updateToolCredential`).
+import type { ControlDb, ControlQueryable } from "@kerby/db";
 import { type Opener, type Sealer, secretContext } from "@kerby/secrets";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -68,4 +69,45 @@ export async function readToolCredential(
   );
   const row = rows[0];
   return row ? opener.open(row.ciphertext, secretContext(tenantId, name)) : undefined;
+}
+
+/**
+ * Replace a server's credential based on what is stored, under a row lock held until the replacement is stored: two
+ * workers refreshing one OAuth connection at once take turns, and the second sees the first's tokens (`change` gets
+ * the value as stored now, not as the caller read it earlier). `change` returns the replacement, `undefined` to keep
+ * the value, or `null` to delete it. Nothing happens when no credential is stored (the server was deleted or its auth
+ * changed meanwhile): a refresh never brings a credential back. Resolves with what is stored afterwards.
+ */
+export async function updateToolCredential(
+  db: ControlDb,
+  keys: { opener: Opener; sealer: Sealer },
+  tenantId: string,
+  serverId: string,
+  change: (current: string) => Promise<string | null | undefined>,
+): Promise<string | undefined> {
+  const name = secretName(serverId);
+  const context = secretContext(tenantId, name);
+  return db.transaction(async (tx) => {
+    const { rows } = await tx.query<{ ciphertext: Buffer }>(
+      "select ciphertext from tenant_secrets where tenant_id::text = $1 and name = $2 for update",
+      [tenantId, name],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    const current = keys.opener.open(row.ciphertext, context);
+    const next = await change(current);
+    if (next === undefined) return current;
+    if (next === null) {
+      await tx.query("delete from tenant_secrets where tenant_id::text = $1 and name = $2", [
+        tenantId,
+        name,
+      ]);
+      return undefined;
+    }
+    await tx.query(
+      "update tenant_secrets set ciphertext = $3, created_at = now() where tenant_id::text = $1 and name = $2",
+      [tenantId, name, keys.sealer.seal(next, context)],
+    );
+    return next;
+  });
 }

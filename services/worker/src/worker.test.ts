@@ -14,7 +14,10 @@ import {
   createIntegration,
   insertTenant,
   putModelKey,
+  putToolCredential,
+  readToolCredential,
   setTenantStatus,
+  updateToolCredential,
 } from "@kerby/control-plane";
 import { createTestControlDb } from "@kerby/control-plane/testing";
 import {
@@ -38,9 +41,10 @@ import type {
   JudgmentRequest,
   JudgmentRun,
 } from "@kerby/judgment";
-import { startMcpFixture } from "@kerby/mcp/testing";
+import { type OAuthCredential, parseOAuthCredential } from "@kerby/mcp";
+import { type OAuthFixture, startMcpFixture, startOAuthFixture } from "@kerby/mcp/testing";
 import { configureLogging } from "@kerby/observability";
-import { createSealer, generateSecretsKeyPair } from "@kerby/secrets";
+import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import {
   createToolServer,
   findToolServerById,
@@ -49,6 +53,7 @@ import {
   resolveToolPatterns,
   setConversationTools,
   updateTool,
+  updateToolServer,
 } from "@kerby/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerConfigSchema } from "./config/index.ts";
@@ -58,6 +63,8 @@ import {
   createScheduler,
   type WorkerDeps,
 } from "./index.ts";
+import { toolServerHeaders } from "./service/mcp.ts";
+import type { ToolCredentials } from "./types/index.ts";
 
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
 afterEach(async () => {
@@ -98,7 +105,11 @@ type Options = {
   settings?: Partial<WorkerDeps["settings"]>;
   modelKeys?: WorkerDeps["modelKeys"];
   judgments?: WorkerDeps["judgments"];
-  toolCredentials?: WorkerDeps["toolCredentials"];
+  /**
+   * Tool credentials: a stand-in reader (header credentials only), or `sealed` for the real store in the control
+   * database, sealed with a key pair of the test's (`h.secrets`), as the worker's composition root builds it.
+   */
+  toolCredentials?: ToolCredentials["read"] | "sealed";
   /** Wrap the object store the worker and the test share, to make part of it fail. */
   wrapBlobs?: (blobs: Blobs) => Blobs;
 };
@@ -114,6 +125,21 @@ async function harness(options: Options = {}) {
   });
   cleanups.push(() => pools.close());
   const runtime = options.runtime ?? createDevelopmentRuntime();
+  const pair = generateSecretsKeyPair();
+  const secrets = { sealer: createSealer(pair.publicKey), opener: createOpener([pair.privateKey]) };
+  const stand = options.toolCredentials;
+  const toolCredentials: ToolCredentials | undefined =
+    stand === "sealed"
+      ? {
+          read: (tenantId, serverId) =>
+            readToolCredential(control.db, secrets.opener, tenantId, serverId),
+          update: (tenantId, serverId, change) =>
+            updateToolCredential(control.db, secrets, tenantId, serverId, change),
+        }
+      : stand && {
+          read: stand,
+          update: () => Promise.reject(new Error("a stand-in reader stores no OAuth connections")),
+        };
   const deps: WorkerDeps = {
     control: control.db,
     pools,
@@ -121,7 +147,7 @@ async function harness(options: Options = {}) {
     runtime,
     modelKeys: options.modelKeys,
     judgments: options.judgments ?? [],
-    toolCredentials: options.toolCredentials,
+    toolCredentials,
     // The egress guard as production builds it, but letting the loopback test server through.
     toolFetch: createEgressFetch({ blockedRanges: [] }),
     settings: {
@@ -218,6 +244,7 @@ async function harness(options: Options = {}) {
     messages,
     settled,
     extraWorker,
+    secrets,
   };
 }
 
@@ -839,6 +866,201 @@ describe("a turn's tools", () => {
     expect((await t.ctx.db.query("select attempts from absurd.t_turns")).rows).toEqual([
       { attempts: 1 },
     ]);
+  });
+
+  it("calls an OAuth server's tool with its bearer token, refreshing once when the server refuses it", async () => {
+    await using fixture = await startOAuthFixture({
+      tools: [
+        {
+          name: "search",
+          handler: (args) => ({ content: [{ type: "text", text: `found ${String(args.q)}` }] }),
+        },
+      ],
+    });
+    const into = seen();
+    const h = await harness({
+      runtime: calling(into, "crm__search", { q: "ada" }),
+      toolCredentials: "sealed",
+    });
+    const t = await h.tenant("acme");
+    // The connection's token is dead at the server, though the connection says it lives an hour.
+    const { server, granted } = await connectOAuth(h, t, fixture, {
+      lifetimeSeconds: 0,
+      expiresInSeconds: 3600,
+    });
+    await recordSync(t.ctx.db, server.id, {
+      tools: [{ name: "search", definition: definitionOf({ name: "search" }) }],
+    });
+    // A write tool: a 401 means the call never ran, so trying again with a fresh token is safe.
+    await updateTool(t.ctx.db, server.id, "search", { enabled: true, effect: "write" });
+    const conversation = await h.conversation(t, ["crm/search"]);
+    await h.post(t, conversation.id, "find ada");
+    await h.settled(t, conversation.id, 3);
+
+    expect(into.results).toEqual([
+      { content: [{ type: "text", text: "found ada" }], isError: false },
+    ]);
+    expect(fixture.mcp.calls).toHaveLength(1);
+    expect(fixture.tokenRequests.map((form) => form.get("grant_type"))).toEqual(["refresh_token"]);
+    const sent = fixture.mcp.requests.map((request) => request.headers.authorization);
+    expect(sent[0]).toBe(`Bearer ${granted.accessToken}`);
+    expect(sent.at(-1)).toBe(`Bearer ${(await storedOAuth(h, t, server.id))?.accessToken}`);
+  });
+});
+
+type Harness = Awaited<ReturnType<typeof harness>>;
+type Tenant = Awaited<ReturnType<Harness["tenant"]>>;
+
+/** An `oauth` server whose connection holds tokens the fixture granted, sealed as the api seals them. */
+async function connectOAuth(
+  h: Harness,
+  t: Tenant,
+  fixture: OAuthFixture,
+  options: { lifetimeSeconds?: number; expiresInSeconds?: number; resource?: string } = {},
+) {
+  const server = await createToolServer(t.ctx.db, {
+    slug: "crm",
+    url: fixture.mcp.url,
+    auth: { kind: "oauth" },
+  });
+  const granted = fixture.grant(
+    options.lifetimeSeconds === undefined ? {} : { lifetimeSeconds: options.lifetimeSeconds },
+  );
+  const credential: OAuthCredential = {
+    kind: "oauth",
+    accessToken: granted.accessToken,
+    refreshToken: granted.refreshToken,
+    expiresAt: new Date(
+      Date.now() + (options.expiresInSeconds ?? granted.expiresIn) * 1000,
+    ).toISOString(),
+    tokenEndpoint: `${fixture.issuer}/token`,
+    issuer: fixture.issuer,
+    clientId: granted.clientId,
+    clientAuth: "none",
+    resource: options.resource ?? fixture.mcp.url,
+  };
+  await putToolCredential(
+    h.control.db,
+    h.secrets.sealer,
+    t.id,
+    server.id,
+    JSON.stringify(credential),
+  );
+  return { server, granted };
+}
+
+/** The connection as stored now. */
+async function storedOAuth(h: Harness, t: Tenant, serverId: string) {
+  const stored = await readToolCredential(h.control.db, h.secrets.opener, t.id, serverId);
+  return stored === undefined ? undefined : parseOAuthCredential(stored);
+}
+
+describe("OAuth tool servers", () => {
+  /** List the server again as the api asks for it: `syncing`, and the task, in one transaction. */
+  async function synced(h: Harness, t: Tenant, serverId: string) {
+    await t.ctx.db.transaction(async (tx) => {
+      await updateToolServer(tx, serverId, {});
+      await spawnInTx(
+        tx,
+        "sync-tool-server",
+        { serverId },
+        { idempotencyKey: `sync:${crypto.randomUUID()}` },
+      );
+    });
+    await h.control.db.query("select pg_notify('tenant_work', $1)", [t.id]);
+    return eventually("the listing", async () => {
+      const server = await findToolServerById(t.ctx.db, serverId);
+      return server?.status !== "syncing" && server;
+    });
+  }
+
+  const tools = [{ name: "search" }];
+
+  it("lists with the bearer token, refreshing a token about to expire once and storing the rotated refresh token", async () => {
+    await using fixture = await startOAuthFixture({ tools });
+    const h = await harness({ toolCredentials: "sealed" });
+    const t = await h.tenant("acme");
+    const { server, granted } = await connectOAuth(h, t, fixture, { lifetimeSeconds: 30 });
+
+    expect(await synced(h, t, server.id)).toMatchObject({ status: "ready", lastError: null });
+    expect((await listTools(t.ctx.db, server.id)).map((tool) => tool.name)).toEqual(["search"]);
+    expect(fixture.tokenRequests).toHaveLength(1);
+    expect(fixture.tokenRequests[0]?.get("grant_type")).toBe("refresh_token");
+    expect(fixture.tokenRequests[0]?.get("refresh_token")).toBe(granted.refreshToken);
+    expect(fixture.tokenRequests[0]?.get("resource")).toBe(fixture.mcp.url);
+    const now = await storedOAuth(h, t, server.id);
+    expect(now?.refreshToken).toBeDefined();
+    expect(now?.refreshToken).not.toBe(granted.refreshToken);
+    expect(now?.accessToken).not.toBe(granted.accessToken);
+    expect(new Set(fixture.mcp.requests.map((r) => r.headers.authorization))).toEqual(
+      new Set([`Bearer ${now?.accessToken}`]),
+    );
+
+    // The new token lives an hour: the next listing uses it as it is.
+    await synced(h, t, server.id);
+    expect(fixture.tokenRequests).toHaveLength(1);
+  });
+
+  it("refreshes once when the server refuses the token, and says to connect again when the grant is dead", async () => {
+    await using fixture = await startOAuthFixture({ tools });
+    const h = await harness({ toolCredentials: "sealed" });
+    const t = await h.tenant("acme");
+    const { server } = await connectOAuth(h, t, fixture, {
+      lifetimeSeconds: 0,
+      expiresInSeconds: 3600,
+    });
+    expect(await synced(h, t, server.id)).toMatchObject({ status: "ready" });
+    expect(fixture.tokenRequests).toHaveLength(1);
+    const tokens = await storedOAuth(h, t, server.id);
+
+    // The authorization server revokes the grant: the refresh is refused with invalid_grant.
+    fixture.revoke();
+    const after = await synced(h, t, server.id);
+    expect(after.status).toBe("error");
+    expect(after.lastError).toContain("the authorization expired: connect it again in the console");
+    for (const token of [tokens?.accessToken, tokens?.refreshToken])
+      expect(after.lastError).not.toContain(token);
+    // A dead grant is dropped, so the console shows the server as not connected.
+    expect(await storedOAuth(h, t, server.id)).toBeUndefined();
+    expect(fixture.tokenRequests).toHaveLength(2);
+  });
+
+  it("lets two workers refreshing at once spend the refresh token once", async () => {
+    await using fixture = await startOAuthFixture({ tools });
+    const h = await harness({ toolCredentials: "sealed" });
+    const t = await h.tenant("acme");
+    const { server } = await connectOAuth(h, t, fixture, { lifetimeSeconds: 30 });
+    const signal = AbortSignal.timeout(10_000);
+    // Each refresh runs in its own control transaction, as on two worker processes.
+    const [a, b] = await Promise.all([
+      toolServerHeaders(h.deps, t.id, server, signal),
+      toolServerHeaders(h.deps, t.id, server, signal),
+    ]);
+    expect(fixture.tokenRequests).toHaveLength(1);
+    const now = await storedOAuth(h, t, server.id);
+    expect(a).toMatchObject({ headers: { Authorization: `Bearer ${now?.accessToken}` } });
+    expect(b).toEqual(a);
+  });
+
+  it("says a server is not connected, and never sends a token to an address it is not for", async () => {
+    await using fixture = await startOAuthFixture({ tools });
+    const h = await harness({ toolCredentials: "sealed" });
+    const t = await h.tenant("acme");
+    const unconnected = await createToolServer(t.ctx.db, {
+      slug: "bare",
+      url: fixture.mcp.url,
+      auth: { kind: "oauth" },
+    });
+    const bare = await synced(h, t, unconnected.id);
+    expect(bare).toMatchObject({ status: "error" });
+    expect(bare.lastError).toContain('"bare" is not connected: connect it in the console');
+
+    const { server } = await connectOAuth(h, t, fixture, {
+      resource: "https://elsewhere.example/mcp",
+    });
+    const after = await synced(h, t, server.id);
+    expect(after.lastError).toContain("is for another address");
+    expect(fixture.mcp.requests).toEqual([]);
   });
 });
 
