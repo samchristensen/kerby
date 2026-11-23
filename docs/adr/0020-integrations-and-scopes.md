@@ -18,8 +18,9 @@ key would lose the old one's configuration.
 - **Five scopes**, held by the integration ([contracts](../../packages/contracts/src/integrations.ts)):
   `conversations` (create, post, read, stream, trace), `judgments` (submit, read), `events` (`GET /v1/events`),
   `tenant` (see everything in the tenant, not only what this integration started) and `admin` (model keys, prompts,
-  subscriptions). Every route declares the scope it needs (`authed(route, scope, handler)`), so none can forget; a
-  missing one is 403 `forbidden`, naming it.
+  subscriptions; and, with [ADR 0022](0022-tools.md), tool servers, tool grants and every enabled tool). Every route
+  declares the scope it needs (`authed(route, scope, handler)`), so none can forget; a missing one is 403 `forbidden`,
+  naming it.
 - **Attribution and visibility.** A conversation and a judgment record the integration that started it (`integration_id`
   on `conversations`, `integrationId` in the judgment's task params; null when a person started it in the console), and
   so does every event. Without `tenant`, an integration sees only its own: another's conversation, judgment or event is

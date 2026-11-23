@@ -13,7 +13,8 @@ export const SCOPE_DESCRIPTIONS: Readonly<Record<Scope, string>> = {
   events: "Read the event log: GET /v1/events.",
   tenant:
     "See everything in the workspace: conversations, judgments and events started by any integration or in the console, not only its own.",
-  admin: "Manage model keys, prompts and event subscriptions.",
+  admin:
+    "Manage model keys, prompts, event subscriptions, tool servers and integrations' tool grants; name every enabled tool.",
 };
 
 export const IntegrationNameSchema = z
