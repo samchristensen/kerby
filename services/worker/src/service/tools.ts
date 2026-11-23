@@ -1,6 +1,7 @@
 import type { ToolCall, ToolResult, ToolSpec } from "@kerby/agent";
 import { DEFAULT_JUDGMENT_MODEL, JudgmentRequestSchema } from "@kerby/contracts";
 import type { JudgmentOutcome, JudgmentRequest } from "@kerby/judgment";
+import { builtinTool } from "@kerby/tools";
 
 /**
  * The tools a tenant's conversations may use: an optional built-in `echo` (development), `judge` for a tenant that has
@@ -12,53 +13,20 @@ export interface TenantTools {
   execute(call: ToolCall, signal: AbortSignal): Promise<ToolResult>;
 }
 
-const ECHO: ToolSpec = {
-  name: "echo",
-  description: "Return the given text unchanged.",
-  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-  readOnly: true,
-};
+/** A built-in tool as the harness takes it. */
+function builtinSpec(name: string): ToolSpec {
+  const tool = builtinTool(name);
+  if (!tool) throw new Error(`@kerby/tools has no built-in tool "${name}"`);
+  return {
+    name: tool.name,
+    description: tool.definition.description,
+    inputSchema: tool.definition.inputSchema,
+    readOnly: tool.effect === "read",
+  };
+}
 
-const JUDGE: ToolSpec = {
-  name: "judge",
-  description:
-    "Ask narrow, typed questions about some text or data and get calibrated probabilities back, not prose. " +
-    "Each question is answered independently of the others. A `noul` question returns the probability a statement is " +
-    "true (near 0.5 means unsure); a `choice` question returns the most probable of the named options with every " +
-    "option's probability; a `score` question returns a position on an ordered scale. Ask one coherent judgment per " +
-    "question, give the state only what the questions need, and act on the probabilities, not on the top answer alone.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      state: {
-        description:
-          "What the questions refer to: text, or an object. Questions can point into it with backticked paths such as `ticket.messages[0].text`.",
-      },
-      questions: {
-        type: "object",
-        description: "Named questions, 1 to 32.",
-        additionalProperties: {
-          type: "object",
-          properties: {
-            type: { enum: ["noul", "choice", "score"] },
-            instructions: { description: "What to decide, as text or an object." },
-            criteria: {
-              description:
-                "noul: optional {true, false} descriptions of what counts as yes and no. choice: an object mapping each option's name to when it applies. score: an array describing each level in order, from 0.",
-            },
-          },
-          required: ["type", "instructions"],
-        },
-      },
-      model: {
-        type: "string",
-        description: `Optional model id; defaults to ${DEFAULT_JUDGMENT_MODEL}.`,
-      },
-    },
-    required: ["state", "questions"],
-  },
-  readOnly: true,
-};
+const ECHO = builtinSpec("echo");
+const JUDGE = builtinSpec("judge");
 
 function textResult(text: string, isError = false): ToolResult {
   return { content: [{ type: "text", text }], isError };
