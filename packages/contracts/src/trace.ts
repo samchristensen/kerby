@@ -54,7 +54,7 @@ export const GetTraceQuerySchema = z.object({
 });
 export type GetTraceQuery = z.infer<typeof GetTraceQuerySchema>;
 
-const GetTraceResponseSchema = z.object({
+export const GetTraceResponseSchema = z.object({
   events: z.array(TraceEntrySchema),
   /** Pass as `after` for the next page; null when this page reaches the newest entry. */
   nextAfter: z.number().int().positive().nullable(),

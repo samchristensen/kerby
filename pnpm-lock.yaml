@@ -98,6 +98,9 @@ importers:
       '@kerby/mcp':
         specifier: workspace:*
         version: link:packages/mcp
+      '@kerby/sdk':
+        specifier: workspace:*
+        version: link:packages/sdk
       '@kerby/secrets':
         specifier: workspace:*
         version: link:packages/secrets
@@ -327,6 +330,15 @@ importers:
       '@kerby/agent':
         specifier: workspace:*
         version: link:../agent
+
+  packages/sdk:
+    dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   packages/search:
     dependencies:

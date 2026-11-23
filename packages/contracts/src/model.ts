@@ -31,5 +31,5 @@ const ModelKeySchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
-const ListModelKeysResponseSchema = z.object({ keys: z.array(ModelKeySchema) });
+export const ListModelKeysResponseSchema = z.object({ keys: z.array(ModelKeySchema) });
 export type ListModelKeysResponse = z.infer<typeof ListModelKeysResponseSchema>;

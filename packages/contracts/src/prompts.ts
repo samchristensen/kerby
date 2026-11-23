@@ -157,7 +157,7 @@ export const RenderPromptRequestSchema = z.object({
   variables: PromptVariableValuesSchema.default({}),
 });
 
-const RenderedPromptSchema = z.object({
+export const RenderedPromptSchema = z.object({
   name: PromptNameSchema,
   version: VersionNumber,
   /** The system prompt: the text with every `{{variable}}` replaced. */

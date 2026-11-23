@@ -29,8 +29,10 @@
   },
   // Default exports read by tools, not imported: the Railway CLI and vitest. Neither file exports anything else.
   // A single export kept for another reason carries a `@public` JSDoc tag (knip skips it) that says why.
+  // The SDK's entry is the public surface customers import (ADR 0023): no workspace imports most of it.
   "ignoreIssues": {
     ".railway/railway.ts": ["exports"],
-    "vitest.config.ts": ["exports"]
+    "vitest.config.ts": ["exports"],
+    "packages/sdk/src/index.ts": ["exports", "types"]
   }
 }

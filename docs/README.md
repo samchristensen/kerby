@@ -2,15 +2,16 @@
 
 The repository is the only memory an agent has: a decision, plan, or convention that is not here does not exist.
 
-| File                                     | Read when                                                                           |
-| ---------------------------------------- | ----------------------------------------------------------------------------------- |
-| [plans/active/](plans/active)            | Starting any task. One file per plan: milestones, checkboxes, a log.                |
-| [plans/tech-debt.md](plans/tech-debt.md) | You notice a shortcut or gap you are not fixing now: add it. Fixing one: remove it. |
-| [principles.md](principles.md)           | Before writing code.                                                                |
-| [adr/](adr)                              | Before deciding structure, dependencies, infrastructure, tenancy.                   |
-| [../ARCHITECTURE.md](../ARCHITECTURE.md) | Adding or moving anything.                                                          |
-| [deploy.md](deploy.md)                   | Deploying, provisioning a tenant, or operating the hosted stack on Railway.         |
-| [research/](research)                    | Positioning, pricing, or scoping a feature against the market: dated research.      |
+| File                                                             | Read when                                                                                                        |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| [plans/active/](plans/active)                                    | Starting any task. One file per plan: milestones, checkboxes, a log.                                             |
+| [plans/tech-debt.md](plans/tech-debt.md)                         | You notice a shortcut or gap you are not fixing now: add it. Fixing one: remove it.                              |
+| [principles.md](principles.md)                                   | Before writing code.                                                                                             |
+| [adr/](adr)                                                      | Before deciding structure, dependencies, infrastructure, tenancy.                                                |
+| [../ARCHITECTURE.md](../ARCHITECTURE.md)                         | Adding or moving anything.                                                                                       |
+| [deploy.md](deploy.md)                                           | Deploying, provisioning a tenant, or operating the hosted stack on Railway.                                      |
+| [../packages/sdk/INTEGRATION.md](../packages/sdk/INTEGRATION.md) | Integrating an application with Kerby (also published with the SDK); changing a tenant-facing route or contract. |
+| [research/](research)                                            | Positioning, pricing, or scoping a feature against the market: dated research.                                   |
 
 ## Conventions
 

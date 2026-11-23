@@ -166,7 +166,7 @@ export const SubmitJudgmentRequestSchema = z.union([
 ]);
 export type SubmitJudgmentRequest = z.infer<typeof SubmitJudgmentRequestSchema>;
 
-const SubmitJudgmentResponseSchema = z.object({ id: z.uuid() });
+export const SubmitJudgmentResponseSchema = z.object({ id: z.uuid() });
 export type SubmitJudgmentResponse = z.infer<typeof SubmitJudgmentResponseSchema>;
 
 const Identity = {
