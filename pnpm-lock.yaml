@@ -190,6 +190,9 @@ importers:
       '@kerby/prompts':
         specifier: workspace:*
         version: link:../prompts
+      '@kerby/tools':
+        specifier: workspace:*
+        version: link:../tools
 
   packages/db:
     dependencies:
@@ -278,6 +281,22 @@ importers:
       zod:
         specifier: 'catalog:'
         version: 4.6.7
+
+  packages/tools:
+    dependencies:
+      '@kerby/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../observability
+    devDependencies:
+      '@kerby/conversations':
+        specifier: workspace:*
+        version: link:../conversations
 
   services/api:
     dependencies:
@@ -468,6 +487,9 @@ importers:
       '@kerby/serve':
         specifier: workspace:*
         version: link:../../packages/serve
+      '@kerby/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
       zod:
         specifier: 'catalog:'
         version: 4.6.7

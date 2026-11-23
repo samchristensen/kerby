@@ -20,6 +20,7 @@
     "@kerby/secrets": "workspace:*",
     "@kerby/runtime-pi-durable": "workspace:*",
     "@kerby/serve": "workspace:*",
+    "@kerby/tools": "workspace:*",
     "zod": "catalog:"
   }
 }

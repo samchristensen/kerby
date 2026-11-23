@@ -30,13 +30,20 @@ export async function putModelKey(
   apiKey: string,
 ): Promise<void> {
   const name = secretName(provider);
+  // Other secrets of the tenant (tool credentials, ADR 0019) share the table but not this limit.
   const { rowCount } = await db.query(
     `insert into tenant_secrets (tenant_id, name, ciphertext)
      select $1::uuid, $2, $3
-      where (select count(*) from tenant_secrets where tenant_id = $1::uuid) < $4
+      where (select count(*) from tenant_secrets where tenant_id = $1::uuid and name like $5) < $4
          or exists (select 1 from tenant_secrets where tenant_id = $1::uuid and name = $2)
      on conflict (tenant_id, name) do update set ciphertext = excluded.ciphertext, created_at = now()`,
-    [tenantId, name, sealer.seal(apiKey, secretContext(tenantId, name)), MAX_MODEL_KEYS_PER_TENANT],
+    [
+      tenantId,
+      name,
+      sealer.seal(apiKey, secretContext(tenantId, name)),
+      MAX_MODEL_KEYS_PER_TENANT,
+      `${PREFIX}%`,
+    ],
   );
   if (rowCount === 0) {
     throw new ModelKeyLimitError(

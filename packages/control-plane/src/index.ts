@@ -65,4 +65,10 @@ export {
   TenantNameTakenError,
   type TenantRecord,
 } from "./tenants.ts";
+export {
+  deleteToolCredential,
+  hasToolCredential,
+  putToolCredential,
+  readToolCredential,
+} from "./tool-credentials.ts";
 export { recordUsage } from "./usage.ts";
