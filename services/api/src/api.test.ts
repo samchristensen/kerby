@@ -1352,6 +1352,7 @@ describe("prompts", () => {
       text: "You help Ada in a warm voice.",
       model: null,
       guardrails: [],
+      tools: [],
     });
     const missing = await h.call(t.secret, "POST", `${path}/versions/1/render`, {});
     expect(missing.status).toBe(400);
