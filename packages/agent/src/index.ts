@@ -108,8 +108,11 @@ export type AgentEvent =
    * A runtime does not run a tool until the `message_end` that carries its call has been consumed.
    */
   | { type: "message_end"; message: AgentMessage }
-  /** Always last. `refused`: the provider rejected the request itself, so a retry gets the same answer. */
-  | { type: "run_end"; reason: "done" | "aborted" | "refused"; error?: string };
+  /**
+   * Always last. `refused`: the provider rejected the request itself, so a retry gets the same answer. `failed`: sent
+   * by Kerby's supervisor, never by a harness, when a turn's last attempt failed and no answer will come (ADR 0019).
+   */
+  | { type: "run_end"; reason: "done" | "aborted" | "refused" | "failed"; error?: string };
 
 /**
  * A harness behind the port. Infrastructure failures throw out of the iterator so the task retries;

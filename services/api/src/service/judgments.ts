@@ -9,6 +9,7 @@ import {
   JudgmentOutcomeSchema,
   type SubmitJudgmentRequest,
   type SubmitJudgmentResponse,
+  type Visibility,
 } from "@kerby/contracts";
 import type { TenantContext } from "@kerby/db";
 import { readTask, spawnInTx, type TaskParams } from "@kerby/durable";
@@ -17,10 +18,14 @@ import { type ApiDeps, NotFoundError } from "../types/index.ts";
 import { assertJudgmentModel } from "./models.ts";
 import { resolveDecisionPrompt } from "./prompts.ts";
 
-/** Enqueue the judgment and tell the workers there is work for this tenant. Refused when its provider or key is missing. */
+/**
+ * Enqueue the judgment and tell the workers there is work for this tenant. Refused when its provider or key is missing.
+ * It is attributed to `integrationId` (null: a person in the console), which decides who may read it (ADR 0020).
+ */
 export async function submitJudgment(
   deps: ApiDeps,
   ctx: TenantContext,
+  integrationId: string | null,
   body: SubmitJudgmentRequest,
 ): Promise<SubmitJudgmentResponse> {
   let params: TaskParams["run-judgment"];
@@ -31,12 +36,14 @@ export async function submitJudgment(
       state: body.state,
       questions: decision.questions,
       prompt: decision.prompt,
+      integrationId,
     };
   } else {
     params = {
       model: body.model ?? DEFAULT_JUDGMENT_MODEL,
       state: body.state,
       questions: body.questions,
+      integrationId,
     };
   }
   await assertJudgmentModel(deps, ctx.tenantId, params.model);
@@ -52,9 +59,15 @@ export async function submitJudgment(
   return { id: taskId };
 }
 
-export async function getJudgment(ctx: TenantContext, id: string): Promise<Judgment> {
+/** A judgment `visibility` sees: another integration's, or the console's for a key without `tenant`, is not found. */
+export async function getJudgment(
+  ctx: TenantContext,
+  visibility: Visibility,
+  id: string,
+): Promise<Judgment> {
   const task = await readTask(ctx.db, "run-judgment", id);
-  if (!task) throw new NotFoundError("judgment not found");
+  if (!task || (visibility !== "tenant" && task.params.integrationId !== visibility.integrationId))
+    throw new NotFoundError("judgment not found");
   const identity = {
     id: task.id,
     model: task.params.model,

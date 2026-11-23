@@ -34,6 +34,8 @@ export type CreateConversationRequest = z.infer<typeof CreateConversationRequest
 const ConversationSchema = z.object({
   id: z.uuid(),
   externalUserId: z.string().nullable(),
+  /** The integration that started it (ADR 0020); null when a person started it in the console. */
+  integrationId: z.uuid().nullable(),
   model: z.string(),
   system: z.string(),
   /** The opening of the first user message; null before one is posted, and for conversations older than titles. */

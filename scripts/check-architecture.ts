@@ -59,6 +59,16 @@ const CONFINED = new Map<string, string>([
   ["@earendil-works/chord", "runtime-pi-durable"],
 ]);
 
+/**
+ * Adapters behind a port, by package prefix, and the port everything but a composition root depends on. Only a service's
+ * src/index.ts imports an adapter: harnesses (ADR 0003), judgment providers (ADR 0015), destinations (ADR 0019).
+ */
+const ADAPTER_PORTS: readonly (readonly [prefix: string, port: string])[] = [
+  ["@kerby/runtime-", "AgentRuntime from @kerby/agent"],
+  ["@kerby/judgment-", "JudgmentProvider from @kerby/judgment"],
+  ["@kerby/delivery-", "Destination from @kerby/delivery"],
+];
+
 function readJson(path: string): Pkg {
   const value: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof value !== "object" || value === null) throw new Error(`${path} is not a JSON object`);
@@ -302,11 +312,12 @@ export function checkArchitecture(root: string): Violation[] {
         }
         const isIndex =
           ws.kind === "services" && relative(ws.dir, file) === join("src", "index.ts");
-        if (name.startsWith("@kerby/runtime-") && !isIndex) {
+        const port = ADAPTER_PORTS.find(([prefix]) => name.startsWith(prefix));
+        if (port && !isIndex) {
           add(
             "providers",
             file,
-            `adapter ${name} may only be imported by a service's src/index.ts, which wires it in. Fix: depend on AgentRuntime from @kerby/agent and receive the adapter as an argument. See ARCHITECTURE.md#providers`,
+            `adapter ${name} may only be imported by a service's src/index.ts, which wires it in. Fix: depend on ${port[1]} and receive the adapter as an argument. See ARCHITECTURE.md#providers`,
           );
         }
         if (!declared.has(name)) {

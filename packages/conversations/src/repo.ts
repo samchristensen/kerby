@@ -1,10 +1,13 @@
-import type { Guardrail, PinnedPrompt } from "@kerby/contracts";
-import type { TenantQueryable } from "@kerby/db";
+import type { Guardrail, PinnedPrompt, Visibility } from "@kerby/contracts";
+import type { TenantDb, TenantQueryable } from "@kerby/db";
+import { recordEvent } from "@kerby/events";
 import { InvalidCursorError } from "./errors.ts";
 
 export type ConversationRecord = {
   id: string;
   externalUserId: string | null;
+  /** The integration that started it (ADR 0020); null for a person in the console. */
+  integrationId: string | null;
   model: string;
   system: string;
   title: string | null;
@@ -19,6 +22,7 @@ export type ConversationRecord = {
 type ConversationRow = {
   id: string;
   external_user_id: string | null;
+  integration_id: string | null;
   model: string;
   system: string;
   title: string | null;
@@ -31,7 +35,11 @@ type ConversationRow = {
 };
 
 const COLUMNS =
-  "id, external_user_id, model, system, title, last_error, created_at, updated_at, guardrails, prompt_name, prompt_version";
+  "id, external_user_id, integration_id, model, system, title, last_error, created_at, updated_at, guardrails, prompt_name, prompt_version";
+
+/** The `$n` filter of a visibility: null sees the tenant, an id sees that integration's rows only. */
+const visibleTo = (visibility: Visibility): string | null =>
+  visibility === "tenant" ? null : visibility.integrationId;
 
 const pinnedFromRow = (row: Pick<ConversationRow, "prompt_name" | "prompt_version">) =>
   row.prompt_name === null || row.prompt_version === null
@@ -41,6 +49,7 @@ const pinnedFromRow = (row: Pick<ConversationRow, "prompt_name" | "prompt_versio
 const fromRow = (row: ConversationRow): ConversationRecord => ({
   id: row.id,
   externalUserId: row.external_user_id,
+  integrationId: row.integration_id,
   model: row.model,
   system: row.system,
   title: row.title,
@@ -76,14 +85,15 @@ const CURSOR =
   /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
 /**
- * One page of a tenant's conversations, most recently active first, however each began (API call or console). A
- * page's `nextCursor` goes back in as `cursor` for the page after it; null on the last page. `externalUserId` keeps
- * one end user's conversations. A cursor holds the last row's `updated_at` to the microsecond, so a conversation that
- * moves while paging is seen at most once more, never skipped.
+ * One page of the conversations `visibility` sees, most recently active first, however each began (API call or
+ * console). A page's `nextCursor` goes back in as `cursor` for the page after it; null on the last page.
+ * `externalUserId` keeps one end user's conversations. A cursor holds the last row's `updated_at` to the microsecond,
+ * so a conversation that moves while paging is seen at most once more, never skipped.
  */
 export async function listConversations(
   db: TenantQueryable,
   page: { limit: number; cursor?: string | undefined; externalUserId?: string | undefined },
+  visibility: Visibility,
 ): Promise<{ conversations: ConversationSummaryRecord[]; nextCursor: string | null }> {
   let after: RegExpExecArray | null = null;
   if (page.cursor !== undefined) {
@@ -93,15 +103,23 @@ export async function listConversations(
   const { rows } = await db.query<
     Omit<ConversationRow, "system" | "last_error"> & { cursor_at: string; message_count: number }
   >(
-    `select c.id, c.external_user_id, c.model, c.title, c.created_at, c.updated_at, c.prompt_name, c.prompt_version,
+    `select c.id, c.external_user_id, c.integration_id, c.model, c.title, c.created_at, c.updated_at, c.prompt_name,
+            c.prompt_version,
             to_char(c.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at,
             (select count(*)::int from messages m where m.conversation_id = c.id) as message_count
        from conversations c
       where ($1::text is null or c.external_user_id = $1)
         and ($2::timestamptz is null or (c.updated_at, c.id) < ($2::timestamptz, $3::uuid))
+        and ($5::uuid is null or c.integration_id = $5)
       order by c.updated_at desc, c.id desc
       limit $4`,
-    [page.externalUserId ?? null, after?.[1] ?? null, after?.[2] ?? null, page.limit + 1],
+    [
+      page.externalUserId ?? null,
+      after?.[1] ?? null,
+      after?.[2] ?? null,
+      page.limit + 1,
+      visibleTo(visibility),
+    ],
   );
   const rowsOfPage = rows.slice(0, page.limit);
   const last = rowsOfPage.at(-1);
@@ -109,6 +127,7 @@ export async function listConversations(
     conversations: rowsOfPage.map((row) => ({
       id: row.id,
       externalUserId: row.external_user_id,
+      integrationId: row.integration_id,
       model: row.model,
       title: row.title,
       createdAt: row.created_at,
@@ -124,9 +143,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A conversation id from a URL is only ever looked up as a uuid; anything else is simply not found. */
 export const isConversationId = (value: string): boolean => UUID.test(value);
 
+/** Insert a conversation and its `conversation.created` event, in one transaction. */
 export async function insertConversation(
-  db: TenantQueryable,
+  db: TenantDb,
   input: {
+    /** Who starts it (ADR 0020): an integration, or null for a person in the console. */
+    integrationId: string | null;
     externalUserId?: string | undefined;
     model: string;
     system: string;
@@ -135,31 +157,42 @@ export async function insertConversation(
     prompt?: PinnedPrompt | undefined;
   },
 ): Promise<ConversationRecord> {
-  const { rows } = await db.query<ConversationRow>(
-    `insert into conversations (external_user_id, model, system, guardrails, prompt_name, prompt_version)
-     values ($1, $2, $3, $4::jsonb, $5, $6) returning ${COLUMNS}`,
-    [
-      input.externalUserId ?? null,
-      input.model,
-      input.system,
-      JSON.stringify(input.guardrails ?? []),
-      input.prompt?.name ?? null,
-      input.prompt?.version ?? null,
-    ],
-  );
-  const row = rows[0];
-  if (!row) throw new Error("conversation insert returned no row");
-  return fromRow(row);
+  return db.transaction(async (tx) => {
+    const { rows } = await tx.query<ConversationRow>(
+      `insert into conversations (integration_id, external_user_id, model, system, guardrails, prompt_name, prompt_version)
+       values ($1, $2, $3, $4, $5::jsonb, $6, $7) returning ${COLUMNS}`,
+      [
+        input.integrationId,
+        input.externalUserId ?? null,
+        input.model,
+        input.system,
+        JSON.stringify(input.guardrails ?? []),
+        input.prompt?.name ?? null,
+        input.prompt?.version ?? null,
+      ],
+    );
+    const row = rows[0];
+    if (!row) throw new Error("conversation insert returned no row");
+    await recordEvent(tx, {
+      type: "conversation.created",
+      integrationId: row.integration_id,
+      dedupeKey: `conversation:${row.id}`,
+      data: { conversationId: row.id, externalUserId: row.external_user_id },
+    });
+    return fromRow(row);
+  });
 }
 
+/** A conversation `visibility` sees, or undefined: another integration's is not found, like one that does not exist. */
 export async function findConversation(
   db: TenantQueryable,
   id: string,
+  visibility: Visibility,
 ): Promise<ConversationRecord | undefined> {
   if (!isConversationId(id)) return undefined;
   const { rows } = await db.query<ConversationRow>(
-    `select ${COLUMNS} from conversations where id = $1`,
-    [id],
+    `select ${COLUMNS} from conversations where id = $1 and ($2::uuid is null or integration_id = $2)`,
+    [id, visibleTo(visibility)],
   );
   return rows[0] ? fromRow(rows[0]) : undefined;
 }
@@ -219,22 +252,22 @@ export async function listMessageRowsNewestFirst(
   return rows.map((row) => ({ ...fromMessageRow(row), size: Number(row.size) }));
 }
 
-/** Is a turn for this conversation queued, running or sleeping? */
+/**
+ * Is a turn for this conversation queued, running or sleeping, and still without its outcome? A turn's outcome event
+ * (`recordTurnOutcome`, ADR 0019) commits a moment before Absurd marks its task finished, and nothing is written after
+ * it: from then the next message is welcome, so a client that acts on `turn.completed` at once is not refused.
+ */
 export async function isBusy(db: TenantQueryable, conversationId: string): Promise<boolean> {
   const { rowCount } = await db.query(
-    "select 1 from absurd.t_turns where params->>'conversationId' = $1 and state in ('pending', 'running', 'sleeping') limit 1",
+    `select 1 from absurd.t_turns t
+      where t.params->>'conversationId' = $1 and t.state in ('pending', 'running', 'sleeping')
+        and not exists (
+          select 1 from events e where e.dedupe_key = 'turn:' || $1 || ':' || (t.params->>'seq') || ':outcome'
+        )
+      limit 1`,
     [conversationId],
   );
   return rowCount > 0;
-}
-
-/** Record why the latest turn produced no answer (null clears it). */
-export async function setLastError(
-  db: TenantQueryable,
-  conversationId: string,
-  error: string | null,
-): Promise<void> {
-  await db.query("update conversations set last_error = $2 where id = $1", [conversationId, error]);
 }
 
 /**

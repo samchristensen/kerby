@@ -4,13 +4,14 @@ Kerby is an agent runtime sold as a service. Customers (tenants) call it over HT
 calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
 storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
-services/   deployables: api (tenants' code calls it), worker (runs turns), control (operators run it), console (tenants'
-           people sign up, manage keys and chat in it); they own no tables
+services/   deployables: api (tenants' code calls it), worker (runs turns), dispatcher (pushes events to subscriptions),
+           control (operators run it), console (tenants' people sign up, manage integrations and chat in it); they own
+           no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -65,20 +66,23 @@ Each external system lives behind exactly one package; nothing else imports the 
 | Pi Durable and its libraries        | `runtime-pi-durable` | an `AgentRuntime`                                                           |
 | Tenant-supplied URLs                | `egress`             | a `fetch` that reaches only public addresses (ADR 0010)                     |
 | System One API (TypeSafe, OpenCode) | `judgment-systemone` | a `JudgmentProvider` (ADR 0015); the port is `packages/judgment`            |
+| Webhook endpoints (via `egress`)    | `delivery-webhook`   | a `Destination` (ADR 0019); the port is `packages/delivery`                 |
 
 An agent harness is replaceable by construction: `packages/agent` defines `AgentRuntime` and `AgentEvent`;
 `packages/runtime-<harness>` adapts one harness to it; only a service's `src/index.ts` may import an adapter.
 Judgment providers follow the same rule: `packages/judgment` defines `JudgmentProvider` (types only),
-`packages/judgment-<provider>` adapts one provider to it, and only a service's `src/index.ts` may import an adapter.
+`packages/judgment-<provider>` adapts one provider to it, and only a service's `src/index.ts` may import an adapter. So
+do event destinations: `packages/delivery` defines `Destination` (types only), `packages/delivery-<kind>` delivers to
+one kind, and the composition roots of api (which only makes and checks secrets and configs) and dispatcher wire them.
 
 ## Tenancy
 
 A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
 
-| Plane   | Database                                             | Holds                                                                                                                                                                                            | Migrations                                                          |
-| ------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `api_keys`, encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                        |
-| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the Absurd schema                                              | `packages/{durable,blobs,conversations,prompts}/migrations/tenant/` |
+| Plane   | Database                                             | Holds                                                                                                                                                                                                                                                           | Migrations                                                                 |
+| ------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets`, sealed `tenant_db_credentials`, `usage`, audit, the console's `console_users` and `console_sessions` | `packages/control-plane/migrations/control/`                               |
+| Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, tool registrations, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the event log (`events`, `subscription_cursors`, `delivery_attempts`), the Absurd schema                                      | `packages/{durable,blobs,conversations,prompts,events}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
   on the line above `create table`. A tenant table needs no tenant column: the database is the boundary.
@@ -86,6 +90,10 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   `TenantDb` comes only from a verified API key resolved in the control plane.
 - A tenant id reaches code only through a verified API key (api), a verified console session (console, and the api when the
   console forwards one for the browser's chat), never through a request body or a URL. _review_
+- An API key belongs to an integration ([ADR 0020](docs/adr/0020-integrations-and-scopes.md)), which holds its scopes
+  (`conversations`, `judgments`, `events`, `tenant`, `admin`); every api route declares the scope it needs. Without
+  `tenant`, a key sees only what its integration started: conversation, judgment and event reads take a `Visibility`, so
+  none can forget the filter. A console session acts as the tenant, with every scope.
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
   (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
@@ -176,7 +184,8 @@ flowchart LR
 6. **Retry** is a rerun of step 2 onward. The conversation resumes after its last persisted message.
 
 - **One turn at a time per conversation.** Posting a message while a turn is queued or running is a 409; the check and the
-  insert share a row lock on the conversation, so concurrent posts serialize.
+  insert share a row lock on the conversation, so concurrent posts serialize. A turn whose outcome event is recorded
+  counts as finished, though its task is still closing: nothing is written after the outcome (ADR 0019).
 - **Object keys carry a content hash** (`conversations/<id>/messages/<seq>-<sha16>.json`): a retry of the same message
   overwrites itself, and a stale writer's different content lands under a different key and can never replace bytes an
   index row already points at.
@@ -218,6 +227,23 @@ flowchart LR
   `POST /v1/judgments { state, prompt }` resolve a label once, when they are made, and record `{ name, version }`; a
   conversation keeps the rendered system prompt, model and guardrails in its own row, so a turn never reads the prompt
   tables and moving a label never changes it. A judgment's task params carry the version; the provider never sees it.
+- **Events** ([ADR 0019](docs/adr/0019-events-and-delivery.md)). Every durable fact (`conversation.created`,
+  `message.created`, `turn.started`, one of `turn.completed`/`turn.blocked`/`turn.failed` per turn on every path,
+  `judgment.completed`/`judgment.failed`) is a row of the tenant's `events` table (`packages/events`), written in the
+  transaction that makes the fact true and keyed so a retry records it once; thin: ids, `seq` and status, never content.
+  A reader returns only rows whose transaction is below `pg_snapshot_xmin`, ordered by `(tx, position)`, so a cursor
+  never skips a late commit (the horizon is cluster-wide: a long write transaction anywhere delays events, never loses
+  them). `GET /v1/events?after&limit&types&conversationId&wait` pages and long-polls it (counted with the SSE streams);
+  the turn's live `run_end` now comes on every path, `failed` when the last attempt failed. Kept 30 days (control's
+  nightly job, which also runs Absurd's cleanup).
+- **Delivery** (ADR 0019). A subscription (control database) belongs to an integration and names a destination, type
+  patterns and a scope. After committing an event the api and worker `NOTIFY tenant_events` on control; the
+  `dispatcher`, the worker's scheduler shape on its own Absurd queue `deliveries`, fans out under the subscription's
+  cursor lock (read events after the cursor, spawn `deliver-events` tasks, advance, one tenant transaction) and delivers
+  through the `Destination` port: webhooks signed by Standard Webhooks v1 through `egress`, at least once, unordered,
+  20 attempts over about two and a half days, disabled after a 410 or 48 hours of failures. Signing secrets are sealed to a
+  key pair only the dispatcher opens. `/v1/subscriptions` (scope `admin` or the console) manages them, sends a test ping,
+  lists delivery attempts and redelivers.
 
 Source of truth for a conversation is the tenant's index plus S3, never Absurd checkpoints: Absurd's retention
 cleanup may delete those. Checkpoint values stay small JSON (references, not bodies).
@@ -232,13 +258,13 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 
 ## Local stack
 
-`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, `console`, built from each service's
+`make up` runs [compose.yaml](compose.yaml): Postgres, RustFS, `control`, `api`, `worker`, `dispatcher`, `console`, built from each service's
 `Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
 then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
 
 - Two published ports: the API on `127.0.0.1:${KERBY_API_PORT:-8080}` and the console on
-  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control and worker are reached only
-  inside the network (`make up` provisions through `docker compose exec`).
+  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control, worker and dispatcher are
+  reached only inside the network (`make up` provisions through `docker compose exec`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
   `make worktree NAME=<name>` makes a checkout under `worktrees/<name>` with its own project and port pair in `.env`.
@@ -246,7 +272,9 @@ then provisions a `default` tenant through the operator API and prints its key. 
   worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
   `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
   `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
-  key pair; `make secrets-key` makes a real one.
+  key pair; `make secrets-key` makes a real one. It carries a development delivery key pair too (the api seals
+  subscription secrets, the dispatcher opens them), and api and dispatcher run with `ALLOW_LOCAL_DESTINATIONS=true`
+  (development only), so a webhook may point at `http://host.docker.internal:<port>/`.
 - Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
 - `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
@@ -267,11 +295,12 @@ then provisions a `default` tenant through the operator API and prints its key. 
 ## Hosting
 
 Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker` and `console` running the images CI builds from
+ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker`, `dispatcher` and `console` running the images CI builds from
 the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
 [ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` and `console` are public; services reach
 Postgres and each other over Railway's private network (the console reaches control's sign-up route and the api there), and the bucket through
 its S3 endpoint and keys. The secrets private key is a variable on `worker` only; the api and the console get the public half.
+The delivery secrets private key is a variable on `dispatcher` only; the api gets its public half.
 
 ## Dependencies
 

@@ -6,6 +6,7 @@ import type { Blobs } from "@kerby/blobs";
 import { AgentMessageSchema } from "@kerby/contracts";
 import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, spawnInTx } from "@kerby/durable";
+import { recordEvent } from "@kerby/events";
 import { errorFields, log, withTenant } from "@kerby/observability";
 import { StorageQuotaExceededError, storedBytes } from "@kerby/prompts";
 import {
@@ -131,10 +132,12 @@ export async function postUserMessage(
     const blobId = await putMessage(ctx, blobs, conversationId, predicted, body, randomUUID());
     const result = await ctx.db
       .transaction(async (tx) => {
-        const locked = await tx.query("select 1 from conversations where id = $1 for update", [
-          conversationId,
-        ]);
-        if (locked.rowCount === 0)
+        const locked = await tx.query<{ integration_id: string | null }>(
+          "select integration_id from conversations where id = $1 for update",
+          [conversationId],
+        );
+        const conversation = locked.rows[0];
+        if (!conversation)
           throw new ConversationNotFoundError(`conversation ${conversationId} not found`);
         if (await isBusy(tx, conversationId)) {
           throw new ConversationBusyError("a turn is already running for this conversation");
@@ -162,6 +165,12 @@ export async function postUserMessage(
           conversationChannel(conversationId),
           JSON.stringify({ persisted: seq }),
         ]);
+        await recordEvent(tx, {
+          type: "message.created",
+          integrationId: conversation.integration_id,
+          dedupeKey: `message:${conversationId}:${seq}`,
+          data: { conversationId, seq, role: "user" },
+        });
         await spawnInTx(
           tx,
           "run-turn",
@@ -218,11 +227,20 @@ export async function persistMessage(
       [conversationId, seq, message.role, blobId, run.runId, input.blockedBy ?? null],
     );
     if (inserted.rowCount === 1) {
-      await tx.query("update conversations set updated_at = now() where id = $1", [conversationId]);
+      const updated = await tx.query<{ integration_id: string | null }>(
+        "update conversations set updated_at = now() where id = $1 returning integration_id",
+        [conversationId],
+      );
       await tx.query("select pg_notify($1, $2)", [
         conversationChannel(conversationId),
         JSON.stringify({ persisted: seq }),
       ]);
+      await recordEvent(tx, {
+        type: "message.created",
+        integrationId: updated.rows[0]?.integration_id ?? null,
+        dedupeKey: `message:${conversationId}:${seq}`,
+        data: { conversationId, seq, role: message.role },
+      });
       return "inserted";
     }
     const existing = await tx.query<{ blob_id: string }>(

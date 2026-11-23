@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import { ButtonLink, EmptyState } from "../../_components/ui.tsx";
 import { requireSession } from "../../_lib/session.ts";
 
-export const metadata: Metadata = { title: "API keys" };
+export const metadata: Metadata = { title: "Integrations" };
 
-export default async function ApiKeysPage() {
+export default async function IntegrationsPage() {
   await requireSession();
   return (
     <EmptyState
-      title="API keys"
+      title="Integrations"
       icon={
         <svg
           aria-hidden="true"
@@ -27,17 +27,19 @@ export default async function ApiKeysPage() {
       }
     >
       <p>
-        API keys authenticate your workspace to the tenant API. Send one with every request as{" "}
+        An integration is one system you connect to Kerby: a support bot, a back office, a nightly
+        job. It holds the API keys that system uses, what those keys may do (scopes), and where its
+        events are sent (subscriptions).
+      </p>
+      <p>
+        Send a key with every request as{" "}
         <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-xs text-zinc-800">
           Authorization: Bearer kb_…
         </code>
-      </p>
-      <p>
-        A key is shown once, when you create it. You can revoke a key at any time; requests using it
-        then fail.
+        . Keys rotate within an integration; its scopes and subscriptions stay.
       </p>
       <div className="pt-2">
-        <ButtonLink href="/dashboard/api-keys/new">Create a key</ButtonLink>
+        <ButtonLink href="/dashboard/integrations/new">Create an integration</ButtonLink>
       </div>
     </EmptyState>
   );

@@ -8,10 +8,13 @@ import type {
   GetTraceResponse,
   Limits,
   PostMessageResponse,
+  Scope,
 } from "@kerby/contracts";
 import {
   createApiKey,
   createConsoleSession,
+  createIntegration,
+  ensureDefaultIntegration,
   insertConsoleUser,
   insertTenant,
   readModelKey,
@@ -27,7 +30,7 @@ import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secre
 import { serve } from "@kerby/serve";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createApiApp } from "./index.ts";
+import { createApiApp, createDestinations } from "./index.ts";
 import { createAuthenticator } from "./service/auth.ts";
 import type { ApiDeps } from "./types/index.ts";
 
@@ -48,9 +51,11 @@ async function harness(
     failedAuthPerMinute?: number;
     trustProxy?: boolean;
     maxStreamsPerProcess?: number;
+    allowLocalDestinations?: boolean;
   } = {},
 ) {
   const keys = generateSecretsKeyPair();
+  const deliveryKeys = generateSecretsKeyPair();
   const control = await createTestControlDb();
   cleanups.push(() => control[Symbol.asyncDispose]());
   const blobs = await createTestBlobs();
@@ -64,6 +69,8 @@ async function harness(
     pools,
     blobs,
     sealer: createSealer(keys.publicKey),
+    deliverySealer: createSealer(deliveryKeys.publicKey),
+    destinations: createDestinations(options.allowLocalDestinations ?? false),
     settings: {
       defaultModel: "faux/faux-1",
       modelProviders: options.providers ?? ["anthropic", "openai", "opencode"],
@@ -78,21 +85,40 @@ async function harness(
       defaultStorageBytes: 1024 ** 3,
       failedAuthPerMinute: options.failedAuthPerMinute ?? 1000,
       trustProxy: options.trustProxy ?? false,
+      defaultSubscriptions: 10,
     },
   };
   const server = await serve(createApiApp(deps), { host: "127.0.0.1", port: 0 });
   cleanups.push(() => server.close());
   const base = `http://127.0.0.1:${server.port}`;
 
-  /** A tenant: a control-plane row, a key, and its own migrated database. */
+  /** A tenant: a control-plane row, its `default` integration (every scope) and a key of it, and its own migrated database. */
   async function tenant(name: string, limits: Limits = {}) {
     const row = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1, limits });
     await setTenantStatus(control.db, row.id, "active");
-    const { key, secret } = await createApiKey(control.db, row.id);
+    const integration = await ensureDefaultIntegration(control.db, row.id);
+    const { key, secret } = await createApiKey(control.db, row.id, integration.id);
     const database: TestTenant = await createTestTenant();
     cleanups.push(() => database[Symbol.asyncDispose]());
     urls.set(row.id, database.url);
-    return { id: row.id, key, secret, ctx: { tenantId: row.id, db: database.db }, database };
+    return {
+      id: row.id,
+      integration,
+      key,
+      secret,
+      ctx: { tenantId: row.id, db: database.db },
+      database,
+    };
+  }
+
+  /** Another integration of the tenant, with `scopes`, and a key of it. */
+  async function integration(tenantId: string, scopes: readonly Scope[]) {
+    const made = await createIntegration(control.db, tenantId, {
+      name: `integration-${crypto.randomUUID().slice(0, 8)}`,
+      scopes,
+    });
+    const { secret } = await createApiKey(control.db, tenantId, made.id);
+    return { id: made.id, secret };
   }
 
   const call = (
@@ -121,7 +147,7 @@ async function harness(
     });
     return createConsoleSession(control.db, { id, tenantId }, new Date(Date.now() + ttlMs));
   }
-  return { control, blobs, deps, base, tenant, call, keys, signIn };
+  return { control, blobs, deps, base, tenant, integration, call, keys, signIn };
 }
 
 const text = (value: string) => [{ type: "text", text: value }] as const;
@@ -174,6 +200,9 @@ describe("authentication", () => {
     await expect(auth.authenticate(t.secret)).resolves.toEqual({
       tenantId: t.id,
       actor: `key:${t.key.id}`,
+      integrationId: t.integration.id,
+      scopes: new Set(["conversations", "judgments", "events", "tenant", "admin"]),
+      visibility: "tenant",
       limits: {},
     });
 
@@ -1588,6 +1617,7 @@ describe("prompts", () => {
         state: { ticket: "I was charged twice." },
         questions,
         prompt: { name: "triage/billing", version: 1 },
+        integrationId: t.integration.id,
       },
     ]);
     expect(await (await h.call(t.secret, "GET", `/v1/judgments/${id}`)).json()).toMatchObject({
@@ -1607,5 +1637,521 @@ describe("prompts", () => {
       prompt: { name: "triage/billing", version: 1 },
     });
     expect(mixed.status).toBe(400);
+  });
+});
+
+type EventsPage = {
+  events: {
+    id: string;
+    type: string;
+    integrationId: string | null;
+    data: { conversationId?: string };
+  }[];
+  next: string;
+};
+
+const codeOf = async (response: Response) =>
+  ((await response.json()) as { error: { code: string; message: string } }).error;
+
+/** `GET /v1/events` until at least `count` events arrived (each call long-polls), or fail after `ms`. */
+async function eventsUntil(
+  h: Harness,
+  secret: string,
+  count: number,
+  query = "",
+  ms = 10_000,
+): Promise<EventsPage> {
+  const events: EventsPage["events"] = [];
+  let next: string | undefined;
+  const deadline = Date.now() + ms;
+  while (events.length < count && Date.now() < deadline) {
+    const after = next === undefined ? "" : `&after=${next}`;
+    const response = await h.call(secret, "GET", `/v1/events?wait=1${query}${after}`);
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as EventsPage;
+    events.push(...page.events);
+    next = page.next;
+  }
+  return { events, next: next ?? expect.fail("no page read") };
+}
+
+describe("scopes", () => {
+  it("refuses a route whose scope the key's integration lacks, naming the scope", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const none = await h.integration(t.id, []);
+    const routes: [Scope, string, string, object?][] = [
+      ["conversations", "GET", "/v1/conversations"],
+      ["conversations", "POST", "/v1/conversations", {}],
+      ["judgments", "POST", "/v1/judgments", { state: "x", questions: {} }],
+      ["events", "GET", "/v1/events"],
+      ["admin", "GET", "/v1/model-keys"],
+      ["admin", "GET", "/v1/prompts"],
+      ["admin", "GET", "/v1/subscriptions"],
+    ];
+    for (const [scope, method, path, body] of routes) {
+      const refused = await h.call(none.secret, method, path, body);
+      expect(refused.status, `${method} ${path}`).toBe(403);
+      const error = await codeOf(refused);
+      expect(error.code).toBe("forbidden");
+      expect(error.message).toContain(`"${scope}"`);
+      expect(error.message).toContain("console");
+    }
+
+    // only what it holds
+    const reader = await h.integration(t.id, ["events"]);
+    expect((await h.call(reader.secret, "GET", "/v1/events")).status).toBe(200);
+    expect((await h.call(reader.secret, "GET", "/v1/conversations")).status).toBe(403);
+  });
+});
+
+describe("visibility between integrations", () => {
+  const KEY = "ts-key-0123456789abcdef";
+  const judgment = {
+    state: { ticket: "I was charged twice." },
+    questions: { billing: { type: "noul", instructions: "Is `ticket` about billing?" } },
+  };
+
+  it("an integration without tenant sees only its own work; a tenant key and the console see everything", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const own: Scope[] = ["conversations", "judgments", "events"];
+    const a = await h.integration(t.id, own);
+    const b = await h.integration(t.id, own);
+    await h.call(t.secret, "PUT", "/v1/model-keys/typesafe", { apiKey: KEY });
+
+    const { id } = await newConversation(h, a.secret);
+    expect(
+      (await h.call(a.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hi" }))
+        .status,
+    ).toBe(202);
+    const submitted = await h.call(a.secret, "POST", "/v1/judgments", judgment);
+    expect(submitted.status).toBe(202);
+    const judgmentId = ((await submitted.json()) as { id: string }).id;
+
+    // a tenant key sees a's events once they commit
+    const all = await eventsUntil(h, t.secret, 2);
+    expect(all.events.map((e) => e.integrationId)).toEqual([a.id, a.id]);
+
+    // b: every read of a's work is "not found", as for an id that does not exist
+    for (const path of [
+      `/v1/conversations/${id}`,
+      `/v1/conversations/${id}/events`,
+      `/v1/conversations/${id}/trace`,
+      `/v1/judgments/${judgmentId}`,
+    ])
+      expect((await h.call(b.secret, "GET", path)).status, path).toBe(404);
+    expect(
+      (await h.call(b.secret, "POST", `/v1/conversations/${id}/messages`, { content: "intrusion" }))
+        .status,
+    ).toBe(404);
+    expect(
+      (
+        (await (await h.call(b.secret, "GET", "/v1/conversations")).json()) as {
+          conversations: unknown[];
+        }
+      ).conversations,
+    ).toEqual([]);
+    expect(
+      ((await (await h.call(b.secret, "GET", "/v1/events")).json()) as EventsPage).events,
+    ).toEqual([]);
+
+    // a sees its own
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${id}`)).status).toBe(200);
+    expect((await h.call(a.secret, "GET", `/v1/judgments/${judgmentId}`)).status).toBe(200);
+    expect(
+      ((await (await h.call(a.secret, "GET", "/v1/events")).json()) as EventsPage).events,
+    ).toHaveLength(2);
+
+    // the tenant key and a console session see everything
+    const console = await h.signIn(t.id);
+    for (const secret of [t.secret, console]) {
+      expect((await h.call(secret, "GET", `/v1/conversations/${id}`)).status).toBe(200);
+      expect((await h.call(secret, "GET", `/v1/judgments/${judgmentId}`)).status).toBe(200);
+      expect(
+        ((await (await h.call(secret, "GET", "/v1/events")).json()) as EventsPage).events,
+      ).toHaveLength(2);
+    }
+
+    // what a person starts in the console belongs to no integration: a key without tenant cannot see it
+    const fromConsole = await newConversation(h, console);
+    expect(fromConsole.integrationId).toBeNull();
+    expect((await h.call(a.secret, "GET", `/v1/conversations/${fromConsole.id}`)).status).toBe(404);
+    const consoleJudgment = await h.call(console, "POST", "/v1/judgments", judgment);
+    const consoleJudgmentId = ((await consoleJudgment.json()) as { id: string }).id;
+    expect((await h.call(a.secret, "GET", `/v1/judgments/${consoleJudgmentId}`)).status).toBe(404);
+    expect((await h.call(t.secret, "GET", `/v1/judgments/${consoleJudgmentId}`)).status).toBe(200);
+  });
+});
+
+describe("event log (GET /v1/events)", () => {
+  it("returns conversation.created then message.created, with a cursor that moves past a filter that matches nothing", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { id } = await newConversation(h, t.secret);
+    await h.call(t.secret, "POST", `/v1/conversations/${id}/messages`, { content: "hi" });
+
+    const page = await eventsUntil(h, t.secret, 2);
+    expect(page.events.map((e) => [e.type, e.data.conversationId])).toEqual([
+      ["conversation.created", id],
+      ["message.created", id],
+    ]);
+    expect(page.events[0]?.integrationId).toBe(t.integration.id);
+
+    // nothing matches turn.*, yet the cursor moves past both events: reading on from it never sees them again
+    const quiet = (await (
+      await h.call(t.secret, "GET", "/v1/events?types=turn.*")
+    ).json()) as EventsPage;
+    expect(quiet.events).toEqual([]);
+    const after = (await (
+      await h.call(t.secret, "GET", `/v1/events?after=${quiet.next}`)
+    ).json()) as EventsPage;
+    expect(after.events).toEqual([]);
+
+    // by conversation
+    const other = await newConversation(h, t.secret);
+    const only = await eventsUntil(h, t.secret, 1, `&conversationId=${other.id}`);
+    expect(only.events.map((e) => e.data.conversationId)).toEqual([other.id]);
+  });
+
+  it("names the parameter it refuses", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    for (const [query, param] of [
+      ["limit=0", "limit"],
+      ["types=nope", "types"],
+      ["after=yesterday", "after"],
+      ["wait=31", "wait"],
+      ["conversationId=x", "conversationId"],
+    ]) {
+      const refused = await h.call(t.secret, "GET", `/v1/events?${query}`);
+      expect(refused.status, query).toBe(400);
+      expect((await codeOf(refused)).message).toMatch(new RegExp(`^${param}:`));
+    }
+  });
+
+  it("long-polls: answers as soon as an event commits, and empty once wait passes", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    // the log's present position
+    const start = (await (await h.call(t.secret, "GET", "/v1/events")).json()) as EventsPage;
+
+    const began = Date.now();
+    const polled = h.call(t.secret, "GET", `/v1/events?wait=20&after=${start.next}`);
+    await sleep(300);
+    const { id } = await newConversation(h, t.secret);
+    const page = (await (await polled).json()) as EventsPage;
+    expect(page.events.map((e) => [e.type, e.data.conversationId])).toEqual([
+      ["conversation.created", id],
+    ]);
+    expect(Date.now() - began).toBeLessThan(10_000);
+
+    const quietFrom = Date.now();
+    const quiet = (await (
+      await h.call(t.secret, "GET", `/v1/events?wait=1&after=${page.next}`)
+    ).json()) as EventsPage;
+    expect(quiet.events).toEqual([]);
+    expect(Date.now() - quietFrom).toBeGreaterThanOrEqual(900);
+  });
+
+  it("counts a long poll against the tenant's stream cap", async () => {
+    const h = await harness({ maxStreams: 1 });
+    const t = await h.tenant("acme");
+    const controller = new AbortController();
+    const held = fetch(`${h.base}/v1/events?wait=30`, {
+      headers: { authorization: `Bearer ${t.secret}` },
+      signal: controller.signal,
+    }).catch(() => undefined);
+    await sleep(300);
+    const refused = await h.call(t.secret, "GET", "/v1/events?wait=1");
+    expect(refused.status).toBe(429);
+    expect((await codeOf(refused)).code).toBe("too_many_streams");
+    // a poll that does not wait holds nothing
+    expect((await h.call(t.secret, "GET", "/v1/events")).status).toBe(200);
+    // the disconnect frees the slot
+    controller.abort();
+    await held;
+    let status = 0;
+    for (let i = 0; i < 50 && status !== 200; i++) {
+      await sleep(100);
+      status = (await h.call(t.secret, "GET", "/v1/events?wait=1")).status;
+    }
+    expect(status).toBe(200);
+  });
+});
+
+describe("subscriptions", () => {
+  const webhook = (url = "https://example.com/hooks/kerby") => ({
+    destination: { kind: "webhook", url },
+    types: ["turn.*"],
+  });
+  type Created = {
+    subscription: { id: string; integrationId: string; scope: string; state: string };
+    secret: string;
+  };
+
+  const create = async (h: Harness, secret: string, body: object = webhook()) => {
+    const response = await h.call(secret, "POST", "/v1/subscriptions", body);
+    return {
+      response,
+      created: response.status === 201 ? ((await response.json()) as Created) : undefined,
+    };
+  };
+
+  it("is for admin keys; shows the secret once, starts at now, and audits each change", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const user = await h.integration(t.id, ["conversations", "events"]);
+    expect((await create(h, user.secret)).response.status).toBe(403);
+
+    const { response, created } = await create(h, t.secret);
+    expect(response.status).toBe(201);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    expect(created?.secret).toMatch(/^whsec_/);
+    expect(created?.subscription).toMatchObject({
+      integrationId: t.integration.id,
+      scope: "own",
+      state: "active",
+    });
+    // its cursor is made at once, at the log's present position
+    expect(
+      (await t.ctx.db.query("select 1 from subscription_cursors where subscription_id = $1", [id]))
+        .rowCount,
+    ).toBe(1);
+
+    const listed = await (await h.call(t.secret, "GET", "/v1/subscriptions")).text();
+    const one = await (await h.call(t.secret, "GET", `/v1/subscriptions/${id}`)).text();
+    for (const text of [listed, one]) {
+      expect(text).toContain(id);
+      expect(text).not.toContain(created?.secret);
+      expect(text).not.toMatch(/secret/i);
+    }
+
+    const rotated = await h.call(t.secret, "POST", `/v1/subscriptions/${id}/secret`);
+    expect(rotated.status).toBe(200);
+    const rotation = (await rotated.json()) as { secret: string; previousExpiresAt: string };
+    expect(rotation.secret).toMatch(/^whsec_/);
+    expect(rotation.secret).not.toBe(created?.secret);
+    const overlap = Date.parse(rotation.previousExpiresAt) - Date.now();
+    expect(overlap).toBeGreaterThan(23 * 3_600_000);
+    expect(overlap).toBeLessThanOrEqual(24 * 3_600_000);
+
+    const patched = await h.call(t.secret, "PATCH", `/v1/subscriptions/${id}`, {
+      types: ["*"],
+      enabled: false,
+    });
+    expect(patched.status).toBe(200);
+    expect(await patched.json()).toMatchObject({ types: ["*"], state: "disabled" });
+
+    expect((await h.call(t.secret, "DELETE", `/v1/subscriptions/${id}`)).status).toBe(204);
+    expect((await h.call(t.secret, "GET", `/v1/subscriptions/${id}`)).status).toBe(404);
+    const audited = await h.control.db.query<{ action: string }>(
+      "select action from audit_log where tenant_id = $1 and action like 'subscription.%' order by id",
+      [t.id],
+    );
+    expect(audited.rows.map((row) => row.action)).toEqual([
+      "subscription.create",
+      "subscription.rotate_secret",
+      "subscription.update",
+      "subscription.delete",
+    ]);
+  });
+
+  it("refuses scope tenant for an integration without it, and a console session must name the integration", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const narrow = await h.integration(t.id, ["admin"]);
+
+    const refused = await create(h, narrow.secret, { ...webhook(), scope: "tenant" });
+    expect(refused.response.status).toBe(403);
+    expect((await codeOf(refused.response)).code).toBe("forbidden");
+    const own = await create(h, narrow.secret);
+    expect(own.created?.subscription).toMatchObject({ integrationId: narrow.id, scope: "own" });
+    const widened = await h.call(
+      t.secret,
+      "PATCH",
+      `/v1/subscriptions/${own.created?.subscription.id}`,
+      { scope: "tenant" },
+    );
+    expect(widened.status).toBe(403);
+    // the default integration holds tenant
+    expect((await create(h, t.secret, { ...webhook(), scope: "tenant" })).response.status).toBe(
+      201,
+    );
+
+    const console = await h.signIn(t.id);
+    const unnamed = await create(h, console);
+    expect(unnamed.response.status).toBe(400);
+    expect(
+      (await create(h, console, { ...webhook(), integrationId: narrow.id })).created?.subscription,
+    ).toMatchObject({ integrationId: narrow.id });
+    expect(
+      (await create(h, console, { ...webhook(), integrationId: crypto.randomUUID() })).response
+        .status,
+    ).toBe(404);
+  });
+
+  it("refuses a plain http URL unless local destinations are allowed", async () => {
+    const strict = await harness();
+    const t = await strict.tenant("acme");
+    const refused = await create(strict, t.secret, webhook("http://localhost:9999/hook"));
+    expect(refused.response.status).toBe(400);
+    expect(await codeOf(refused.response)).toMatchObject({
+      code: "invalid_destination",
+      message: expect.stringMatching(/https/),
+    });
+
+    const local = await harness({ allowLocalDestinations: true });
+    const u = await local.tenant("acme");
+    expect(
+      (await create(local, u.secret, webhook("http://localhost:9999/hook"))).response.status,
+    ).toBe(201);
+  });
+
+  it("holds a tenant to its subscription limit, and hides one tenant's subscriptions from another", async () => {
+    const h = await harness();
+    const a = await h.tenant("a", { subscriptions: 1 });
+    const b = await h.tenant("b");
+    const { created } = await create(h, a.secret);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    const over = await create(h, a.secret);
+    expect(over.response.status).toBe(409);
+    expect((await codeOf(over.response)).code).toBe("subscription_limit");
+
+    for (const [method, path] of [
+      ["GET", `/v1/subscriptions/${id}`],
+      ["PATCH", `/v1/subscriptions/${id}`],
+      ["DELETE", `/v1/subscriptions/${id}`],
+      ["POST", `/v1/subscriptions/${id}/secret`],
+      ["POST", `/v1/subscriptions/${id}/test`],
+      ["GET", `/v1/subscriptions/${id}/deliveries`],
+    ] as const)
+      expect(
+        (await h.call(b.secret, method, path, method === "PATCH" ? { types: ["*"] } : undefined))
+          .status,
+        `${method} ${path}`,
+      ).toBe(404);
+    expect(
+      (
+        (await (await h.call(b.secret, "GET", "/v1/subscriptions")).json()) as {
+          subscriptions: unknown[];
+        }
+      ).subscriptions,
+    ).toEqual([]);
+    expect((await h.call(a.secret, "GET", `/v1/subscriptions/${id}`)).status).toBe(200);
+  });
+
+  it("queues a test ping on the deliveries queue", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const { created } = await create(h, t.secret);
+    const id = created?.subscription.id ?? expect.fail("not created");
+    const queued = await h.call(t.secret, "POST", `/v1/subscriptions/${id}/test`);
+    expect(queued.status).toBe(202);
+    const { eventId } = (await queued.json()) as { eventId: string };
+    const tasks = await t.ctx.db.query<{ task_name: string; params: unknown }>(
+      "select task_name, params from absurd.t_deliveries",
+    );
+    expect(tasks.rows).toEqual([
+      {
+        task_name: "deliver-events",
+        params: { subscriptionId: id, ping: { id: eventId, createdAt: expect.any(String) } },
+      },
+    ]);
+    // nothing on the turns queue
+    expect((await t.ctx.db.query("select 1 from absurd.t_turns")).rowCount).toBe(0);
+    expect(
+      await (await h.call(t.secret, "GET", `/v1/subscriptions/${id}/deliveries`)).json(),
+    ).toEqual({
+      deliveries: [],
+      nextBefore: null,
+    });
+  });
+
+  it("without tenant, an admin key manages only its own integration's subscriptions", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const a = await h.integration(t.id, ["conversations", "admin"]);
+    const b = await h.integration(t.id, ["conversations", "admin"]);
+    const ofA = (await create(h, a.secret)).created?.subscription.id ?? expect.fail("not created");
+    const ofB = (await create(h, b.secret)).created?.subscription.id ?? expect.fail("not created");
+    await newConversation(h, a.secret);
+    const [event] = (await eventsUntil(h, t.secret, 1)).events;
+    const eventId = event?.id ?? expect.fail("no event");
+
+    for (const [method, path, body] of [
+      ["GET", `/v1/subscriptions/${ofA}`, undefined],
+      ["PATCH", `/v1/subscriptions/${ofA}`, { types: ["*"] }],
+      ["DELETE", `/v1/subscriptions/${ofA}`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/secret`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/test`, undefined],
+      ["POST", `/v1/subscriptions/${ofA}/redeliver`, { eventId }],
+      ["GET", `/v1/subscriptions/${ofA}/deliveries`, undefined],
+    ] as const)
+      expect((await h.call(b.secret, method, path, body)).status, `${method} ${path}`).toBe(404);
+    // creating one for a's integration, even scope own, is not found: b cannot point a's events anywhere
+    expect((await create(h, b.secret, { ...webhook(), integrationId: a.id })).response.status).toBe(
+      404,
+    );
+    const listedBy = async (secret: string) =>
+      (
+        (await (await h.call(secret, "GET", "/v1/subscriptions")).json()) as {
+          subscriptions: { id: string }[];
+        }
+      ).subscriptions.map((s) => s.id);
+    expect(await listedBy(b.secret)).toEqual([ofB]);
+    expect(await listedBy(a.secret)).toEqual([ofA]);
+    // nothing b tried changed a's subscription or queued a delivery to it
+    expect((await h.call(a.secret, "GET", `/v1/subscriptions/${ofA}`)).status).toBe(200);
+    expect((await t.ctx.db.query("select 1 from absurd.t_deliveries")).rowCount).toBe(0);
+
+    // a tenant-scoped admin key and the console see and manage all
+    const console = await h.signIn(t.id);
+    for (const secret of [t.secret, console]) {
+      expect(await listedBy(secret)).toEqual([ofA, ofB]);
+      expect(
+        (await h.call(secret, "PATCH", `/v1/subscriptions/${ofA}`, { description: "x" })).status,
+      ).toBe(200);
+      expect((await h.call(secret, "POST", `/v1/subscriptions/${ofB}/test`)).status).toBe(202);
+      expect((await h.call(secret, "GET", `/v1/subscriptions/${ofB}/deliveries`)).status).toBe(200);
+    }
+    expect((await create(h, console, { ...webhook(), integrationId: a.id })).response.status).toBe(
+      201,
+    );
+    expect((await h.call(t.secret, "DELETE", `/v1/subscriptions/${ofB}`)).status).toBe(204);
+  });
+
+  it("redelivers only an event both the caller and the subscription may see", async () => {
+    const h = await harness();
+    const t = await h.tenant("acme");
+    const scopes: Scope[] = ["conversations", "admin"];
+    const a = await h.integration(t.id, scopes);
+    const b = await h.integration(t.id, scopes);
+    const ofA = await newConversation(h, a.secret);
+    const ofB = await newConversation(h, b.secret);
+    const { events } = await eventsUntil(h, t.secret, 2);
+    const eventOf = (conversationId: string) =>
+      events.find((e) => e.data.conversationId === conversationId)?.id ?? expect.fail("no event");
+
+    const subscription = (await create(h, a.secret)).created?.subscription.id;
+    const redeliver = (secret: string, eventId: string) =>
+      h.call(secret, "POST", `/v1/subscriptions/${subscription}/redeliver`, { eventId });
+
+    // b's event: the subscription (a's, scope own) may not see it, whoever asks
+    expect((await redeliver(t.secret, eventOf(ofB.id))).status).toBe(404);
+    // a's event asked by b, who may not see it
+    expect((await redeliver(b.secret, eventOf(ofA.id))).status).toBe(404);
+    expect((await redeliver(a.secret, crypto.randomUUID())).status).toBe(404);
+    expect((await t.ctx.db.query("select 1 from absurd.t_deliveries")).rowCount).toBe(0);
+
+    const queued = await redeliver(a.secret, eventOf(ofA.id));
+    expect(queued.status).toBe(202);
+    expect(await queued.json()).toEqual({ eventId: eventOf(ofA.id) });
+    const tasks = await t.ctx.db.query<{ params: unknown }>(
+      "select params from absurd.t_deliveries",
+    );
+    expect(tasks.rows).toEqual([
+      { params: { subscriptionId: subscription, eventIds: [eventOf(ofA.id)] } },
+    ]);
   });
 });

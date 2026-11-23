@@ -11,11 +11,14 @@ import {
   persistMessage,
   readHistory,
   recordToolExecution,
+  recordTurnOutcome,
+  recordTurnStarted,
   SeqConflictError,
-  setLastError,
+  type TurnOutcome,
 } from "@kerby/conversations";
 import type { TenantContext } from "@kerby/db";
 import { holdsRun, type RunContext, type TaskParams } from "@kerby/durable";
+import { notifyDispatchers } from "@kerby/events";
 import { alert, errorFields, log } from "@kerby/observability";
 import type { WorkerDeps } from "../types/index.ts";
 import { checkUserMessage, guardToolCall } from "./guardrails.ts";
@@ -94,8 +97,15 @@ export async function runTurn(
   const { conversationId } = params;
   const started = performance.now();
   let persisted = 0;
-  const conversation = await findConversation(ctx.db, conversationId);
+  const conversation = await findConversation(ctx.db, conversationId, "tenant");
   if (!conversation) throw new Error(`conversation ${conversationId} does not exist`);
+  await recordTurnStarted(ctx, conversation, params.seq);
+  await notifyDispatchers(deps.control, ctx.tenantId);
+  /** The turn's one outcome; a run that lost its task records nothing (the fence is inside). */
+  const finish = async (outcome: TurnOutcome): Promise<void> => {
+    await recordTurnOutcome(ctx, { conversation, seq: params.seq, run, outcome });
+    await notifyDispatchers(deps.control, ctx.tenantId);
+  };
 
   // Rehydrate: the newest whole turns that fit the history budget, and the position of the next message.
   const history = await readHistory(
@@ -115,6 +125,7 @@ export async function runTurn(
     });
   }
   let nextSeq = history.lastSeq + 1;
+  const live = new LiveEvents(ctx, conversationId, run.runId, () => nextSeq);
   const tools = tenantTools({
     enableEcho: deps.settings.enableEchoTool,
     judge: await judgeTool(deps, ctx.tenantId, conversationId),
@@ -127,13 +138,11 @@ export async function runTurn(
     apiKey = provider ? await deps.modelKeys(ctx.tenantId, provider) : undefined;
     if (!apiKey) {
       // The same turn gets the same answer until the tenant adds a key: no retry.
-      await setLastError(
-        ctx.db,
-        conversationId,
-        provider
-          ? `no model key for provider "${provider}": PUT /v1/model-keys/${provider}, then post a message`
-          : `model "${conversation.model}" must look like <provider>/<modelId>`,
-      );
+      const error = provider
+        ? `no model key for provider "${provider}": PUT /v1/model-keys/${provider}, then post a message`
+        : `model "${conversation.model}" must look like <provider>/<modelId>`;
+      await live.send({ type: "run_end", reason: "refused", error });
+      await finish({ type: "failed", reason: "no_model_key", error });
       log("warn", "turn refused: no model key", { provider: provider ?? "invalid" });
       return;
     }
@@ -161,18 +170,15 @@ export async function runTurn(
     signal: run.signal,
   };
 
-  const live = new LiveEvents(ctx, conversationId, run.runId, () => nextSeq);
   const trace = new TraceRecorder(ctx, deps.blobs, conversationId, run);
   try {
     // Guardrails on the user message come first: nothing is sent to the model, or paid for, until it has passed.
     const verdict = await checkUserMessage(deps, ctx, conversation, params.seq, run);
     if (verdict.type === "unavailable") {
       // The same message gets the same answer until the tenant fixes the key or the policy: no retry.
-      await setLastError(
-        ctx.db,
-        conversationId,
-        `a guardrail could not be checked, so the message was not answered: ${scrub(verdict.error)}`,
-      );
+      const error = `a guardrail could not be checked, so the message was not answered: ${scrub(verdict.error)}`;
+      await live.send({ type: "run_end", reason: "refused", error });
+      await finish({ type: "failed", reason: "guardrail_unavailable", error });
       log("warn", "turn refused: a guardrail could not be checked");
       return;
     }
@@ -202,6 +208,8 @@ export async function runTurn(
           run,
         }),
       );
+      await notifyDispatchers(deps.control, ctx.tenantId);
+      await finish({ type: "blocked", lastSeq: seq, guardrails: verdict.by });
       await live.send({ type: "run_end", reason: "done" });
       trace.record({ type: "message_end", seq, role: "assistant" });
       trace.record({ type: "run_end", reason: "done" });
@@ -209,6 +217,7 @@ export async function runTurn(
       log("info", "message blocked by guardrails", { guardrails: verdict.by.length });
       return;
     }
+    let refused = false;
     for await (const event of deps.runtime.run(agentRun)) {
       if (event.type !== "message_end") {
         const safe =
@@ -217,7 +226,12 @@ export async function runTurn(
             : event;
         await live.send(safe);
         if (safe.type === "run_end" && safe.reason === "refused") {
-          await setLastError(ctx.db, conversationId, safe.error ?? "the request was refused");
+          refused = true;
+          await finish({
+            type: "failed",
+            reason: "refused",
+            error: safe.error ?? "the request was refused",
+          });
         }
         const traced = traceOf(safe);
         if (traced) trace.record(traced);
@@ -236,6 +250,7 @@ export async function runTurn(
       );
       nextSeq = seq + 1;
       persisted++;
+      await notifyDispatchers(deps.control, ctx.tenantId);
       if (event.message.role !== "user") {
         trace.record({ type: "message_end", seq, role: event.message.role });
         await trace.flush();
@@ -254,6 +269,8 @@ export async function runTurn(
         });
       }
     }
+    // A run that persisted nothing ends on the conversation's newest message.
+    if (!refused) await finish({ type: "completed", lastSeq: nextSeq - 1 });
     log("info", "turn completed", {
       durationMs: Math.round(performance.now() - started),
       messages: persisted,
@@ -279,18 +296,21 @@ export async function runTurn(
     // error can be long.
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     trace.record({ type: "run_error", error: scrub(reason) });
+    const finalAttempt = run.maxAttempts !== null && run.attempt >= run.maxAttempts;
+    const failure = `the turn failed after ${run.attempt} attempts`;
+    if (finalAttempt) trace.record({ type: "run_end", reason: "failed", error: failure });
     await trace.flush().catch((flushError: unknown) => {
       log("warn", "could not record a failed run in the trace", errorFields(flushError));
     });
     // The last attempt failing for good leaves a trace on the conversation, unless this run is already superseded.
-    const finalAttempt = run.maxAttempts !== null && run.attempt >= run.maxAttempts;
     if (finalAttempt && (await holdsRun(ctx.db, run).catch(() => false))) {
       alert("turn failed for good", { attempt: run.attempt, ...errorFields(error) });
-      await setLastError(
-        ctx.db,
-        conversationId,
-        `the turn failed after ${run.attempt} attempts`,
-      ).catch(() => {});
+      await live.send({ type: "run_end", reason: "failed", error: failure });
+      await finish({ type: "failed", reason: "error", error: failure }).catch(
+        (finishError: unknown) => {
+          log("warn", "could not record a failed turn", errorFields(finishError));
+        },
+      );
     }
     throw error;
   }

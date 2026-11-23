@@ -18,7 +18,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { generateBoxKey, generateSecretsKeyPair, publicKeyOf } from "@kerby/secrets";
 
 const PRODUCTION = "production";
-const SERVICES = ["control", "api", "worker", "console"] as const;
+const SERVICES = ["control", "api", "worker", "dispatcher", "console"] as const;
 /** The services the internet reaches, each on a generated Railway domain. */
 const PUBLIC_SERVICES = ["api", "console"] as const;
 type Service = (typeof SERVICES)[number];
@@ -118,8 +118,9 @@ function iac(command: "plan" | "apply", ...flags: string[]): void {
 
 /**
  * Create each secret the IaC file leaves to `preserve()`, once. A secret that exists is never replaced:
- * SECRETS_PRIVATE_KEYS opens every stored tenant key, and TENANT_DB_KEYS every stored tenant database password (rotate
- * it by the runbook in docs/deploy.md). Variables are set without a deploy: `deploy` is what rolls them out.
+ * SECRETS_PRIVATE_KEYS opens every stored tenant key, DELIVERY_SECRETS_PRIVATE_KEYS every subscription's signing secret,
+ * and TENANT_DB_KEYS every stored tenant database password (rotate it by the runbook in docs/deploy.md). Variables are
+ * set without a deploy: `deploy` is what rolls them out.
  */
 function ensureSecrets(environment: string): void {
   const set = (service: Service, name: string, value: string) =>
@@ -143,7 +144,7 @@ function ensureSecrets(environment: string): void {
     environment !== PRODUCTION &&
     control.OPERATOR_TOKEN !== undefined &&
     control.OPERATOR_TOKEN === variablesOf("control", PRODUCTION).OPERATOR_TOKEN;
-  // The console references CONSOLE_TOKEN here, and api and worker TENANT_DB_KEYS below (.railway/railway.ts).
+  // The console references CONSOLE_TOKEN here, and api, worker and dispatcher TENANT_DB_KEYS below (.railway/railway.ts).
   for (const name of [
     "OPERATOR_TOKEN",
     "APP_DATABASE_PASSWORD",
@@ -155,13 +156,23 @@ function ensureSecrets(environment: string): void {
   if (control.TENANT_DB_KEYS === undefined || copied) {
     set("control", "TENANT_DB_KEYS", generateBoxKey());
   }
-  const existing = copied ? undefined : variablesOf("worker", environment).SECRETS_PRIVATE_KEYS;
-  const privateKeys = existing ?? generateSecretsKeyPair().privateKey;
-  if (existing === undefined) set("worker", "SECRETS_PRIVATE_KEYS", privateKeys);
-  // The public half is not a secret and always follows the key new secrets are sealed to (the first of the list).
-  const publicKey = publicKeyOf(privateKeys.split(",")[0] ?? "");
-  if (variablesOf("api", environment).SECRETS_PUBLIC_KEY !== publicKey) {
-    set("api", "SECRETS_PUBLIC_KEY", publicKey);
+  // Each key pair: the private half on the one service that opens, created once; the public half on the api, which is
+  // not a secret and always follows the key new secrets are sealed to (the first of the list).
+  const pairs = [
+    { opener: "worker", privateName: "SECRETS_PRIVATE_KEYS", publicName: "SECRETS_PUBLIC_KEY" },
+    {
+      opener: "dispatcher",
+      privateName: "DELIVERY_SECRETS_PRIVATE_KEYS",
+      publicName: "DELIVERY_SECRETS_PUBLIC_KEY",
+    },
+  ] as const;
+  const api = variablesOf("api", environment);
+  for (const { opener, privateName, publicName } of pairs) {
+    const existing = copied ? undefined : variablesOf(opener, environment)[privateName];
+    const privateKeys = existing ?? generateSecretsKeyPair().privateKey;
+    if (existing === undefined) set(opener, privateName, privateKeys);
+    const publicKey = publicKeyOf(privateKeys.split(",")[0] ?? "");
+    if (api[publicName] !== publicKey) set("api", publicName, publicKey);
   }
 }
 
@@ -297,7 +308,7 @@ async function deploy(environment: string, tag: string): Promise<void> {
   }
   // control first: it migrates the control database and creates the limited roles the others connect as.
   await rollout("control", environment, tag);
-  // Then every tenant database, before the api, worker and console that read the new schema move.
+  // Then every tenant database, before the api, worker, dispatcher and console that read the new schema move.
   migrateTenants(environment);
   await Promise.all(
     SERVICES.filter((service) => service !== "control").map((service) =>

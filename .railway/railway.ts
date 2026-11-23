@@ -54,7 +54,7 @@ export default defineRailway((ctx) => {
   const host = variable("Postgres", "RAILWAY_PRIVATE_DOMAIN");
   const port = variable("Postgres", "PGPORT");
   const adminUrl = `postgresql://${variable("Postgres", "PGUSER")}:${variable("Postgres", "POSTGRES_PASSWORD")}@${host}:${port}/postgres`;
-  // The limited roles: api and worker connect as `kerby_app`, the console as `kerby_console`. Control creates both and
+  // The limited roles: api, worker and dispatcher connect as `kerby_app`, the console as `kerby_console`. Control creates both and
   // sets their passwords at startup.
   const database = variable("Postgres", "PGDATABASE");
   const limitedUrl = `postgresql://kerby_app:${variable("control", "APP_DATABASE_PASSWORD")}@${host}:${port}/${database}`;
@@ -74,7 +74,7 @@ export default defineRailway((ctx) => {
   const alerts = { ALERT_WEBHOOK_URL: preserve() };
 
   // Control holds the administrative credentials: it makes the limited roles and every tenant database. Its secrets are
-  // the source; api and worker reference TENANT_DB_KEYS (which opens tenant database passwords, ADR 0009) and the console
+  // the source; api, worker and dispatcher reference TENANT_DB_KEYS (which opens tenant database passwords, ADR 0009) and the console
   // CONSOLE_TOKEN, so there is one copy of each.
   const control = service("control", {
     source: source("control"),
@@ -100,7 +100,8 @@ export default defineRailway((ctx) => {
     },
   });
 
-  // The api seals tenants' model keys to the public half of the secrets key pair and cannot open them (ADR 0008).
+  // The api seals tenants' model keys to the public half of the secrets key pair and cannot open them (ADR 0008), and
+  // subscriptions' signing secrets to the public half of the delivery key pair, which only the dispatcher opens (ADR 0019).
   const api = service("api", {
     source: source("api"),
     healthcheck: "/healthz",
@@ -112,6 +113,7 @@ export default defineRailway((ctx) => {
       CONTROL_DATABASE_URL: limitedUrl,
       TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
       SECRETS_PUBLIC_KEY: preserve(),
+      DELIVERY_SECRETS_PUBLIC_KEY: preserve(),
       ...alerts,
       // Railway's edge writes X-Forwarded-For with the client first: the failed-auth limit counts that address.
       TRUST_PROXY: "true",
@@ -129,6 +131,21 @@ export default defineRailway((ctx) => {
       CONTROL_DATABASE_URL: limitedUrl,
       TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
       SECRETS_PRIVATE_KEYS: preserve(),
+      ...alerts,
+    },
+  });
+
+  // The dispatcher (ADR 0019) pushes events to subscriptions. It alone holds the private half of the delivery key pair:
+  // it opens a subscription's signing secret inside the delivery that uses it. No domain: it only calls out.
+  const dispatcher = service("dispatcher", {
+    source: source("dispatcher"),
+    healthcheck: "/healthz",
+    env: {
+      PORT: "8083",
+      HEALTH_PORT: "8083",
+      CONTROL_DATABASE_URL: limitedUrl,
+      TENANT_DB_KEYS: control.env.TENANT_DB_KEYS,
+      DELIVERY_SECRETS_PRIVATE_KEYS: preserve(),
       ...alerts,
     },
   });
@@ -157,6 +174,7 @@ export default defineRailway((ctx) => {
       control,
       api,
       worker,
+      dispatcher,
       consoleService,
       db,
       dbVolume,
