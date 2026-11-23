@@ -1,6 +1,6 @@
 // Prompts (ADR 0017): named, versioned instructions a tenant keeps in its own database, which its clients use by name
-// and version. Two kinds: `chat`, a system prompt in markdown (with `{{variables}}`) plus the model and guardrails a
-// conversation runs with; `decision`, the questions (and model) of a judgment (ADR 0015). A prompt has one draft;
+// and version. Two kinds: `chat`, a system prompt in markdown (with `{{variables}}`) plus the model, guardrails and tools
+// a conversation runs with; `decision`, the questions (and model) of a judgment (ADR 0015). A prompt has one draft;
 // publishing freezes the draft as the next version (1, 2, ...); a label (`production`) points at a version and moves.
 import { z } from "zod";
 import { GuardrailsSchema, QuestionSetSchema } from "./judgment.ts";
@@ -12,6 +12,7 @@ import {
   PromptVariableNameSchema,
   PromptVariableValuesSchema,
 } from "./prompt-ref.ts";
+import { ToolPatternSchema, ToolSelectionSchema } from "./tools.ts";
 
 export const PromptKindSchema = z.enum(["chat", "decision"]);
 export type PromptKind = z.infer<typeof PromptKindSchema>;
@@ -38,6 +39,8 @@ const ChatPromptBodySchema = z.object({
   /** `<provider>/<model>`; without one, a conversation gets the deployment's default model. */
   model: ModelId.exactOptional(),
   guardrails: GuardrailsSchema.default([]),
+  /** The tools a conversation from it may call (ADR 0019); resolved when the conversation is made. */
+  tools: ToolSelectionSchema.default([]),
   /** Every `{{name}}` in the text, declared once; a published version declares exactly the names its text uses. */
   variables: z
     .array(PromptVariableSchema)
@@ -162,5 +165,6 @@ const RenderedPromptSchema = z.object({
   /** Null: the deployment's default model. */
   model: z.string().nullable(),
   guardrails: GuardrailsSchema,
+  tools: z.array(ToolPatternSchema),
 });
 export type RenderedPrompt = z.infer<typeof RenderedPromptSchema>;

@@ -16,7 +16,9 @@ import {
   type ContentPartSchema,
   CreateConversationRequestSchema,
   CreateTenantRequestSchema,
+  CreateToolServerRequestSchema,
   EventEnvelopeSchema,
+  exposedToolName,
   GetConversationQuerySchema,
   GetConversationResponseSchema,
   GuardrailsSchema,
@@ -29,10 +31,13 @@ import {
   PromptLabelSchema,
   PromptNameSchema,
   PromptVersionParamSchema,
+  parseToolPattern,
   QuestionSchema,
   SubmitJudgmentRequestSchema,
   type ToolCallSchema,
+  ToolHeaderNameSchema,
   type ToolResultSchema,
+  ToolSelectionSchema,
   type UsageSchema,
 } from "./index.ts";
 
@@ -265,7 +270,12 @@ describe("prompt references", () => {
     expect(CreateConversationRequestSchema.safeParse({ prompt, externalUserId: "u" }).success).toBe(
       true,
     );
-    for (const extra of [{ system: "x" }, { model: "faux/faux-1" }, { guardrails: [] }])
+    for (const extra of [
+      { system: "x" },
+      { model: "faux/faux-1" },
+      { guardrails: [] },
+      { tools: [] },
+    ])
       expect(CreateConversationRequestSchema.safeParse({ prompt, ...extra }).success).toBe(false);
   });
 });
@@ -295,5 +305,72 @@ describe("guardrails", () => {
     expect(refuses(Array.from({ length: 17 }, (_, i) => ({ ...jailbreak, name: `g${i}` })))).toBe(
       true,
     );
+  });
+});
+
+describe("tools", () => {
+  it("reads a pattern as a server and one tool, or a server and every tool", () => {
+    expect(parseToolPattern("github/create_issue")).toEqual({
+      slug: "github",
+      tool: "create_issue",
+    });
+    expect(parseToolPattern("kerby/*")).toEqual({ slug: "kerby", tool: null });
+    expect(parseToolPattern("tools.v2/x")).toBe(undefined);
+    for (const pattern of [
+      "github",
+      "github/",
+      "/x",
+      "GitHub/x",
+      "-gh/x",
+      "github/a/b",
+      "github/a b",
+    ])
+      expect(parseToolPattern(pattern)).toBe(undefined);
+  });
+
+  it("names a tool for the model only when every provider accepts the name", () => {
+    expect(exposedToolName("github", "create_issue")).toBe("github__create_issue");
+    expect(exposedToolName("a", "x".repeat(61))).toBe(`a__${"x".repeat(61)}`);
+    expect(exposedToolName("a", "x".repeat(62))).toBe(undefined);
+    expect(exposedToolName("files", "read.text")).toBe(undefined);
+  });
+
+  it("refuses a repeated pattern and more than 64 in a selection", () => {
+    expect(ToolSelectionSchema.safeParse(["a/x", "a/x"]).success).toBe(false);
+    const many = Array.from({ length: 65 }, (_, i) => `a/t${i}`);
+    expect(ToolSelectionSchema.safeParse(many.slice(0, 64)).success).toBe(true);
+    expect(ToolSelectionSchema.safeParse(many).success).toBe(false);
+  });
+
+  it("keeps a credential out of headers the transport sets and off plain http", () => {
+    expect(ToolHeaderNameSchema.safeParse("Authorization").success).toBe(true);
+    expect(ToolHeaderNameSchema.safeParse("X-Api-Key").success).toBe(true);
+    for (const header of [
+      "Host",
+      "content-type",
+      "Mcp-Session-Id",
+      "Transfer-Encoding",
+      "Bad Header",
+    ])
+      expect(ToolHeaderNameSchema.safeParse(header).success).toBe(false);
+    const auth = { kind: "header", header: "Authorization" };
+    const ok = { slug: "crm", url: "https://mcp.example.com/mcp", auth, credential: "Bearer t" };
+    expect(CreateToolServerRequestSchema.safeParse(ok).success).toBe(true);
+    expect(
+      CreateToolServerRequestSchema.safeParse({ ...ok, url: "http://mcp.example.com/mcp" }).success,
+    ).toBe(false);
+    expect(CreateToolServerRequestSchema.safeParse({ ...ok, credential: undefined }).success).toBe(
+      false,
+    );
+    expect(CreateToolServerRequestSchema.safeParse({ ...ok, credential: "a\r\nb" }).success).toBe(
+      false,
+    );
+    expect(CreateToolServerRequestSchema.safeParse({ ...ok, slug: "kerby" }).success).toBe(false);
+    expect(
+      CreateToolServerRequestSchema.safeParse({
+        slug: "open",
+        url: "https://user:pw@mcp.example.com/",
+      }).success,
+    ).toBe(false);
   });
 });

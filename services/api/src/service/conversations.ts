@@ -55,6 +55,7 @@ function conversationResource(record: {
     updatedAt: record.updatedAt.toISOString(),
     guardrails: record.guardrails,
     prompt: record.prompt,
+    tools: [],
   };
 }
 

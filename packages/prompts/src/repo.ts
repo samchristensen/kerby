@@ -179,7 +179,7 @@ export async function createPrompt(
   const draft: PromptBody =
     input.draft ??
     (input.kind === "chat"
-      ? { kind: "chat", text: "", guardrails: [], variables: [] }
+      ? { kind: "chat", text: "", guardrails: [], tools: [], variables: [] }
       : { kind: "decision", questions: {} });
   if (draft.kind !== input.kind)
     throw new PromptKindError(

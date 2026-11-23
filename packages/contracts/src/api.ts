@@ -3,6 +3,7 @@ import { z } from "zod";
 import { AgentEventSchema, AgentMessageSchema, ContentPartSchema } from "./agent.ts";
 import { GuardrailsSchema } from "./judgment.ts";
 import { ChatPromptRefSchema, MAX_PROMPT_TEXT, PinnedPromptSchema } from "./prompt-ref.ts";
+import { ToolPatternSchema, ToolSelectionSchema } from "./tools.ts";
 
 const Id = z.string().min(1).max(128);
 
@@ -16,8 +17,13 @@ export const CreateConversationRequestSchema = z
     /** Guardrails for this conversation; the tenant must hold a key for the default judgment provider. */
     guardrails: GuardrailsSchema.optional(),
     /**
-     * A published chat prompt (ADR 0017): it sets the system prompt (its text, variables filled in), the model and the
-     * guardrails, so none of those three may be given with it.
+     * The tools the assistant may call (ADR 0019), as `<server>/<tool>` or `<server>/*`. None named, none offered. The
+     * caller's integration must be granted every one.
+     */
+    tools: ToolSelectionSchema.optional(),
+    /**
+     * A published chat prompt (ADR 0017): it sets the system prompt (its text, variables filled in), the model, the
+     * guardrails and the tools, so none of those four may be given with it.
      */
     prompt: ChatPromptRefSchema.optional(),
   })
@@ -26,8 +32,12 @@ export const CreateConversationRequestSchema = z
       request.prompt === undefined ||
       (request.system === undefined &&
         request.model === undefined &&
-        request.guardrails === undefined),
-    { message: "a prompt sets system, model and guardrails: leave them out", path: ["prompt"] },
+        request.guardrails === undefined &&
+        request.tools === undefined),
+    {
+      message: "a prompt sets system, model, guardrails and tools: leave them out",
+      path: ["prompt"],
+    },
   );
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
 
@@ -45,13 +55,16 @@ const ConversationSchema = z.object({
   guardrails: GuardrailsSchema.default([]),
   /** The chat prompt version it was started from (ADR 0017); null when the request wrote its own system prompt. */
   prompt: PinnedPromptSchema.nullable().default(null),
+  /** The tools it may call (ADR 0019), by the servers' current names; a deleted server's drop out. */
+  tools: z.array(ToolPatternSchema).default([]),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
 
-/** A conversation in a list: everything but the system prompt and guardrails, with how many messages it holds. */
+/** A conversation in a list: everything but the system prompt, guardrails and tools, with how many messages it holds. */
 const ConversationSummarySchema = ConversationSchema.omit({
   system: true,
   guardrails: true,
+  tools: true,
 }).extend({
   messageCount: z.number().int().nonnegative(),
 });

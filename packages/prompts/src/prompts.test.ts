@@ -47,6 +47,7 @@ const chat = (text: string, variables: string[] = []): PromptBody => ({
   kind: "chat",
   text,
   guardrails: [],
+  tools: [],
   variables: variables.map((name) => ({ name })),
 });
 

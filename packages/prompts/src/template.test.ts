@@ -56,6 +56,7 @@ describe("publishProblems", () => {
     kind: "chat",
     text,
     guardrails: [],
+    tools: [],
     variables: names.map((name) => ({ name })),
   });
 

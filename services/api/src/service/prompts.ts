@@ -192,8 +192,8 @@ export async function getTenantPromptVersion(
 }
 
 /**
- * A published chat prompt with its variables filled in: the system prompt, model (null for the deployment's default)
- * and guardrails a conversation started from it runs with. A decision prompt is `PromptKindError`.
+ * A published chat prompt with its variables filled in: the system prompt, model (null for the deployment's default),
+ * guardrails and tool patterns a conversation started from it runs with. A decision prompt is `PromptKindError`.
  */
 export async function renderChatPrompt(
   ctx: TenantContext,
@@ -210,6 +210,7 @@ export async function renderChatPrompt(
     text: renderTemplate(version.body.text, version.body.variables, ref.variables ?? {}),
     model: version.body.model ?? null,
     guardrails: version.body.guardrails,
+    tools: version.body.tools,
   };
 }
 
