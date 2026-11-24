@@ -6,10 +6,8 @@ deleted (recoverable from the tag `saas-poc`). Decision: [ADR 0024](../../adr/00
 
 ## Open questions (block the named milestone)
 
-- ~~Tear down the live Railway project `kerby`?~~ The owner said yes (2026-11-23). Then found: it serves a live tenant,
-  `lochmoore` (6 conversations, 26 messages, a model key; last message 2026-11-23 19:24 UTC), so the lochmoore app calls
-  it. Before deleting: move lochmoore to an install of its own (K6's proof), or confirm its data may go. Blocks K5's
-  last item. **Human.**
+- ~~Tear down the live Railway project `kerby`?~~ Yes, though it served a live `lochmoore` tenant (6 conversations,
+  26 messages, a model key): the owner chose deleting it over moving lochmoore first (2026-11-24). Done.
 
 ## Milestones
 
@@ -66,7 +64,7 @@ deleted (recoverable from the tag `saas-poc`). Decision: [ADR 0024](../../adr/00
 - [x] Scripts and CI: `scripts/multitenant.ts` and its make target, the Railway path of `scripts/logs.ts`,
   `scripts/railway.ts`, `.railway/`, the `railway-*`, `deploy` and `env-down` targets, CI's Railway jobs (images now
   `kerby` and `kerby-console`), `uptime.yml`. Nightly keeps `make e2e`.
-- [ ] The live Railway project, per the open question above.
+- [x] The live Railway project `kerby`: deleted (2026-11-24; Railway removes it for good on 2026-11-26).
 
 ### K6 Inside a Railway project
 
@@ -104,3 +102,9 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
   and is refused (two tenants) or cannot open them: `make down-v` once. Found: the old `make e2e` checks read whole
   tables, so they failed on a kept stack; they now name their conversation. Production holds a live `lochmoore` tenant,
   so its teardown waits for the owner.
+- 2026-11-24 Railway project `kerby` deleted with `railway delete` (the owner's call, knowing lochmoore used it):
+  Railway stopped its services at once (the console's domain answers 404) and removes the project, its Postgres volume,
+  backups and buckets on 2026-11-26 06:31 UTC; until then the dashboard can restore it. Lochmoore's Kerby integration is
+  down until it points at an install of its own (K6's proof). The repository secrets the deleted CI jobs read
+  (`RAILWAY_TOKEN`, `GHCR_PULL_TOKEN`, `KERBY_CANARY_KEY`, variables `KERBY_API_URL`, `KERBY_CANARY_CONVERSATION_ID`) are
+  unused now; the owner may delete them.
