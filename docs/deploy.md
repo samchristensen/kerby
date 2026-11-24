@@ -10,7 +10,7 @@ install is two images CI publishes on every merge to `main`, plus a Postgres and
 | Postgres      | Postgres 18 with pgvector              | the control database, the tenant's database, the template it was copied from        | 5432, never shared with your app |
 | S3-compatible | a Railway bucket, or RustFS locally    | message bodies and traces under `t/<tenantId>/`                                     |                                  |
 
-Tags: `main` (the newest merge) and `sha-<commit>` (pin one). On start, control migrates every database, makes the
+Tags: `main` (the newest merge) and `sha-<commit>` (pin one), each for `linux/amd64` and `linux/arm64`. On start, control migrates every database, makes the
 tenant if there is none, and keeps the configured API key and console admin as config says; the other processes start
 once it is ready. Upgrading is pulling a newer image and restarting: code tolerates the schema one release back, so a
 second `KERBY_ROLES=worker` container may run the old image for a minute.
