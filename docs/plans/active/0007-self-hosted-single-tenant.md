@@ -138,3 +138,13 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
   linux/arm64/v8` (the images were amd64 only; `platform: linux/amd64` made it run), so CI builds both; a dispatcher
   test raced (one `update ... available_at` could land while the task still ran) and blocked the `sdk` job, which needs
   `test`. Not proven: the Railway recipe.
+- 2026-11-24 Roles split, and the guide for agents. Ran control, api, worker and dispatcher each in its own container from
+  the published image, with no ordering between them: 1 control, 2 api, 3 then 9 workers, 2 dispatchers, all healthy; a
+  turn, a streamed reply and a signed webhook (sent by the dispatcher container) went through. Found: a role that starts
+  before control exits with `password authentication failed for user "kerby_app"` and needs a restart policy; the tenant
+  role's 20-connection limit is a constant, not the setting `docs/deploy.md` implied (wording fixed, limit in tech-debt).
+  `docs/deploy.md` gained "Deploying with an agent" (stable raw URLs, what to settle with the owner, when it is done),
+  `openssl` secrets for a deploy without a clone (accepted by `parseApiKey` and `deriveInstanceKeys`), and "Running the
+  roles separately". Cleaned up: the superseded per-service GHCR packages (gone), the four repository secrets and two
+  variables no workflow reads, eight merged local branches. Left: `kerby-console` is still private, and `kerby-runner`,
+  `kerby-admin`, `kerby-ui` (not from this repository) are the owner's to remove.

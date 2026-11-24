@@ -338,7 +338,9 @@ prints the configured API key and the console's admin. The same images run hoste
   (`processSpecs`): control first, the rest once control answers its health. It tags each child's JSON lines with
   `service`, and when any child exits it stops the others and exits nonzero, so Docker or Railway restarts the whole
   container. Control's port (8081) and the health ports of worker (8082) and dispatcher (8083) stay inside the container;
-  the image's `HEALTHCHECK` (`node services/kerby/src/index.ts health`) asks each of them.
+  the image's `HEALTHCHECK` (`node services/kerby/src/index.ts health`) asks each of them. A container may run any subset
+  of the roles (`docs/deploy.md#running-the-roles-separately`): only one that runs control waits for it, so another role
+  that starts first fails to connect as `kerby_app`, exits, and is restarted.
 - Two published ports: the API on `127.0.0.1:${KERBY_API_PORT:-8080}` and the console on
   `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign in as `KERBY_ADMIN_EMAIL`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
