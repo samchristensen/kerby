@@ -68,17 +68,19 @@ export const SubscriptionSchema = z.object({
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
 /** The signing secret is returned here and on rotation, never again. */
-const CreateSubscriptionResponseSchema = z.object({
+export const CreateSubscriptionResponseSchema = z.object({
   subscription: SubscriptionSchema,
   secret: z.string(),
 });
 export type CreateSubscriptionResponse = z.infer<typeof CreateSubscriptionResponseSchema>;
 
-const ListSubscriptionsResponseSchema = z.object({ subscriptions: z.array(SubscriptionSchema) });
+export const ListSubscriptionsResponseSchema = z.object({
+  subscriptions: z.array(SubscriptionSchema),
+});
 export type ListSubscriptionsResponse = z.infer<typeof ListSubscriptionsResponseSchema>;
 
 /** The old secret keeps signing, beside the new one, until `previousExpiresAt`. */
-const RotateSecretResponseSchema = z.object({
+export const RotateSecretResponseSchema = z.object({
   secret: z.string(),
   previousExpiresAt: z.iso.datetime(),
 });
@@ -111,7 +113,7 @@ export const ListDeliveriesQuerySchema = z.object({
 });
 export type ListDeliveriesQuery = z.infer<typeof ListDeliveriesQuerySchema>;
 
-const ListDeliveriesResponseSchema = z.object({
+export const ListDeliveriesResponseSchema = z.object({
   deliveries: z.array(DeliveryAttemptSchema),
   /** Pass as `before` for older attempts; null on the last page. */
   nextBefore: z.string().nullable(),
@@ -122,5 +124,5 @@ export type ListDeliveriesResponse = z.infer<typeof ListDeliveriesResponseSchema
 export const RedeliverRequestSchema = z.object({ eventId: z.uuid() });
 
 /** A queued delivery: a test ping, or a redelivery. The delivery log shows how it went. */
-const DeliveryQueuedResponseSchema = z.object({ eventId: z.uuid() });
+export const DeliveryQueuedResponseSchema = z.object({ eventId: z.uuid() });
 export type DeliveryQueuedResponse = z.infer<typeof DeliveryQueuedResponseSchema>;

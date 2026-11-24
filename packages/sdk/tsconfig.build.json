@@ -1,0 +1,19 @@
+{
+  // `make sdk-build`: emits the SDK and the contract and port packages it imports into one tree, dist/lib/<package>/src.
+  // scripts/sdk.ts then rewrites the `@kerby/*` specifiers to relative paths, so dist/ needs nothing from this repo.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist/lib",
+    "rootDir": "..",
+    "paths": {
+      "@kerby/contracts/tenant": ["../contracts/src/tenant.ts"],
+      "@kerby/agent": ["../agent/src/index.ts"],
+      "@kerby/judgment": ["../judgment/src/index.ts"]
+    }
+  },
+  "include": ["src/index.ts"],
+  "exclude": []
+}

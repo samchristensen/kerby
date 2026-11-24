@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e tools-e2e multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
+.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e tools-e2e sdk-e2e sdk-build sdk-publish multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
 
 # The Railway environment that railway-setup, deploy and env-down act on.
 ENV ?= production
@@ -84,6 +84,15 @@ e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes 
 
 tools-e2e: ## Tools on the real stack (ADR 0022): a local MCP server listed, granted to an integration without admin, called; drift pinned
 	node scripts/tools-e2e.ts
+
+sdk-e2e: ## @kerby/sdk against the running local stack (make up first): every resource called over HTTP, webhooks verified
+	node scripts/sdk-e2e.ts
+
+sdk-build: ## Build @kerby/sdk into packages/sdk/dist (compiled code, contracts, guide), as published
+	node scripts/sdk.ts build
+
+sdk-publish: ## Publish @kerby/sdk to its private GitHub repo as the next v<major>.<minor>.<n> if the build changed (CI does this on main; DRY=1 pushes nothing)
+	node scripts/sdk.ts publish $(if $(DRY),--dry-run)
 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, a 200-tenant load run (KERBY_LOAD_TENANTS=n) and stream saturation on two api processes
 	node scripts/multitenant.ts

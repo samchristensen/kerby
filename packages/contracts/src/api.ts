@@ -41,7 +41,7 @@ export const CreateConversationRequestSchema = z
   );
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
 
-const ConversationSchema = z.object({
+export const ConversationSchema = z.object({
   id: z.uuid(),
   externalUserId: z.string().nullable(),
   /** The integration that started it (ADR 0020); null when a person started it in the console. */
@@ -134,7 +134,7 @@ export const PostMessageRequestSchema = z.object({
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequestSchema>;
 
-const PostMessageResponseSchema = z.object({
+export const PostMessageResponseSchema = z.object({
   /** The user message's position; the turn that answers it starts after it. */
   seq: z.number().int().positive(),
 });

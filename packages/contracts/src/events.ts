@@ -153,7 +153,7 @@ export const ListEventsQuerySchema = z.object({
   wait: z.coerce.number().int().min(0).max(30).default(0),
 });
 
-const ListEventsResponseSchema = z.object({
+export const ListEventsResponseSchema = z.object({
   events: z.array(PublicEventSchema),
   /** Pass as `after` next time. It moves even when nothing matched, so a quiet filter never rescans. */
   next: EventCursorSchema,
