@@ -117,3 +117,12 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
   wait for a merge to `main`. Found: the images are amd64 only and the `kerby` image carries the console's dependencies
   (both in tech-debt); the SDK lockfile records an SSH address, so CI and Docker builds need a key or token and `git`
   (now in the SDK guide); npm 12 refuses the git dependency without `--allow-git=all` (same).
+- 2026-11-24 Opened ([ADR 0025](../../adr/0025-public-repository-sdk-on-npm.md)). `samchristensen/kerby` is public under
+  MIT: gitleaks over 106 commits found 21 test fixtures and development-only keys, nothing live; the throwaway Railway
+  probe branch is deleted; private vulnerability reporting is on. The SDK publishes to npm from CI as
+  `@samchristensen/kerby-sdk` (the `@kerby` scope is another npm account's), so the `kerby-sdk` repository is not needed.
+  A `make sdk-publish DRY=1` run was accepted by the registry; the packed tarball installed with npm and pnpm and passed
+  `tsc --strict` with `skipLibCheck: false`. PR 24 is green. Pending, in order: the npm org `samchristensen`; a hand-made
+  `0.1.0` (npm binds a trusted publisher only to a package that exists) and `npm trust github`; the merge; `kerby-console`
+  made public on GHCR (its first push predates the public repository); then `samchristensen/kerby-sdk` and the
+  `SDK_DEPLOY_KEY` secret deleted.
