@@ -1,6 +1,6 @@
 # 0013. Tenant exports in their own bucket; a nightly copy of the bucket
 
-- Status: proposed
+- Status: superseded by [0024](0024-self-hosted-single-tenant.md)
 - Date: 2026-11-22
 
 ## Context

@@ -1,12 +1,9 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e tools-e2e sdk-e2e sdk-build sdk-publish multitenant secrets-key railway-plan railway-setup railway-registry deploy env-down worktree
-
-# The Railway environment that railway-setup, deploy and env-down act on.
-ENV ?= production
+.PHONY: help setup check typecheck lint format architecture docs knip test up down down-v psql logs logs-query e2e tools-e2e sdk-e2e sdk-build sdk-publish secrets-key worktree
 
 # A worktree's .env (make worktree) names its compose project and published ports. Compose reads it by itself; the
-# scripts behind e2e, multitenant and logs-query read these from the environment, so export them.
+# scripts behind e2e and logs-query read these from the environment, so export them.
 -include .env
 export KERBY_PROJECT KERBY_API_PORT KERBY_CONSOLE_PORT
 
@@ -55,11 +52,12 @@ knip: ## Dead files, unused exports and types, unused or undeclared dependencies
 test: ## Run all tests
 	pnpm exec vitest run
 
-up: ## Build and start the local stack, provision the default tenant, print its API key and the console's address
+up: ## Build and start the local stack (one install: kerby and the console), print its API key and the console's address
 	docker compose up -d --build --wait
-	@key=$$(./scripts/provision-default.sh) && \
-	  echo "" && echo "Kerby is up. API: http://127.0.0.1:$${KERBY_API_PORT:-8080}" && echo "API key (tenant default): $$key" && \
-	  echo "Console (sign up for a workspace of your own): http://127.0.0.1:$${KERBY_CONSOLE_PORT:-3000}"
+	@key=$$(docker compose exec -T kerby printenv KERBY_API_KEY) && \
+	  email=$$(docker compose exec -T kerby printenv KERBY_ADMIN_EMAIL) && \
+	  echo "" && echo "Kerby is up. API: http://127.0.0.1:$${KERBY_API_PORT:-8080}" && echo "API key: $$key" && \
+	  echo "Console: http://127.0.0.1:$${KERBY_CONSOLE_PORT:-3000} (sign in as $$email)"
 
 down: ## Stop the local stack, keep its data
 	docker compose down
@@ -73,13 +71,12 @@ psql: ## psql into the control database (DB=<name> for another, e.g. a tenant da
 logs: ## Follow the stack logs
 	docker compose logs -f --tail=100
 
-# ENV counts only when given on the command line: its default (production) is for the Railway targets below.
-logs-query: ## Filtered JSON log lines: TENANT= LEVEL=warn MSG= SERVICE= SINCE=30m UNTIL=; ENV=<name> reads Railway
+logs-query: ## Filtered JSON log lines of the local stack: TENANT= LEVEL=warn MSG= SERVICE=api SINCE=30m UNTIL=
 	@node scripts/logs.ts $(if $(TENANT),--tenant '$(TENANT)') $(if $(LEVEL),--level '$(LEVEL)') \
 	  $(if $(MSG),--msg '$(MSG)') $(if $(SERVICE),--service '$(SERVICE)') $(if $(SINCE),--since '$(SINCE)') \
-	  $(if $(UNTIL),--until '$(UNTIL)') $(if $(filter command line,$(origin ENV)),--env '$(ENV)')
+	  $(if $(UNTIL),--until '$(UNTIL)')
 
-e2e: ## End to end on the real stack: kill a worker mid-turn, the turn finishes elsewhere (KERBY_E2E_KEEP=1 keeps the stack)
+e2e: ## End to end on the real stack: two worker containers, kill one mid-turn, the turn finishes on the other (KERBY_E2E_KEEP=1 keeps the stack)
 	node scripts/e2e.ts
 
 tools-e2e: ## Tools on the real stack (ADR 0022): a local MCP server listed, granted to an integration without admin, called; drift pinned
@@ -94,24 +91,5 @@ sdk-build: ## Build @kerby/sdk into packages/sdk/dist (compiled code, contracts,
 sdk-publish: ## Publish @kerby/sdk to its private GitHub repo as the next v<major>.<minor>.<n> if the build changed (CI does this on main; DRY=1 pushes nothing)
 	node scripts/sdk.ts publish $(if $(DRY),--dry-run)
 
-multitenant: ## Cross-tenant attempts, suspension within the cache TTL, a 200-tenant load run (KERBY_LOAD_TENANTS=n) and stream saturation on two api processes
-	node scripts/multitenant.ts
-
-secrets-key: ## Make secret keys: the secrets pair (workers private, api public) and a TENANT_DB_KEYS key
+secrets-key: ## Make an install's secrets: KERBY_SECRET_KEY (every other key derives from it) and a KERBY_API_KEY
 	node scripts/secrets-key.ts
-
-railway-plan: ## Preview what .railway/railway.ts would change in ENV (default production); changes nothing
-	node scripts/railway.ts plan $(ENV)
-
-railway-setup: ## Make ENV match .railway/railway.ts (IaC), add its domain and secrets; safe to run again
-	node scripts/railway.ts setup $(ENV)
-
-deploy: ## Roll the CI-built images of TAG (default: this commit, sha-<commit>) out to ENV: control, then api and worker
-	node scripts/railway.ts deploy $(ENV) $(TAG)
-
-railway-registry: ## Give ENV's services the GHCR pull token in $GHCR_PULL_TOKEN (classic token, read:packages only)
-	node scripts/railway.ts registry $(ENV)
-
-env-down: ## Delete a Railway environment and its data: make env-down ENV=pr-123 (never production)
-	@test "$(ENV)" != production || (echo "usage: make env-down ENV=<name>; production is not deleted from here" && exit 1)
-	railway environment delete $(ENV) --yes

@@ -1,6 +1,6 @@
-// The tenant console's people and sessions (ADR 0014, migration 0005). Control inserts a person when it provisions
-// their tenant at sign-up; the console reads people to check a password and keeps sessions. A session token is 256
-// random bits that only the browser holds (a cookie); the table keeps its SHA-256, so reading it signs no one in.
+// The tenant console's people and sessions (ADR 0014, migration 0005). Control keeps the one configured admin
+// (ADR 0024); the console reads people to check a password and keeps sessions. A session token is 256 random bits that
+// only the browser holds (a cookie); the table keeps its SHA-256, so reading it signs no one in.
 import { createHash, randomBytes } from "node:crypto";
 import type { ControlQueryable } from "@kerby/db";
 import { errorCode } from "@kerby/observability";
@@ -53,6 +53,30 @@ export async function findConsoleUser(
     : undefined;
 }
 
+export async function setConsoleUserPassword(
+  db: ControlQueryable,
+  userId: string,
+  passwordHash: string,
+): Promise<void> {
+  await db.query("update console_users set password_hash = $2 where id = $1", [
+    userId,
+    passwordHash,
+  ]);
+}
+
+/** Delete the tenant's people other than `keepUserId`, and their sessions; how many went. */
+export async function deleteOtherConsoleUsers(
+  db: ControlQueryable,
+  tenantId: string,
+  keepUserId: string,
+): Promise<number> {
+  const { rowCount } = await db.query(
+    "delete from console_users where tenant_id = $1 and id <> $2",
+    [tenantId, keepUserId],
+  );
+  return rowCount ?? 0;
+}
+
 const tokenHash = (token: string) => createHash("sha256").update(token).digest();
 /** 32 random bytes, base64url: what `createConsoleSession` hands out. Anything else is not looked up. */
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -81,7 +105,6 @@ type ConsoleSession = {
   tenantId: string;
   tenantName: string;
   tenantStatus: string;
-  isAdmin: boolean;
   expiresAt: Date;
 };
 
@@ -97,10 +120,9 @@ export async function readConsoleSession(
     tenant_id: string;
     tenant_name: string;
     tenant_status: string;
-    is_admin: boolean;
     expires_at: Date;
   }>(
-    `select s.user_id, u.email, u.is_admin, s.tenant_id, t.name as tenant_name, t.status as tenant_status, s.expires_at
+    `select s.user_id, u.email, s.tenant_id, t.name as tenant_name, t.status as tenant_status, s.expires_at
        from console_sessions s
        join console_users u on u.id = s.user_id
        join tenants t on t.id = s.tenant_id
@@ -115,7 +137,6 @@ export async function readConsoleSession(
         tenantId: row.tenant_id,
         tenantName: row.tenant_name,
         tenantStatus: row.tenant_status,
-        isAdmin: row.is_admin,
         expiresAt: row.expires_at,
       }
     : undefined;

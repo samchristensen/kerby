@@ -2,7 +2,6 @@
 // over HTTP against the real api, worker and dispatcher, so a drift between the SDK's contracts and the API fails here.
 // The stack runs the scripted fake model (ARCHITECTURE.md#local-stack): "echo <text>" calls the echo tool, anything
 // else answers "Echo: <text>", "[slow:<ms>]" delays the answer, "[think:<text>]" adds a reasoning block.
-import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -17,6 +16,7 @@ import {
   verifyWebhook,
   type WebhookEvent,
 } from "@kerby/sdk";
+import { stackApiKey } from "./stack.ts";
 
 const BASE = `http://127.0.0.1:${process.env.KERBY_API_PORT ?? "8080"}`;
 
@@ -39,9 +39,7 @@ async function until<T>(
   }
 }
 
-const run = (command: string, args: string[]): string =>
-  execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
-const apiKey = run("./scripts/provision-default.sh", []);
+const apiKey = stackApiKey();
 const kerby = new Kerby({ apiKey, baseUrl: BASE });
 
 console.log("conversations");

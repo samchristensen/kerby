@@ -3,6 +3,8 @@
 //   - links (`[text](path)`, `![alt](path)`, `[ref]: path`) to a relative path that does not exist,
 //   - names a make target (an inline code span starting `make <target>`) the Makefile does not define,
 //   - says a rule is enforced by naming it (rule `x`) and scripts/check-architecture.ts has no rule `x`.
+// History is exempt: a finished plan (docs/plans/done/) and a superseded ADR (`- Status: superseded ...`) record what
+// existed when they were written, so the files and targets they name may be gone (ADR 0024).
 // Limits, on purpose: Markdown is read with regexes, line by line. Fenced code blocks (``` or ~~~) are skipped;
 // inline code spans are not searched for links. Links that wrap across lines, angle-bracket targets (`<path>`),
 // HTML tags, and whether a `#anchor` names a real heading are not checked; external links (any `scheme:`) are not
@@ -37,6 +39,11 @@ const REF_LINK = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/;
 const CODE_SPAN = /`([^`]+)`/g;
 const RULE = /\brule `([^`]+)`/gi;
 
+/** A record of the past: a finished plan, or an ADR a later one superseded. */
+function isHistory(doc: string, text: string): boolean {
+  if (doc.startsWith("docs/plans/done/")) return true;
+  return doc.startsWith("docs/adr/") && /^- Status: superseded\b/im.test(text);
+}
 /** Checks `docs` (paths relative to `root`) against the tree, Makefile, and architecture rules at `root`. */
 export function checkDocs(
   root: string,
@@ -48,7 +55,9 @@ export function checkDocs(
   const targets = makeTargets(existsSync(makefile) ? readFileSync(makefile, "utf8") : "");
 
   for (const doc of docs) {
-    const lines = readFileSync(join(root, doc), "utf8").split("\n");
+    const content = readFileSync(join(root, doc), "utf8");
+    if (isHistory(doc, content)) continue;
+    const lines = content.split("\n");
     let fence: string | undefined;
     lines.forEach((text, i) => {
       const line = i + 1;

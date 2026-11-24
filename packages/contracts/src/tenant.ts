@@ -1,5 +1,5 @@
-// The tenant-facing API's contracts: what `@kerby/sdk` publishes to customers. Operator and console contracts are
-// Kerby's own wire between its services and stay out (they are in `index.ts`, not here).
+// The tenant-facing API's contracts: what `@kerby/sdk` publishes to customers. The install's own shapes (`install.ts`)
+// are Kerby's between its services and stay out (they are in `index.ts`, not here).
 export * from "./agent.ts";
 export * from "./api.ts";
 export * from "./events.ts";

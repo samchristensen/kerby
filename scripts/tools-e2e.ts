@@ -1,24 +1,27 @@
 // The proof of ADR 0022 on the real Compose stack. An MCP server on this machine (the test fixture) is registered by an
-// admin key, listed by a worker through the egress guard (compose lets `host.docker.internal` through, development only),
-// one tool is enabled and granted to an integration without `admin` (ADR 0020), and that integration's conversation
-// calls it. A conversation naming an ungranted tool is refused, as is that key posting to an admin's conversation that
-// names one. A tool whose definition changes keeps showing the model the pinned one until an admin accepts the change.
-// Run with `make tools-e2e`. On Linux the fixture must be reachable from containers at host.docker.internal (it listens
-// on 127.0.0.1, which Docker Desktop forwards; a Linux bridge does not).
+// admin key, listed by a worker through the egress guard (compose lets `host.docker.internal` through), one tool is
+// enabled and granted to an integration without `admin` (ADR 0020), and that integration's conversation calls it. A
+// conversation naming an ungranted tool is refused, as is that key posting to an admin's conversation that names one. A
+// tool whose definition changes keeps showing the model the pinned one until an admin accepts the change. Run with
+// `make tools-e2e`. On Linux the fixture must be reachable from containers at host.docker.internal (it listens on
+// 127.0.0.1, which Docker Desktop forwards; a Linux bridge does not).
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { newApiKey } from "@kerby/control-plane";
 import { startMcpFixture } from "@kerby/mcp/testing";
+import { stackApiKey } from "./stack.ts";
 
 const BASE = `http://127.0.0.1:${process.env.KERBY_API_PORT ?? "8080"}`;
 const KEEP = process.env.KERBY_E2E_KEEP === "1";
 
-const run = (cmd: string, args: string[], env: Record<string, string> = {}): string =>
-  execFileSync(cmd, args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-    env: { ...process.env, ...env },
-  }).trim();
+const run = (cmd: string, args: string[]): string =>
+  execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
 const compose = (...args: string[]) => run("docker", ["compose", ...args]);
+const psql = (sql: string) =>
+  compose("exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "kerby_control", "-tAc", sql)
+    .split("\n")[0]
+    ?.trim();
 
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`tools-e2e failed: ${message}`);
@@ -37,36 +40,6 @@ async function until<T>(
     if (Date.now() > deadline) throw new Error(`tools-e2e failed: timed out waiting for ${what}`);
     await sleep(500);
   }
-}
-
-/** The operator API, which only the control container reaches. */
-function operator(method: string, path: string, body?: unknown): Record<string, unknown> {
-  const script = `
-const response = await fetch("http://127.0.0.1:8081/v1/operator" + process.env.OP_PATH, {
-  method: process.env.OP_METHOD,
-  headers: { authorization: "Bearer " + process.env.OPERATOR_TOKEN, "content-type": "application/json" },
-  body: process.env.OP_BODY || undefined,
-});
-const text = await response.text();
-if (!response.ok) throw new Error(process.env.OP_METHOD + " " + process.env.OP_PATH + ": " + response.status + " " + text);
-console.log(text);`;
-  const out = run("docker", [
-    "compose",
-    "exec",
-    "-T",
-    "-e",
-    `OP_METHOD=${method}`,
-    "-e",
-    `OP_PATH=${path}`,
-    "-e",
-    `OP_BODY=${body === undefined ? "" : JSON.stringify(body)}`,
-    "control",
-    "node",
-    "--input-type=module",
-    "-e",
-    script,
-  ]);
-  return JSON.parse(out) as Record<string, unknown>;
 }
 
 type Reply = { status: number; body: Record<string, unknown> };
@@ -108,22 +81,20 @@ async function main(): Promise<void> {
 
   console.log("bringing the stack up");
   compose("up", "-d", "--build", "--wait");
-  const admin = client(run("./scripts/provision-default.sh", []));
-  const tenants = operator("GET", "/tenants").tenants as { id: string; name: string }[];
-  const tenantId = tenants.find((t) => t.name === "default")?.id;
-  check(tenantId, "found the default tenant");
-  // Made as the console does (the api has no route that makes one), with `tenant` so it sees an admin's conversation
-  // and the grant check is what stops it; its key through the operator API.
-  const sql = `insert into integrations (tenant_id, name, scopes)
-    values ('${tenantId}', 'support bot ${Date.now()}', array['conversations', 'tenant']) returning id`;
-  const integrationId = compose(
-    ...["exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "kerby_control", "-tAc", sql],
-  ).split("\n")[0];
+  const admin = client(stackApiKey());
+  const tenantId = psql("select id from tenants where status = 'active'");
+  check(tenantId, "found the install's tenant");
+  // Made as the console does, with `tenant` so it sees an admin's conversation and the grant check is what stops it;
+  // its key too (the api has no route that makes either).
+  const integrationId = psql(`insert into integrations (tenant_id, name, scopes)
+    values ('${tenantId}', 'support bot ${Date.now()}', array['conversations', 'tenant']) returning id`);
   check(integrationId, "made an integration with conversations and tenant (no admin)");
-  const restricted = client(
-    String(operator("POST", `/tenants/${tenantId}/keys`, { integrationId }).secret),
-  );
-  check(true, "made a key for it through the operator API");
+  const key = newApiKey();
+  const hash = createHash("sha256").update(key.secret).digest("hex");
+  psql(`insert into api_keys (id, tenant_id, integration_id, label, key_hash)
+    values ('${key.id}', '${tenantId}', '${integrationId}', 'tools-e2e', decode('${hash}', 'hex'))`);
+  const restricted = client(key.key);
+  check(true, "made a key for it");
 
   const slug = `crm${Date.now() % 100000}`;
   const created = await admin("POST", "/v1/tool-servers", { slug, url: serverUrl });
@@ -254,7 +225,7 @@ try {
 } catch (error) {
   failed = true;
   console.error(error instanceof Error ? error.message : error);
-  console.error(compose("logs", "--tail", "40", "worker", "api"));
+  console.error(compose("logs", "--tail", "40", "kerby"));
 } finally {
   if (!KEEP) compose("down", "--volumes", "--remove-orphans", "--rmi", "local");
 }

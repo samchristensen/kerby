@@ -24,10 +24,12 @@ worker crashes, and keeping every transcript.
 
 ## 1. Set up
 
-1. **Get a base URL and an API key.**
-   - Hosted: the API's public address (the console's quickstart shows it). In the console create an **integration** with
-     only the scopes your application needs (a chat backend needs `conversations`, plus `events` if it polls events), then
-     copy the key it shows once.
+1. **Get a base URL and an API key.** Kerby runs as an install beside your project (the Kerby repository's
+   `docs/deploy.md`):
+   - In Compose: `http://kerby:8080`; on Railway: `http://kerby.railway.internal:8080`. The install's `KERBY_API_KEY`
+     has every scope (on Railway, reference it: `${{kerby.KERBY_API_KEY}}`). For a narrower key, create an
+     **integration** in the console with only the scopes your application needs (a chat backend needs
+     `conversations`, plus `events` if it polls events), then copy the key it shows once.
    - Local stack (in the Kerby repo): `make up` prints `http://127.0.0.1:8080` and a key. It runs a scripted fake model, so
      no provider key is needed (see [Test without a model](#10-test-without-a-model)).
 2. **Install** (the repository is private; use an account with access, over SSH or a token):
@@ -323,7 +325,7 @@ A caller's own `AbortSignal` abort rejects with the signal's reason, not a Kerby
 | 413    | `conversation_full`, `storage_quota_exceeded`, `too_large`                                                             | 2000 messages / 64 MiB per conversation; the tenant's storage; body too big. Start a new conversation / free space |
 | 429    | `rate_limited`                                                                                                         | Over the request or open-stream limit; honor `retryAfterSeconds`                                                   |
 
-**Limits worth designing around** (defaults; each tenant's are set by the operator): 600 requests a minute per tenant,
+**Limits worth designing around** (defaults; an install may change them in its tenant row): 600 requests a minute per tenant,
 approximate across API processes; a message up to 1 million characters; 100 messages per page by default (500 at
 most), 30 conversations per page (100); open streams per tenant are capped, so close streams you do not need and prefer
 webhooks for background work; events are kept 30 days.

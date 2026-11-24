@@ -39,12 +39,7 @@ export default async function LandingPage() {
             {session ? (
               <ButtonLink href="/dashboard">Open dashboard</ButtonLink>
             ) : (
-              <>
-                <ButtonLink href="/login" variant="ghost">
-                  Sign in
-                </ButtonLink>
-                <ButtonLink href="/signup">Get started</ButtonLink>
-              </>
+              <ButtonLink href="/login">Sign in</ButtonLink>
             )}
           </nav>
         </div>
@@ -57,7 +52,7 @@ export default async function LandingPage() {
               <div className="mb-6">
                 <Mascot state="friendly" size={180} large />
               </div>
-              <p className="text-sm font-semibold text-brand-text">Agent runtime as a service</p>
+              <p className="text-sm font-semibold text-brand-text">Self-hosted agent runtime</p>
               <h1 className="mt-3 text-4xl font-semibold tracking-tight text-fg sm:text-5xl">
                 Durable agents on your own model keys
               </h1>
@@ -66,9 +61,8 @@ export default async function LandingPage() {
                 isolated per tenant. You bring the model keys; we keep every turn safe.
               </p>
               <div className="mt-8 flex flex-wrap gap-3">
-                <ButtonLink href="/signup">Create a workspace</ButtonLink>
-                <ButtonLink href="/login" variant="secondary">
-                  Sign in
+                <ButtonLink href={session ? "/dashboard" : "/login"}>
+                  {session ? "Open dashboard" : "Sign in"}
                 </ButtonLink>
               </div>
             </div>

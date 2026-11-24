@@ -269,3 +269,49 @@ export function createSecretBox(keysBase64: readonly string[], name = "secret bo
     },
   };
 }
+
+// One install (ADR 0024) generates one secret, `KERBY_SECRET_KEY`, and derives every other key from it: HKDF-SHA256 with
+// one `info` label per use, so no derived key reveals another or the master. Any 32 bytes are a valid X25519 private
+// key, so the key pairs derive directly. Changing a label changes that key: the sealed secrets and role passwords made
+// with the old one stop opening.
+const INSTANCE_SALT = Buffer.from("kerby-instance-v1");
+
+/** Every key and password an install uses, derived from its `KERBY_SECRET_KEY`. All base64 but the passwords. */
+export type InstanceKeys = {
+  /** Seals tenant database passwords: `TENANT_DB_KEYS`. */
+  tenantDbKey: string;
+  /** Tenants' model keys and tool credentials (ADR 0008): `SECRETS_PRIVATE_KEYS`, `SECRETS_PUBLIC_KEY`. */
+  secrets: { privateKey: string; publicKey: string };
+  /** Subscriptions' signing secrets (ADR 0019): `DELIVERY_SECRETS_PRIVATE_KEYS`, `DELIVERY_SECRETS_PUBLIC_KEY`. */
+  delivery: { privateKey: string; publicKey: string };
+  /** The `kerby_app` role's password on the control database (api, worker, dispatcher); base64url, URL-safe. */
+  appDatabasePassword: string;
+  /** The `kerby_console` role's password on the control database; base64url, URL-safe. */
+  consoleDatabasePassword: string;
+};
+
+/** Derive an install's keys from `KERBY_SECRET_KEY` (32 bytes, base64). The same master always gives the same keys. */
+export function deriveInstanceKeys(masterBase64: string): InstanceKeys {
+  const master = Buffer.from(masterBase64.trim(), "base64");
+  if (master.length !== 32) {
+    throw new SecretsError(
+      "KERBY_SECRET_KEY must be 32 bytes, base64 encoded (generate one: make secrets-key)",
+    );
+  }
+  const derive = (label: string) =>
+    Buffer.from(hkdfSync("sha256", master, INSTANCE_SALT, `kerby/${label}`, 32));
+  const pair = (label: string) => {
+    const privateKey = derive(label).toString("base64");
+    return { privateKey, publicKey: publicKeyOf(privateKey) };
+  };
+  return {
+    tenantDbKey: derive("tenant-db").toString("base64"),
+    secrets: pair("secrets"),
+    delivery: pair("delivery"),
+    appDatabasePassword: derive("role/kerby_app").toString("base64url"),
+    consoleDatabasePassword: derive("role/kerby_console").toString("base64url"),
+  };
+}
+
+/** A new `KERBY_SECRET_KEY`: 32 random bytes, base64. */
+export const generateInstanceSecret = (): string => randomBytes(32).toString("base64");

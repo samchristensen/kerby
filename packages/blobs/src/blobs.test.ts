@@ -1,18 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { type ClosableTenantDb, createTenantDb, type TenantContext } from "@kerby/db";
 import { createMigratedDatabase } from "@kerby/db/testing";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  BlobNotFoundError,
-  type Bucket,
-  blobsMigrationsDir,
-  copyObjects,
-  tenantPrefix,
-} from "./index.ts";
-import { createEmptyTestBucket, createTestBlobs, createTestBucket } from "./testing.ts";
+import { BlobNotFoundError, type Bucket, blobsMigrationsDir, tenantPrefix } from "./index.ts";
+import { createTestBlobs, createTestBucket } from "./testing.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -188,78 +179,3 @@ describe("blobs", () => {
 
 const keys = async (bucket: Bucket, prefix: string) =>
   (await Array.fromAsync(bucket.list(prefix))).map((o) => o.key).sort();
-
-describe("bucket", () => {
-  it("uploads a file in parts and a presigned URL downloads it until it expires", async () => {
-    const bucket = await createEmptyTestBucket();
-    const dir = await mkdtemp(join(tmpdir(), "kerby-upload-"));
-    cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    // Over one 32 MiB part, so the upload has two.
-    const body = new Uint8Array(33 * 1024 * 1024).map((_, i) => i % 253);
-    const path = join(dir, "big.bin");
-    await writeFile(path, body);
-    expect(await bucket.uploadFile("x/big.bin", path, "application/octet-stream")).toBe(
-      body.byteLength,
-    );
-
-    const url = await bucket.presignGet("x/big.bin", {
-      expiresInSeconds: 60,
-      signedAt: new Date(),
-    });
-    const response = await fetch(url);
-    expect(response.status).toBe(200);
-    expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(body))).toBe(true);
-
-    // Signed two minutes ago for one minute: expired.
-    const expired = await bucket.presignGet("x/big.bin", {
-      expiresInSeconds: 60,
-      signedAt: new Date(Date.now() - 120_000),
-    });
-    const refused = await fetch(expired);
-    expect(refused.status).toBe(403);
-    await refused.body?.cancel();
-  });
-
-  it("uploads an empty file", async () => {
-    const bucket = await createEmptyTestBucket();
-    const dir = await mkdtemp(join(tmpdir(), "kerby-upload-"));
-    cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    await writeFile(join(dir, "empty"), "");
-    expect(await bucket.uploadFile("empty", join(dir, "empty"), "text/plain")).toBe(0);
-    expect((await bucket.read("empty")).body.byteLength).toBe(0);
-  });
-
-  it("copies changed objects only, and a restore copies missing objects only", async () => {
-    const source = await createEmptyTestBucket();
-    const target = await createEmptyTestBucket();
-    await source.write("t/a/1", bytes("one"), "text/plain");
-    await source.write("t/a/2", bytes("two"), "text/plain");
-    await source.write("t/b/1", bytes("other tenant"), "text/plain");
-
-    expect(await copyObjects(source, target, "t/a/", "changed")).toEqual({
-      copied: 2,
-      bytes: 6,
-      unchanged: 0,
-    });
-    expect(await keys(target, "")).toEqual(["t/a/1", "t/a/2"]);
-    expect((await target.read("t/a/1")).mediaType).toBe("text/plain");
-
-    // Unchanged objects are not copied again; a changed one is.
-    await source.write("t/a/2", bytes("two, longer"), "text/plain");
-    expect(await copyObjects(source, target, "t/a/", "changed")).toEqual({
-      copied: 1,
-      bytes: 11,
-      unchanged: 1,
-    });
-
-    // Restore: only what the target lacks; its own differing copy stays.
-    await target.write("t/a/2", bytes("kept"), "text/plain");
-    await target.deleteKeys(["t/a/1"]);
-    expect(await copyObjects(source, target, "t/a/", "missing")).toEqual({
-      copied: 1,
-      bytes: 3,
-      unchanged: 1,
-    });
-    expect(text((await target.read("t/a/2")).body)).toBe("kept");
-  });
-});

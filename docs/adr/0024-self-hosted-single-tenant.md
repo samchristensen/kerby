@@ -1,6 +1,6 @@
 # 0024. Self-hosted, single tenant first; SaaS operations parked
 
-- Status: proposed
+- Status: accepted (the owner's call, 2026-11-23)
 - Date: 2026-11-23
 
 ## Context
@@ -35,13 +35,18 @@ how many tenants exist. The expensive part to rebuild later is the tenancy seam:
   so the pairs derive directly (checked 2026-11-23). The api and worker now run in one container, so the api's process
   environment holds the private keys. That is acceptable when the owner runs every process. The services still take only
   the half they use. A rotation of the master key is a re-seal, out of scope until a rotation is needed.
-- **Bootstrap from config.** At startup control ensures the tenant (`KERBY_TENANT_NAME`, default `default`) and its
-  `default` integration. Given `KERBY_API_KEY` (a `kb_<id>_<secret>` key, `make secrets-key` makes one), it ensures that
-  key exists with `admin`, so the host application can know the key before Kerby starts: in Railway, as a variable reference to
-  the `kerby` service. Given `KERBY_ADMIN_EMAIL` and `KERBY_ADMIN_PASSWORD`, it ensures that console account.
-  Password hashing moves from the console to a package both use.
-- **The console is optional.** It is a second container (a Compose profile, an optional Railway service) taking
-  `KERBY_SECRET_KEY`. Sign-up and the sign-up allowlist are removed; the bootstrapped admin signs in.
+- **Bootstrap from config.** At startup control migrates every database, then ensures the tenant (`KERBY_TENANT_NAME`,
+  default `default`) and its `default` integration; it refuses to start with two live tenants, and clears one a start
+  left half made. Given `KERBY_API_KEY` (a `kb_<id>_<secret>` key, `make secrets-key` makes one), it keeps that key live
+  with every scope and revokes the one configured before it, so the host application can know the key before Kerby
+  starts: on Railway, as a variable reference to the `kerby` service. Given `KERBY_ADMIN_EMAIL` and
+  `KERBY_ADMIN_PASSWORD`, it keeps that console account and no other. Password hashing moves from the console to
+  `packages/control-plane`, which both use. Control's HTTP server answers only `/healthz`, which the launcher waits on.
+- **The console is optional.** It is a second container taking `DATABASE_URL` and `KERBY_SECRET_KEY`. Sign-up, the
+  sign-up allowlist and the admin flag are removed; the configured admin signs in.
+- **An install's own hosts.** `EGRESS_ALLOWED_HOSTS` and `ALLOW_LOCAL_DESTINATIONS` are accepted outside development
+  ([0010](0010-egress-guard.md), amended): the tenant is the owner, and its tools and webhook receivers often live on
+  the same private network.
 - **Postgres is Kerby's own instance.** Kerby creates databases and roles and closes `postgres` and `template1`,
   so it never shares an application's Postgres. Locally it is a Compose service; on Railway, a Postgres service of its
   own in the application's project.
@@ -51,7 +56,7 @@ how many tenants exist. The expensive part to rebuild later is the tenancy seam:
   scripts (`.railway/`, `scripts/railway.ts`, CI's Railway jobs) and the uptime canary. Control keeps migrations (both
   planes), role and template setup, the bootstrap, and nightly retention (`pruneTenants`). The isolation tests in
   `make test` stay: they guard the seam.
-- **Railway is a recipe, not Kerby's IaC.** `docs/self-host.md` documents the services to add to an existing project (Postgres,
+- **Railway is a recipe, not Kerby's IaC.** `docs/deploy.md` documents the services to add to an existing project (Postgres,
   one bucket, `kerby` from GHCR, optionally `console`) and their variables. CI keeps building and pushing the
   `kerby` and `kerby-console` images.
 
@@ -71,9 +76,16 @@ how many tenants exist. The expensive part to rebuild later is the tenancy seam:
 ## Consequences
 
 - Supersedes [0007](0007-railway-hosting.md) and [0011](0011-images-from-ghcr.md) (Kerby's own Railway project, one
-  image per service) and the export and backup halves of [0013](0013-exports-and-bucket-backup.md); amends
-  [0001](0001-platform-and-tenancy.md) (sold as a service, later) and [0014](0014-tenant-console.md) (no sign-up).
-- Backups are the install's Postgres and bucket backups (Railway's, or the owner's volume). Exports are `pg_dump` by the owner.
+  image per service), [0012](0012-recovery-and-availability.md) (Kerby's own recovery targets) and
+  [0013](0013-exports-and-bucket-backup.md) (exports and the bucket copy); amends [0001](0001-platform-and-tenancy.md)
+  (sold as a service, later), [0010](0010-egress-guard.md) (an install's own hosts) and
+  [0014](0014-tenant-console.md) (no sign-up). 0012's "the admin stays a superuser" carries over: `DATABASE_URL` is a
+  superuser of Kerby's own Postgres.
+- Backups are the install's Postgres and bucket backups (Railway's, or the owner's volume), plus a copy of
+  `KERBY_SECRET_KEY` (docs/deploy.md). Exports are `pg_dump` by the owner.
 - Returning to SaaS is a plan, starting from `saas-poc`: restore the operator API, provisioning beyond one tenant,
   sign-up, and per-service images, and give each process only its own keys again.
-- The architecture check's `docker` rule moves from "every service has a Dockerfile" to the two images that ship.
+- The architecture check's `docker` rule now asks that every service ship in an image, its own or the launcher's
+  (`--filter @kerby/<dir>...`), and that every image have a `HEALTHCHECK`.
+- `make docs` leaves history alone: a plan in `docs/plans/done/` and a superseded ADR may name files and make targets
+  that are gone. Finished plans 0003, 0005 and 0006 moved there.

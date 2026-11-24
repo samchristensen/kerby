@@ -1,5 +1,4 @@
 "use client";
-import Link from "next/link";
 import { useActionState } from "react";
 import { SubmitButton } from "../../_components/client.tsx";
 import { Field } from "../../_components/field.tsx";
@@ -12,7 +11,10 @@ export function LogInForm() {
   return (
     <div>
       <h1 className="text-xl font-semibold tracking-tight text-fg">Sign in to Kerby</h1>
-      <p className="mt-1 text-sm text-muted">Welcome back.</p>
+      <p className="mt-1 text-sm text-muted">
+        Use the admin account configured for this install: its email is{" "}
+        <code className="font-mono">KERBY_ADMIN_EMAIL</code>.
+      </p>
       <form action={action} className="mt-6 space-y-4">
         <Field
           label="Email"
@@ -36,12 +38,6 @@ export function LogInForm() {
           Sign in
         </SubmitButton>
       </form>
-      <p className="mt-6 text-center text-sm text-muted">
-        New to Kerby?{" "}
-        <Link href="/signup" className="font-medium text-brand-text hover:text-brand-text/80">
-          Create a workspace
-        </Link>
-      </p>
     </div>
   );
 }

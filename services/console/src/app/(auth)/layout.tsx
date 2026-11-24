@@ -1,5 +1,3 @@
-// No signed-in redirect here: the sign-up action sets the session cookie, the route then renders again, and a
-// redirect would throw away the API key the success state shows once. Each page decides instead.
 import type { ReactNode } from "react";
 import { Logo } from "../_components/ui.tsx";
 

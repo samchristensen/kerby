@@ -376,23 +376,35 @@ export function checkArchitecture(root: string): Violation[] {
     }
   }
 
-  // --- docker: every service is deployable and says when it is healthy -----------------------
+  // --- docker: every service ships in an image, and every image says when it is healthy -------
+  // A service ships in its own image (services/<dir>/Dockerfile) or in another's, which installs it with
+  // `--filter @kerby/<dir>...` and starts it: the kerby launcher's image runs four services (ADR 0024).
+  const installed = new Set<string>();
   for (const ws of workspaces) {
     if (ws.kind !== "services") continue;
     const dockerfile = join(ws.dir, "Dockerfile");
-    if (!existsSync(dockerfile)) {
-      add(
-        "docker",
-        ws.dir,
-        `no Dockerfile. Fix: add ${rel(dockerfile)} with \`dev\` and \`prod\` targets and a HEALTHCHECK, built from the repository root. See ARCHITECTURE.md#local-stack`,
-      );
-    } else if (!/^\s*HEALTHCHECK\b/m.test(readFileSync(dockerfile, "utf8"))) {
+    if (!existsSync(dockerfile)) continue;
+    const text = readFileSync(dockerfile, "utf8");
+    for (const match of text.matchAll(/--filter @kerby\/([a-z0-9-]+)\.\.\./g)) {
+      if (match[1]) installed.add(match[1]);
+    }
+    if (!/^\s*HEALTHCHECK\b/m.test(text)) {
       add(
         "docker",
         dockerfile,
         "has no HEALTHCHECK. Fix: add a HEALTHCHECK that fails when the service cannot serve (Compose waits on it with `--wait`). See ARCHITECTURE.md#local-stack",
       );
     }
+  }
+  for (const ws of workspaces) {
+    if (ws.kind !== "services") continue;
+    const dir = basename(ws.dir);
+    if (existsSync(join(ws.dir, "Dockerfile")) || installed.has(dir)) continue;
+    add(
+      "docker",
+      ws.dir,
+      `is in no image. Fix: install it in services/kerby/Dockerfile (\`--filter @kerby/${dir}...\`) and start it from the launcher (services/kerby/src/service/processes.ts), or add ${rel(join(ws.dir, "Dockerfile"))} with \`dev\` and \`prod\` targets and a HEALTHCHECK, built from the repository root. See ARCHITECTURE.md#local-stack`,
+    );
   }
 
   return violations;

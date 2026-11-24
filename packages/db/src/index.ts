@@ -1,7 +1,6 @@
 export {
   type ClusterAdmin,
   createClusterAdmin,
-  dumpDatabase,
   TENANT_ROLE_CONNECTION_LIMIT,
 } from "./cluster.ts";
 export { withConnectRetry } from "./connect-retry.ts";
@@ -21,4 +20,5 @@ export {
 export { LISTEN_APPLICATION_NAME } from "./listen.ts";
 export { migrate, migrateTenants, readMigrations } from "./migrate.ts";
 export { type TenantLease, TenantPools } from "./pools.ts";
+export { postgresUrl } from "./urls.ts";
 export { isUuid } from "./uuid.ts";

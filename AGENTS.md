@@ -1,9 +1,11 @@
 # AGENTS.md
 
-Kerby: an agent runtime sold as a multi-tenant service; tenants are untrusted customers. Humans steer; agents
-execute; a human merges. Stack: TypeScript on Node (no build step but the console's Next.js pages), pnpm workspaces. Postgres is the only service: a
-control database plus one database per tenant, with durable execution through Absurd. Bytes and transcripts live in
-S3-compatible storage, indexed in the tenant's database. Agent harnesses (Pi Durable first) sit behind `AgentRuntime`.
+Kerby: a self-hosted agent runtime, one install (one tenant) per project, in Docker Compose or the project's Railway
+project; the multi-tenant boundary stays for a later SaaS, so a tenant is still untrusted (ADR 0024). Humans steer;
+agents execute; a human merges. Stack: TypeScript on Node (no build step but the console's Next.js pages), pnpm
+workspaces. Postgres is the only service: a control database plus one database per tenant, with durable execution
+through Absurd. Bytes and transcripts live in S3-compatible storage, indexed in the tenant's database. Agent harnesses
+(Pi Durable first) sit behind `AgentRuntime`.
 
 ## Where to look
 

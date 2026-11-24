@@ -15,7 +15,6 @@ import {
   type AnswerSchema,
   type ContentPartSchema,
   CreateConversationRequestSchema,
-  CreateTenantRequestSchema,
   CreateToolServerRequestSchema,
   EventEnvelopeSchema,
   exposedToolName,
@@ -34,6 +33,7 @@ import {
   parseToolPattern,
   QuestionSchema,
   SubmitJudgmentRequestSchema,
+  TenantNameSchema,
   type ToolCallSchema,
   ToolHeaderNameSchema,
   type ToolResultSchema,
@@ -135,9 +135,9 @@ describe("requests", () => {
   });
 
   it("only takes slug-like tenant names", () => {
-    expect(CreateTenantRequestSchema.safeParse({ name: "acme-prod" }).success).toBe(true);
+    expect(TenantNameSchema.safeParse("acme-prod").success).toBe(true);
     for (const name of ["", "Acme", "a b", "-x", "x/../y"]) {
-      expect(CreateTenantRequestSchema.safeParse({ name }).success).toBe(false);
+      expect(TenantNameSchema.safeParse(name).success).toBe(false);
     }
   });
 });

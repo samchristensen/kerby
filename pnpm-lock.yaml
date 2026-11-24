@@ -9,9 +9,6 @@ catalogs:
     '@aws-sdk/client-s3':
       specifier: 3.1169.0
       version: 3.1169.0
-    '@aws-sdk/s3-request-presigner':
-      specifier: 3.1169.0
-      version: 3.1169.0
     '@biomejs/biome':
       specifier: 2.6.4
       version: 2.6.4
@@ -57,9 +54,6 @@ catalogs:
     pg:
       specifier: 8.23.1
       version: 8.23.1
-    railway:
-      specifier: 3.17.0
-      version: 3.17.0
     react:
       specifier: 19.3.1
       version: 19.3.1
@@ -92,9 +86,6 @@ importers:
       '@kerby/control-plane':
         specifier: workspace:*
         version: link:packages/control-plane
-      '@kerby/db':
-        specifier: workspace:*
-        version: link:packages/db
       '@kerby/mcp':
         specifier: workspace:*
         version: link:packages/mcp
@@ -110,9 +101,6 @@ importers:
       knip:
         specifier: 'catalog:'
         version: 6.45.1
-      railway:
-        specifier: 'catalog:'
-        version: 3.17.0
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -128,9 +116,6 @@ importers:
   packages/blobs:
     dependencies:
       '@aws-sdk/client-s3':
-        specifier: 'catalog:'
-        version: 3.1169.0
-      '@aws-sdk/s3-request-presigner':
         specifier: 'catalog:'
         version: 3.1169.0
       '@kerby/db':
@@ -208,9 +193,6 @@ importers:
 
   packages/db:
     dependencies:
-      '@kerby/config':
-        specifier: workspace:*
-        version: link:../config
       '@kerby/observability':
         specifier: workspace:*
         version: link:../observability
@@ -607,6 +589,24 @@ importers:
         specifier: workspace:*
         version: link:../../packages/conversations
 
+  services/kerby:
+    dependencies:
+      '@kerby/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@kerby/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@kerby/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@kerby/secrets':
+        specifier: workspace:*
+        version: link:../../packages/secrets
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+
   services/worker:
     dependencies:
       '@kerby/agent':
@@ -757,10 +757,6 @@ packages:
 
   '@aws-sdk/nested-clients@3.998.3':
     resolution: {integrity: sha512-acHTTzMB13CU6dU4sxABYExMI3PQM2zStWH2MiUwJp/7QKTrLg2f7mbzSXoegW2kYOk2tdqQYagsZrWB8Xv7eA==}
-    engines: {node: '>=20.0.0'}
-
-  '@aws-sdk/s3-request-presigner@3.1169.0':
-    resolution: {integrity: sha512-ydc+uJnL8s1rMyPgEWjjiV6C/UFqrQhsAHOhEW5GerQtB0zpgpENupEY3AeeXunWxdQakdDLrNJetimZ0wbhRw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/signature-v4-multi-region@3.996.52':
@@ -1032,11 +1028,6 @@ packages:
     peerDependenciesMeta:
       '@modelcontextprotocol/sdk':
         optional: true
-
-  '@graphql-typed-document-node/core@3.2.0':
-    resolution: {integrity: sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ==}
-    peerDependencies:
-      graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -2307,10 +2298,6 @@ packages:
   graceful-fs@4.2.12:
     resolution: {integrity: sha512-iuyGF2E4oafQfPsRrG2wtY2ILupMhvtdrhzrxB+0VcjsPpSPttpfYdjnGFGsTi5MaJFjI1jOKHPQ6UTbTj9TAw==}
 
-  graphql@16.15.0:
-    resolution: {integrity: sha512-32kz9FecohDiC/tgcViwnRXM7HFBVTPiW7pHO+DikKOI5KjhU/jNULOReXsrFqt2WAYbE9xFXsTffJw6iTO8qw==}
-    engines: {node: ^12.22.0 || ^14.16.0 || ^16.0.0 || >=17.0.0}
-
   http-proxy-agent@9.1.0:
     resolution: {integrity: sha512-2NxoveTT58mjYT4n3RPTEfCZGLMbidoO8XEieXfpSYxu+PQJ1qpx4ypwH6N+uF9twBPIvRRgvkvW5HUTYWENig==}
     engines: {node: '>= 20'}
@@ -2809,11 +2796,6 @@ packages:
   quickjs-wasi@3.6.2:
     resolution: {integrity: sha512-FCqGtGOrMgzUiIrMNMA2YnsOxCNwo31dzqXvclXUC6xeT35NJLKXQJsvbeCTjvoFAwZgEAPg8U6+KAPDGXn8Mg==}
 
-  railway@3.17.0:
-    resolution: {integrity: sha512-bVyzBcLUJfKuSvYT+8MFg0p2AUzylSdjJoCWpx2uk05p6DoAnhrq0Xm4VIoJ+gZ7BGI8YddYlEpp4rgsZIr8Ww==}
-    engines: {node: '>=22'}
-    hasBin: true
-
   react-dom@19.3.1:
     resolution: {integrity: sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==}
     peerDependencies:
@@ -3303,15 +3285,6 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
-  '@aws-sdk/s3-request-presigner@3.1169.0':
-    dependencies:
-      '@aws-sdk/core': 3.981.0
-      '@aws-sdk/signature-v4-multi-region': 3.996.52
-      '@aws-sdk/types': 3.975.1
-      '@smithy/core': 3.40.0
-      '@smithy/types': 4.20.0
-      tslib: 2.9.1
-
   '@aws-sdk/signature-v4-multi-region@3.996.52':
     dependencies:
       '@aws-sdk/types': 3.975.1
@@ -3784,10 +3757,6 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
-
-  '@graphql-typed-document-node/core@3.2.0(graphql@16.15.0)':
-    dependencies:
-      graphql: 16.15.0
 
   '@img/colour@1.1.0':
     optional: true
@@ -4994,8 +4963,6 @@ snapshots:
 
   graceful-fs@4.2.12: {}
 
-  graphql@16.15.0: {}
-
   http-proxy-agent@9.1.0:
     dependencies:
       agent-base: 9.0.0
@@ -5738,11 +5705,6 @@ snapshots:
   proxy-agent-negotiate@1.1.0: {}
 
   quickjs-wasi@3.6.2: {}
-
-  railway@3.17.0:
-    dependencies:
-      '@graphql-typed-document-node/core': 3.2.0(graphql@16.15.0)
-      graphql: 16.15.0
 
   react-dom@19.3.1(react@19.3.1):
     dependencies:

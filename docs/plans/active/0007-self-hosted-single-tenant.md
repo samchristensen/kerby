@@ -6,84 +6,85 @@ deleted (recoverable from the tag `saas-poc`). Decision: [ADR 0024](../../adr/00
 
 ## Open questions (block the named milestone)
 
-- The live Railway project `kerby` (environment `production`, the `canary` tenant, the `uptime` workflow, CI's deploy on
-  merge): tear it down, or leave it running unmanaged until the owner deletes it? Blocks K5's last item. **Human.**
+- ~~Tear down the live Railway project `kerby`?~~ The owner said yes (2026-11-23). Then found: it serves a live tenant,
+  `lochmoore` (6 conversations, 26 messages, a model key; last message 2026-11-23 19:24 UTC), so the lochmoore app calls
+  it. Before deleting: move lochmoore to an install of its own (K6's proof), or confirm its data may go. Blocks K5's
+  last item. **Human.**
 
 ## Milestones
 
 ### K1 One secret
 
-- [ ] `deriveInstanceKeys(masterBase64)` in `packages/secrets`: HKDF-SHA256, one `info` label per use, returning the
+- [x] `deriveInstanceKeys(masterBase64)` in `packages/secrets`: HKDF-SHA256, one `info` label per use, returning the
   `TENANT_DB_KEYS` key, the secrets pair, the delivery pair, and the `kerby_app` and `kerby_console` passwords. Refuses a
-  master that is not 32 bytes. Tests: stable for one master, distinct per label, each pair seals and opens.
-- [ ] `make secrets-key` prints a `KERBY_SECRET_KEY` and a `KERBY_API_KEY` (`kb_<12 hex>_<43 base64url>`), nothing else.
+  master that is not 32 bytes. Tests: stable for one master (pinned), distinct per label, each pair seals and opens.
+- [x] `make secrets-key` prints a `KERBY_SECRET_KEY` and a `KERBY_API_KEY` (`newApiKey` in `packages/control-plane`).
 
 ### K2 Bootstrap in control
 
-- [ ] Password hashing (`services/console/src/service/passwords.ts`) moves to `packages/control-plane`; the console
-  imports it from there.
-- [ ] Control config gains `KERBY_TENANT_NAME` (default `default`), `KERBY_API_KEY`, `KERBY_ADMIN_EMAIL`,
-  `KERBY_ADMIN_PASSWORD` (both or neither). At startup, after migrations: provision the tenant if no live tenant
-  exists, and refuse to start if more than one does. Ensure the configured key exists on the `default` integration
-  (inserted by its id and hash; a bootstrap key no longer configured is revoked). Ensure the admin account exists,
-  and reset its password hash when the configured password changes.
-- [ ] Tests on real Postgres: a first start provisions, a second changes nothing, a changed key revokes the old one,
-  a second live tenant fails startup naming the fix.
+- [x] Password hashing moved from the console to `packages/control-plane` (`passwords.ts`, its test with it).
+- [x] Control config gains `KERBY_TENANT_NAME` (default `default`), `KERBY_API_KEY`, `KERBY_ADMIN_EMAIL`,
+  `KERBY_ADMIN_PASSWORD` (both or neither; at least a key or an admin). At start, after migrating every database
+  (`bootstrapInstance`): provision the tenant if none is live, refuse to start with two, clear one a start left half
+  made, wake a suspended one. `ensureConfiguredApiKey` keeps the configured key live on `default` and revokes the one
+  configured before it. The admin is the tenant's only console account; its password follows config.
+- [x] Tests on real Postgres (`services/control/src/control.test.ts`, "the install"): first start, a second that
+  changes nothing, key replaced and restored, a key that is not one or whose id is taken, admin password and email
+  replaced (sessions with it), two tenants refused, a half-made tenant cleared.
 
 ### K3 The launcher
 
-- [ ] `services/kerby`: config `KERBY_SECRET_KEY`, `DATABASE_URL` (the superuser of Kerby's own Postgres), `S3_*`,
-  `KERBY_ROLES` (`control,api,worker,dispatcher` by default), and the settings it passes on. It derives each child's
-  variables (K1) and builds their database URLs. Passing the rest of the environment on goes through `packages/config`,
-  which is still the only reader of the process environment. It runs control's setup to completion, then starts the
-  roles. When a child exits, it stops the rest and exits nonzero; it forwards `SIGTERM`. Health is the api's `/healthz`
-  (or the first role's).
-- [ ] One `Dockerfile` (`dev`, `prod`, `HEALTHCHECK`) installing the four services; the per-service Dockerfiles of
-  control, api, worker and dispatcher are deleted. The architecture rule `docker` names the images that ship
-  (`kerby`, `console`).
-- [ ] Control's HTTP server keeps `/healthz` only (K5 removes the rest); its release command stays for `KERBY_ROLES`
-  without `control`.
+- [x] `services/kerby`: config `KERBY_SECRET_KEY`, `DATABASE_URL`, `KERBY_ROLES`, `HOST`/`PORT` (the api's),
+  `KERBY_WATCH`. `processSpecs` derives each child's variables and database URL (`postgresUrl` in `@kerby/db`); the rest
+  of the environment passes through `childProcessEnv`. Control starts first and the rest once its `/healthz` answers;
+  a child's exit stops the rest and exits 1; `SIGTERM` stops all. Each JSON line gets `service`. `health` checks every
+  role this container runs (the image's `HEALTHCHECK`).
+- [x] One `services/kerby/Dockerfile` (`dev`, `prod`, `HEALTHCHECK`); the Dockerfiles of control, api, worker and
+  dispatcher are deleted. Rule `docker`: a service ships in its own image or is installed by another's.
+- [x] Control's HTTP server answers `/healthz` only; the release command is gone (control migrates at every start).
 
 ### K4 Local stack
 
-- [ ] `compose.yaml`: `postgres`, `rustfs`, `kerby`, and `console` (profile `console`, which `make up` turns on).
-  Development values for `KERBY_SECRET_KEY`, `KERBY_API_KEY` and the admin. `make up` prints the key and the console's
-  address; `scripts/provision-default.sh` is deleted.
-- [ ] `make e2e`: `kerby` with `KERBY_ROLES=control,api,dispatcher` plus two `KERBY_ROLES=worker` containers; killing a
-  worker mid-turn still finishes the turn elsewhere. `make tools-e2e` and `make sdk-e2e` pass on the new stack.
-- [ ] Proof: `make down-v && make up`, a streamed turn with the printed key, sign in to the console as the admin.
+- [x] `compose.yaml`: `postgres`, `rustfs`, `kerby`, `console`, and `worker` (profile `workers`, `KERBY_ROLES=worker`).
+  Development values for `KERBY_SECRET_KEY`, `KERBY_API_KEY` and the admin. `make up` prints the key and the admin;
+  `scripts/provision-default.sh` is deleted (`stackApiKey()` in `scripts/stack.ts`).
+- [x] `make e2e`: `kerby` with `KERBY_ROLES=control,api,dispatcher` plus two worker containers; its checks name its own
+  conversation, so a kept stack passes too. `make tools-e2e` and `make sdk-e2e` pass on the new stack.
+- [x] Proof: a fresh project (`KERBY_PROJECT=kerby-selfhost`), a streamed turn with the printed key, sign-in to the
+  console as the admin in a browser, a restart that changes nothing, a killed child that takes the container down.
 
 ### K5 Delete SaaS operations
 
-- [ ] Tag `saas-poc` on `main` before the first deletion.
-- [ ] Control: the operator API and `OPERATOR_TOKEN`, exports (`kerby-exports`, `EXPORT_S3_*`, `pg_dump`), the nightly
+- [x] Tag `saas-poc` on `main` before the first deletion.
+- [x] Control: the operator API and `OPERATOR_TOKEN`, exports (`kerby-exports`, `EXPORT_S3_*`, `pg_dump`), the nightly
   bucket copy and its freshness alarm (`kerby-backup`, `BACKUP_S3_*`), sign-up and `CONSOLE_TOKEN`. Kept: migrations,
   roles, template, bootstrap, `pruneTenants`.
-- [ ] Control plane: a migration drops `signup_allowlist` and the console admin flag. The console loses sign-up, the
-  allowlist admin page and its control client.
-- [ ] Contracts and tests that only served those routes (knip finds the rest).
-- [ ] Scripts and CI: `scripts/multitenant.ts` and `make multitenant`, the Railway path of `scripts/logs.ts`,
+- [x] Control plane: `0010_no_signup.sql` drops `signup_allowlist` and the console admin flag. The console lost sign-up,
+  the allowlist admin page and its control client.
+- [x] Contracts (`operator.ts`, `console.ts` → `install.ts`), `Bucket` presigning, multipart upload and copy, the
+  presigner and `railway` dependencies, `dumpDatabase`.
+- [x] Scripts and CI: `scripts/multitenant.ts` and its make target, the Railway path of `scripts/logs.ts`,
   `scripts/railway.ts`, `.railway/`, the `railway-*`, `deploy` and `env-down` targets, CI's Railway jobs (images now
   `kerby` and `kerby-console`), `uptime.yml`. Nightly keeps `make e2e`.
 - [ ] The live Railway project, per the open question above.
 
 ### K6 Inside a Railway project
 
-- [ ] Egress: a self-host lets its own private services through. `EGRESS_ALLOWED_HOSTS` and `ALLOW_LOCAL_DESTINATIONS`
-  are accepted outside development (an ADR 0010 amendment), so a tool or webhook on `*.railway.internal` or a Compose
-  service name works.
-- [ ] `docs/self-host.md`: the Compose snippet for another project (GHCR images), and the Railway recipe: a Postgres
-  service of Kerby's own, one bucket, `kerby` (private networking; a public domain only if something outside calls
-  it), `console` if wanted. Every variable, and the application's references (`${{kerby.KERBY_API_KEY}}`,
-  `http://kerby.railway.internal:8080`).
+- [x] Egress: `EGRESS_ALLOWED_HOSTS` and `ALLOW_LOCAL_DESTINATIONS` are accepted outside development (ADR 0010
+  amendment), so a tool or webhook on `*.railway.internal` or a Compose service name works.
+- [x] `docs/deploy.md`: the Compose snippet for another project (GHCR images), the Railway recipe, every variable, the
+  application's references (`${{kerby.KERBY_API_KEY}}`, `http://kerby.railway.internal:8080`). The Compose snippet was
+  run as written against the locally built image in production mode.
 - [ ] Proof: the recipe followed in a scratch Railway project beside a small app that streams a turn through the SDK.
+  Needs the images on GHCR, so a merge to `main` first (CI pushes them).
 
 ### K7 Docs
 
-- [ ] ARCHITECTURE.md (services, Tenancy's lifecycle and sign-up, Local stack, Hosting), AGENTS.md's opening, docs/README.md
-  (`deploy.md` replaced by `self-host.md`), `packages/sdk/INTEGRATION.md` where it names hosting.
-- [ ] ADR statuses: 0007 and 0011 superseded by 0024; 0001, 0013, 0014 amended. Tech-debt lines about deleted
-  features removed; plans 0001 and 0003 note what 0024 parked.
+- [x] ARCHITECTURE.md (intro, services, Tenancy, Local stack, Hosting), AGENTS.md's opening, docs/README.md,
+  docs/deploy.md rewritten as the install guide, `packages/sdk/INTEGRATION.md` where it names hosting.
+- [x] ADRs: 0007, 0011, 0012, 0013 superseded by 0024; 0001, 0010, 0014, 0023 amended. Tech-debt lines about deleted
+  features removed or rewritten; plan 0001 notes what 0024 parked; plans 0003, 0005, 0006 moved to `done/`, and
+  `make docs` leaves done plans and superseded ADRs alone.
 
 ## Not in this plan
 
@@ -95,3 +96,11 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
 - 2026-11-23 Planned. Measured: one HKDF-derived 32-byte seed is a valid X25519 private key; `publicKeyOf` and
   seal/open round-trip. Control's startup closes `postgres`, `template1` and its own database to `public`
   (`restrictClusterDatabases`, `restrictControlDatabase`), so Kerby gets its own Postgres.
+- 2026-11-23 K1 to K5 (but the teardown), K6's code and docs, and K7 built. Smoked on a fresh Compose project: control
+  made the tenant, key and admin in under a second, then api, worker and dispatcher started; a streamed turn with a tool
+  call; the console signed in as the admin and listed the API's chats; `/signup` and `/dashboard/admin` are 404; a
+  restart kept one tenant, one key, one admin; `kill -9` of the worker child exited the container with 1. `make e2e`,
+  `make tools-e2e` and `make sdk-e2e` green on it. A stack from before this change holds tenants sealed with other keys
+  and is refused (two tenants) or cannot open them: `make down-v` once. Found: the old `make e2e` checks read whole
+  tables, so they failed on a kept stack; they now name their conversation. Production holds a live `lochmoore` tenant,
+  so its teardown waits for the owner.

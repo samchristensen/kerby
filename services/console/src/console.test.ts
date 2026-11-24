@@ -2,15 +2,16 @@ import { randomUUID } from "node:crypto";
 import { PutSearchSettingsRequestSchema } from "@kerby/contracts";
 import {
   authenticateApiKey,
-  createApiKey,
+  ensureConfiguredApiKey,
   ensureDefaultIntegration,
+  hashPassword,
   insertConsoleUser,
   insertSubscription,
   insertTenant,
   listSubscriptions,
   MAX_API_KEYS_PER_TENANT,
+  newApiKey,
   readModelKey,
-  setConsoleAdmin,
   setTenantStatus,
 } from "@kerby/control-plane";
 import {
@@ -21,8 +22,7 @@ import {
 import { createOpener, createSealer, generateSecretsKeyPair } from "@kerby/secrets";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleService } from "./service/index.ts";
-import { hashPassword, verifyPassword } from "./service/passwords.ts";
-import type { ApiClient, ConsoleDeps, ConsoleService, SignupClient } from "./types/index.ts";
+import type { ApiClient, ConsoleDeps, ConsoleService } from "./types/index.ts";
 
 const cleanups: (() => PromiseLike<unknown> | unknown)[] = [];
 afterEach(async () => {
@@ -34,8 +34,8 @@ const COST = 10;
 const PASSWORD = "correct horse battery";
 
 /**
- * The console as it runs: the service over the control database as the `kerby_console` role. Control's sign-up route
- * is played by `signups`, which writes what control writes (a tenant, its first key, its person) as the admin.
+ * The console as it runs: the service over the control database as the `kerby_console` role. `install` writes, as the
+ * admin, what control writes at startup: the tenant, its default integration and configured key, and its person.
  */
 async function harness(
   settings: Partial<ConsoleDeps["settings"]> = {},
@@ -46,29 +46,10 @@ async function harness(
   const asConsole = await asServiceRole(control.url, "kerby_console", 2);
   cleanups.push(() => asConsole.close());
 
-  const signups: SignupClient = async ({ name, email, passwordHash }) => {
-    const taken = await control.db.query("select 1 from tenants where name = $1", [name]);
-    if (taken.rowCount) return { ok: false, code: "name_taken" };
-    const tenant = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1 });
-    await setTenantStatus(control.db, tenant.id, "active");
-    const integration = await ensureDefaultIntegration(control.db, tenant.id);
-    const { secret } = await createApiKey(control.db, tenant.id, integration.id, "initial");
-    try {
-      const user = await insertConsoleUser(control.db, {
-        tenantId: tenant.id,
-        email,
-        passwordHash,
-      });
-      return { ok: true, tenantId: tenant.id, userId: user.id, secret };
-    } catch {
-      return { ok: false, code: "email_taken" };
-    }
-  };
   const pair = generateSecretsKeyPair();
   const service: ConsoleService = createConsoleService({
     control: asConsole,
     sealer: createSealer(pair.publicKey),
-    signups,
     api,
     settings: {
       modelProviders: ["anthropic", "openai", "opencode"],
@@ -76,108 +57,66 @@ async function harness(
       apiPublicUrl: "https://api.example.com",
       sessionTtlMs: 60_000,
       passwordCost: COST,
-      signupsPerHour: 100,
       failedLoginsPerMinute: 100,
       failedLoginsPerAccountPerHour: 100,
       ...settings,
     },
   });
-  const signUp = async (name: string, email = `${name}@example.com`, client = "203.0.113.1") => {
-    const result = await service.signUp({ name, email, password: PASSWORD }, client);
-    if (!result.ok) throw new Error(`sign-up refused: ${JSON.stringify(result)}`);
+  const install = async (name: string, email = `${name}@example.com`) => {
+    const tenant = await insertTenant(control.db, { name, dbHost: "h", dbPort: 1 });
+    await setTenantStatus(control.db, tenant.id, "active");
+    const integration = await ensureDefaultIntegration(control.db, tenant.id);
+    await ensureConfiguredApiKey(control.db, tenant.id, integration.id, newApiKey().key);
+    const passwordHash = await hashPassword(PASSWORD, COST);
+    await insertConsoleUser(control.db, { tenantId: tenant.id, email, passwordHash });
+    return tenant;
+  };
+  /** An installed tenant whose person has signed in. */
+  const signedIn = async (name: string, email = `${name}@example.com`) => {
+    await install(name, email);
+    const result = await service.logIn({ email, password: PASSWORD }, "203.0.113.1");
+    if (!result.ok) throw new Error(`sign-in refused: ${JSON.stringify(result)}`);
     const session = (await service.session(result.token)) ?? expect.fail("no session");
     return { ...result, session };
   };
-  return { control, asConsole, service, signUp, opener: createOpener([pair.privateKey]) };
+  return {
+    control,
+    asConsole,
+    service,
+    install,
+    signedIn,
+    opener: createOpener([pair.privateKey]),
+  };
 }
 
-describe("passwords", () => {
-  it("verifies the password it hashed and nothing else", async () => {
-    const stored = await hashPassword(PASSWORD, COST);
-    expect(stored).toMatch(/^scrypt\$10\$8\$1\$/);
-    expect(await verifyPassword(PASSWORD, stored)).toBe(true);
-    expect(await verifyPassword("correct horse battery!", stored)).toBe(false);
-    expect(await hashPassword(PASSWORD, COST)).not.toBe(stored); // a salt per hash
-    // a hash this code would not make, or one demanding too much memory, is a mismatch rather than a crash
-    for (const bad of [
-      "",
-      "plain",
-      stored.replace("$10$", "$0$"),
-      stored.replace("$10$", "$30$"),
-    ]) {
-      expect(await verifyPassword(PASSWORD, bad), bad).toBe(false);
-    }
-  });
-});
-
 describe("accounts", () => {
-  it("signs up into a session, signs out, and signs in again with the password", async () => {
+  it("signs in to a session, signs out, and signs in again with the password", async () => {
     const h = await harness();
-    const created = await h.service.signUp(
-      { name: "acme", email: " Ada@Example.com ", password: PASSWORD },
-      "203.0.113.1",
-    );
-    expect(created).toMatchObject({ ok: true, apiKey: expect.stringMatching(/^kb_/) });
-    if (!created.ok) return;
-    expect(await h.service.session(created.token)).toMatchObject({
-      email: "ada@example.com",
-      tenantName: "acme",
-    });
-    // the first API key works at the api
-    const tenant = await authenticateApiKey(h.control.db, created.apiKey);
-    expect(tenant?.tenant.name).toBe("acme");
-
-    await h.service.logOut(created.token);
-    expect(await h.service.session(created.token)).toBeUndefined();
-
+    await h.install("acme", "ada@example.com");
     const wrong = await h.service.logIn({ email: "ada@example.com", password: "nope" }, "a");
     expect(wrong).toEqual({ ok: false, error: "Wrong email or password." });
     const unknown = await h.service.logIn({ email: "bob@example.com", password: PASSWORD }, "a");
     expect(unknown).toEqual(wrong);
-    const signedIn = await h.service.logIn({ email: "ADA@example.com", password: PASSWORD }, "a");
-    expect(signedIn.ok).toBe(true);
-    if (signedIn.ok) expect((await h.service.session(signedIn.token))?.tenantName).toBe("acme");
+
+    const signedIn = await h.service.logIn({ email: " ADA@Example.com ", password: PASSWORD }, "a");
+    if (!signedIn.ok) return expect.fail(JSON.stringify(signedIn));
+    expect(await h.service.session(signedIn.token)).toMatchObject({
+      email: "ada@example.com",
+      tenantName: "acme",
+    });
+    await h.service.logOut(signedIn.token);
+    expect(await h.service.session(signedIn.token)).toBeUndefined();
+
+    const again = await h.service.logIn({ email: "ada@example.com", password: PASSWORD }, "a");
+    expect(again.ok).toBe(true);
+    if (again.ok) expect((await h.service.session(again.token))?.tenantName).toBe("acme");
     expect(await h.service.session("not-a-token")).toBeUndefined();
   });
 
-  it("names the bad field, and a taken workspace name or email", async () => {
-    const h = await harness();
-    await h.signUp("acme", "ada@example.com");
-    const attempt = (form: Record<string, string>) => h.service.signUp(form, "203.0.113.1");
-    expect(await attempt({ name: "Acme Inc", email: "x@example.com", password: PASSWORD })).toEqual(
-      { ok: false, fields: { name: "Lowercase letters, digits and dashes" } },
-    );
-    expect(await attempt({ name: "x", email: "nope", password: PASSWORD })).toEqual({
-      ok: false,
-      fields: { email: "An email address like you@example.com" },
-    });
-    expect(await attempt({ name: "x", email: "x@example.com", password: "short" })).toEqual({
-      ok: false,
-      fields: { password: "At least 10 characters" },
-    });
-    expect(await attempt({ name: "acme", email: "x@example.com", password: PASSWORD })).toEqual({
-      ok: false,
-      fields: { name: "This workspace name is taken" },
-    });
-    expect(
-      await attempt({ name: "x", email: "ada@example.com", password: PASSWORD }),
-    ).toMatchObject({ ok: false, fields: { email: expect.stringContaining("exists") } });
-  });
-
-  it("limits sign-ups per address, and failed sign-ins per address and per account", async () => {
-    const h = await harness({
-      signupsPerHour: 2,
-      failedLoginsPerMinute: 3,
-      failedLoginsPerAccountPerHour: 5,
-    });
-    await h.signUp("a", "a@example.com", "198.51.100.1");
-    await h.signUp("b", "b@example.com", "198.51.100.1");
-    const third = await h.service.signUp(
-      { name: "c", email: "c@example.com", password: PASSWORD },
-      "198.51.100.1",
-    );
-    expect(third).toMatchObject({ ok: false, error: expect.stringMatching(/^Too many sign-ups/) });
-    await h.signUp("c", "c@example.com", "198.51.100.2"); // another address is not affected
+  it("limits failed sign-ins per address and per account", async () => {
+    const h = await harness({ failedLoginsPerMinute: 3, failedLoginsPerAccountPerHour: 5 });
+    await h.install("a", "a@example.com");
+    await h.install("b", "b@example.com");
 
     const logIn = (password: string, client: string) =>
       h.service.logIn({ email: "a@example.com", password }, client);
@@ -199,7 +138,7 @@ describe("accounts", () => {
 
   it("checks at most the account's limit of a concurrent burst of wrong passwords", async () => {
     const h = await harness({ failedLoginsPerMinute: 4, failedLoginsPerAccountPerHour: 3 });
-    await h.signUp("acme", "ada@example.com");
+    await h.install("acme", "ada@example.com");
     const results = await Promise.all(
       Array.from({ length: 10 }, (_, i) =>
         h.service.logIn({ email: "ada@example.com", password: "wrong" }, `192.0.2.${i % 2}`),
@@ -212,7 +151,7 @@ describe("accounts", () => {
 
   it("charges nothing for a right password", async () => {
     const h = await harness({ failedLoginsPerMinute: 2, failedLoginsPerAccountPerHour: 2 });
-    await h.signUp("acme", "ada@example.com");
+    await h.install("acme", "ada@example.com");
     const logIn = (password: string) =>
       h.service.logIn({ email: "ada@example.com", password }, "192.0.2.1");
     // Up to the limit at once, then more one after another.
@@ -229,7 +168,7 @@ describe("accounts", () => {
 
   it("ends a suspended tenant's sessions at once and refuses its sign-ins", async () => {
     const h = await harness();
-    const { token, session } = await h.signUp("acme");
+    const { token, session } = await h.signedIn("acme");
     await setTenantStatus(h.control.db, session.tenantId, "suspended");
     expect(await h.service.session(token)).toBeUndefined();
     expect(
@@ -238,86 +177,12 @@ describe("accounts", () => {
   });
 });
 
-describe("sign-up allowlist", () => {
-  /** A signed-up person the operator then made an admin, as control's operator route does. */
-  async function adminHarness() {
-    const h = await harness();
-    const { token } = await h.signUp("owner");
-    await setConsoleAdmin(h.control.db, "owner@example.com", true);
-    const admin = (await h.service.session(token)) ?? expect.fail("no session");
-    return { ...h, admin };
-  }
-
-  it("is edited by an admin only, and the console's database role cannot make one", async () => {
-    const h = await adminHarness();
-    const { session: stranger } = await h.signUp("other");
-    expect(h.admin.isAdmin).toBe(true);
-    expect(stranger.isAdmin).toBe(false);
-    await expect(h.service.signupAllowlist(stranger)).rejects.toThrow(/only an admin/);
-    await expect(h.service.allowSignups(stranger, { emails: "x@example.com" })).rejects.toThrow(
-      /only an admin/,
-    );
-    await expect(h.service.disallowSignup(stranger, "owner@example.com")).rejects.toThrow(
-      /only an admin/,
-    );
-    // Only the operator writes the flag; the console's role reads it.
-    await expect(
-      h.asConsole.query(
-        "update console_users set is_admin = true where email = 'other@example.com'",
-      ),
-    ).rejects.toThrow(/permission denied/);
-  });
-
-  it("adds many addresses at once, normalized and without repeats, and says which input is wrong", async () => {
-    const h = await adminHarness();
-    expect(
-      await h.service.allowSignups(h.admin, {
-        emails:
-          " Ada@Example.com, grace@example.com;\nada@example.com  bob@example.com owner@example.com",
-      }),
-    ).toEqual({ ok: true, added: 4 });
-    expect(await h.service.allowSignups(h.admin, { emails: "ada@example.com" })).toEqual({
-      ok: true,
-      added: 0,
-    });
-    const list = await h.service.signupAllowlist(h.admin);
-    expect(list.map((entry) => [entry.email, entry.signedUp]).sort()).toEqual([
-      ["ada@example.com", false],
-      ["bob@example.com", false],
-      ["grace@example.com", false],
-      ["owner@example.com", true],
-    ]);
-
-    for (const emails of ["", "   ", "ada@example.com, not-an-email"]) {
-      const refused = await h.service.allowSignups(h.admin, { emails });
-      expect(refused, emails).toMatchObject({ ok: false, fields: { emails: expect.any(String) } });
-    }
-    expect(await h.service.signupAllowlist(h.admin)).toHaveLength(4);
-  });
-
-  it("removes an address, and audits each change without the address", async () => {
-    const h = await adminHarness();
-    await h.service.allowSignups(h.admin, { emails: "ada@example.com" });
-    expect(await h.service.disallowSignup(h.admin, "ADA@example.com")).toBe(true);
-    expect(await h.service.disallowSignup(h.admin, "ada@example.com")).toBe(false);
-    expect(await h.service.disallowSignup(h.admin, "not an email")).toBe(false);
-    const { rows } = await h.control.db.query<{ actor: string; action: string; detail: unknown }>(
-      "select actor, action, detail from audit_log where action like 'console.allowlist.%' order by id",
-    );
-    expect(rows).toEqual([
-      { actor: `user:${h.admin.userId}`, action: "console.allowlist.add", detail: { added: 1 } },
-      { actor: `user:${h.admin.userId}`, action: "console.allowlist.remove", detail: {} },
-    ]);
-    expect(JSON.stringify(rows)).not.toContain("ada@");
-  });
-});
-
 describe("workspace", () => {
   it("says why a key past the tenant's cap is refused, and creates one again after a revoke", async () => {
     const h = await harness();
-    const { session } = await h.signUp("acme");
+    const { session } = await h.signedIn("acme");
     const integration = await ensureDefaultIntegration(h.control.db, session.tenantId);
-    // The sign-up's first key is one of them.
+    // The configured key is one of them.
     for (let i = 1; i < MAX_API_KEYS_PER_TENANT; i++)
       expect((await h.service.createApiKey(session, integration.id, { label: `k${i}` })).ok).toBe(
         true,
@@ -334,7 +199,7 @@ describe("workspace", () => {
   });
   it("seals a model key for a supported provider and removes it", async () => {
     const h = await harness();
-    const { session } = await h.signUp("acme");
+    const { session } = await h.signedIn("acme");
     expect(await h.service.setModelKey(session, "nope", { apiKey: "sk-test-123456" })).toEqual({
       ok: false,
       error: "Unknown model provider.",
@@ -370,7 +235,7 @@ describe("workspace", () => {
     expect(await h.service.removeModelKey(session, "anthropic")).toBe(false);
 
     const { rows } = await h.control.db.query<{ action: string; actor: string }>(
-      "select action, actor from audit_log where tenant_id = $1 order by id",
+      "select action, actor from audit_log where tenant_id = $1 and action <> 'console.login' order by id",
       [session.tenantId],
     );
     expect(rows).toEqual([
@@ -401,8 +266,8 @@ const subscriptionBody = (integrationId: string, overrides: Record<string, unkno
 describe("integrations", () => {
   it("makes integrations with their scopes, refuses a name a live one has, and keeps each key in the integration it was made in", async () => {
     const h = await harness();
-    const a = await h.signUp("acme");
-    const b = await h.signUp("globex");
+    const a = await h.signedIn("acme");
+    const b = await h.signedIn("globex");
     const created = await h.service.createIntegration(a.session, {
       name: "  Support bot ",
       "scope.events": "on",
@@ -487,7 +352,7 @@ describe("integrations", () => {
       calls.push(request);
       return new Response(JSON.stringify({ subscriptions: listed }), { status: 200 });
     });
-    const { session, token } = await h.signUp("acme");
+    const { session, token } = await h.signedIn("acme");
     const created = await h.service.createIntegration(session, {
       name: "back office",
       "scope.conversations": "on",
@@ -554,7 +419,7 @@ describe("integrations", () => {
     ).toBe(true);
 
     const { rows } = await h.control.db.query<{ action: string; actor: string; detail: unknown }>(
-      "select action, actor, detail from audit_log where tenant_id = $1 order by id",
+      "select action, actor, detail from audit_log where tenant_id = $1 and action <> 'console.login' order by id",
       [session.tenantId],
     );
     const actor = `user:${session.userId}`;
@@ -586,7 +451,7 @@ describe("integrations", () => {
 
   it("audits a re-scope", async () => {
     const h = await harness();
-    const { session } = await h.signUp("acme");
+    const { session } = await h.signedIn("acme");
     const created = await h.service.createIntegration(session, {
       name: "bot",
       "scope.conversations": "on",
@@ -624,7 +489,7 @@ describe("subscriptions", () => {
       calls.push(request);
       return answer(request);
     });
-    const user = await h.signUp("acme");
+    const user = await h.signedIn("acme");
     return { ...h, calls, access: { session: user.session, token: user.token } };
   }
 
@@ -835,7 +700,7 @@ describe("chats", () => {
       calls.push(request);
       return answer(request);
     });
-    const user = await h.signUp("acme");
+    const user = await h.signedIn("acme");
     return { ...h, calls, access: { session: user.session, token: user.token } };
   }
 
@@ -1168,7 +1033,7 @@ describe("studio", () => {
       calls.push(request);
       return answer(request);
     });
-    const user = await h.signUp("acme");
+    const user = await h.signedIn("acme");
     return { ...h, calls, access: { session: user.session, token: user.token } };
   }
 
@@ -1365,7 +1230,7 @@ describe("tools", () => {
       calls.push(request);
       return answer(request);
     });
-    const user = await h.signUp("acme");
+    const user = await h.signedIn("acme");
     return { ...h, calls, access: { session: user.session, token: user.token } };
   }
 

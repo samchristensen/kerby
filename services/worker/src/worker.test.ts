@@ -2965,14 +2965,9 @@ describe("worker config", () => {
     );
   });
 
-  it("lets the egress guard pass named hosts only in development", () => {
+  it("lets the egress guard pass only the hosts the install names", () => {
     const hosts = { ...base, secretsPrivateKeys: "a2V5", egressAllowedHosts: " mcp-demo, ,other " };
-    const refused = workerConfigSchema.safeParse(hosts);
-    expect(refused.success).toBe(false);
-    expect(refused.error?.issues[0]?.path).toEqual(["egressAllowedHosts"]);
-    expect(
-      workerConfigSchema.parse({ ...hosts, kerbyEnvironment: "development" }).egressAllowedHosts,
-    ).toEqual(["mcp-demo", "other"]);
+    expect(workerConfigSchema.parse(hosts).egressAllowedHosts).toEqual(["mcp-demo", "other"]);
     expect(
       workerConfigSchema.parse({ ...base, secretsPrivateKeys: "a2V5" }).egressAllowedHosts,
     ).toEqual([]);

@@ -1,7 +1,7 @@
 // The session cookie. It holds a random token the console stores only as a hash (packages/control-plane); it is
 // HttpOnly, SameSite=Lax and, off localhost, Secure. Server actions are POSTs whose Origin Next.js checks.
 import { cookies, headers } from "next/headers";
-import { notFound, redirect } from "next/navigation";
+import { redirect } from "next/navigation";
 import { cache } from "react";
 import type { ChatAccess, Session } from "../../types/index.ts";
 import { CLIENT_ADDRESS_HEADER, consoleService, secureCookies } from "./console.ts";
@@ -21,13 +21,6 @@ export const getSession = cache(async (): Promise<Session | undefined> => {
 export async function requireSession(): Promise<Session> {
   const session = await getSession();
   if (!session) redirect("/login");
-  return session;
-}
-
-/** The session of an admin; anyone else gets a 404, so the admin pages do not show that they exist. */
-export async function requireAdmin(): Promise<Session> {
-  const session = await requireSession();
-  if (!session.isAdmin) notFound();
   return session;
 }
 
@@ -66,7 +59,7 @@ export async function endSession(): Promise<void> {
   jar.delete(COOKIE);
 }
 
-/** The client's address, for the sign-up and sign-in limits. */
+/** The client's address, for the sign-in limits. */
 export async function clientAddress(): Promise<string> {
   return (await headers()).get(CLIENT_ADDRESS_HEADER) ?? "unknown";
 }

@@ -1,6 +1,6 @@
 # 0012. Recovery and availability: nightly backups, one Postgres, HA when an SLA is sold
 
-- Status: proposed
+- Status: superseded by [0024](0024-self-hosted-single-tenant.md)
 - Date: 2026-11-22
 
 ## Context

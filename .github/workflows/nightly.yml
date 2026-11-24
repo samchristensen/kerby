@@ -1,5 +1,5 @@
-# The real-stack proofs, nightly and on demand: `make e2e` (kill a worker mid-turn) and `make multitenant` (cross-tenant
-# attempts, suspension, a load run) against the Compose stack built from this commit.
+# The real-stack proof, nightly and on demand: `make e2e` (kill a worker mid-turn) against the Compose stack built from
+# this commit.
 name: nightly
 
 on:
@@ -23,6 +23,5 @@ jobs:
           cache: pnpm
       - run: make setup
       - run: make e2e
-      - run: make multitenant
       - if: always()
         run: make down-v

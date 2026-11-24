@@ -7,7 +7,6 @@
     "./testing": "./src/testing.ts"
   },
   "dependencies": {
-    "@kerby/config": "workspace:*",
     "@kerby/observability": "workspace:*",
     "pg": "catalog:"
   },

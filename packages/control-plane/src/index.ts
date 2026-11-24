@@ -11,15 +11,16 @@ export {
   authenticateConsoleSession,
   createConsoleSession,
   deleteConsoleSession,
+  deleteOtherConsoleUsers,
   EmailTakenError,
   findConsoleUser,
   insertConsoleUser,
   readConsoleSession,
+  setConsoleUserPassword,
 } from "./console.ts";
 export {
   listTenantsWithoutDbPassword,
   newTenantDbPassword,
-  openTenantDbPassword,
   readTenantDbPassword,
   resealTenantDbPasswords,
   resolveTenantDbUrl,
@@ -41,11 +42,14 @@ export {
   authenticateApiKey,
   type CreatedKey,
   createApiKey,
+  ensureConfiguredApiKey,
   listApiKeys,
   MAX_API_KEYS_PER_TENANT,
+  newApiKey,
   parseApiKey,
   revokeApiKey,
 } from "./keys.ts";
+export { hashPassword, PASSWORD_COST, verifyPassword } from "./passwords.ts";
 export { restrictControlDatabase, setRolePassword } from "./roles.ts";
 export {
   deleteModelKey,
@@ -56,13 +60,6 @@ export {
   putModelKey,
   readModelKey,
 } from "./secrets.ts";
-export {
-  allowEmails,
-  disallowEmail,
-  isSignupAllowed,
-  listAllowedEmails,
-  setConsoleAdmin,
-} from "./signup-allowlist.ts";
 export {
   type DeliverableSubscription,
   deleteSubscription,
