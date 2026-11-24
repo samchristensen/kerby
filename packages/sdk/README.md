@@ -1,4 +1,4 @@
-# @kerby/sdk
+# @samchristensen/kerby-sdk
 
 Typed client and contracts for the [Kerby](https://github.com/samchristensen/kerby) API: create conversations, post
 messages, wait for or stream the answer, read events and statuses, verify webhooks, run judgments, manage prompts and
@@ -9,7 +9,7 @@ tools. Every request and response shape is a zod schema, so types and runtime va
 ## Install
 
 ```sh
-npm install @kerby/sdk      # or: pnpm add @kerby/sdk
+npm install @samchristensen/kerby-sdk      # or: pnpm add @samchristensen/kerby-sdk
 ```
 
 Node 22+ (global `fetch`, `AbortSignal.any`); runs in Bun, Deno and edge runtimes too. The only dependency is `zod`.
@@ -17,7 +17,7 @@ Node 22+ (global `fetch`, `AbortSignal.any`); runs in Bun, Deno and edge runtime
 ## Use
 
 ```ts
-import { Kerby } from "@kerby/sdk";
+import { Kerby } from "@samchristensen/kerby-sdk";
 
 const kerby = new Kerby({
   baseUrl: process.env.KERBY_BASE_URL!,

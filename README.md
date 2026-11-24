@@ -20,11 +20,11 @@ no provider key is needed to see a turn run; [ARCHITECTURE.md](ARCHITECTURE.md#l
 ## Use it from an application
 
 ```sh
-npm install @kerby/sdk      # or pnpm add / yarn add
+npm install @samchristensen/kerby-sdk      # or pnpm add / yarn add
 ```
 
 ```ts
-import { Kerby } from "@kerby/sdk";
+import { Kerby } from "@samchristensen/kerby-sdk";
 
 const kerby = new Kerby({
   baseUrl: process.env.KERBY_BASE_URL!,

@@ -82,7 +82,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  # Every merge to main publishes @kerby/sdk to npm (ADR 0025) when its build differs from the latest version there: patch
+  # Every merge to main publishes @samchristensen/kerby-sdk to npm (ADR 0025) when its build differs from the latest: patch
   # numbers are assigned by the script, nobody bumps them. The credential is npm trusted publishing: the package names
   # this repository and this workflow file as its publisher, and the job proves it with an OIDC token (`id-token`), so no
   # npm token is stored anywhere. npm records the commit and workflow as the version's provenance.

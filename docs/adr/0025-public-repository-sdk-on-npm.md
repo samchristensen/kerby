@@ -17,12 +17,16 @@ images lack), npm 12 refuses git dependencies unless told otherwise, and the ima
 - **Both repositories become public**, under `samchristensen`. The second one, `kerby-sdk`, is deleted: with nothing
   private left, a generated mirror has no job.
 - **MIT** (`LICENSE`): the most permissive widely understood license, copyright Sam Christensen.
-- **`@kerby/sdk` is published to the public npm registry by CI** on every merge to `main`, from this repository
+- **`@samchristensen/kerby-sdk` is published to the public npm registry by CI** on every merge to `main`, from this repository
   (`make sdk-publish`, [scripts/sdk.ts](../../scripts/sdk.ts)). The script builds as the latest published version and
   compares the packed bytes with the registry's; only a difference publishes, as the next patch of the
   `<major>.<minor>` line in `packages/sdk/package.json` (nobody bumps patches). The credential is **npm trusted
   publishing**: the package names this repository and `ci.yml` as its publisher and the `sdk` job proves it with an OIDC
   token, so no npm token exists to store or leak, and npm records each version's commit as provenance.
+- **The package is `@samchristensen/kerby-sdk`**, not `@kerby/sdk`: the `@kerby` scope on npm belongs to another account.
+  The workspace keeps its internal name `@kerby/sdk`; only the published manifest (`NAME` in `scripts/sdk.ts`) differs. npm
+  binds a trusted publisher to a package that already exists (it answers `404 Package not found` otherwise), so `0.1.0` is
+  published once by hand and every later version by CI.
 - **Images** stay `ghcr.io/samchristensen/kerby` and `kerby-console`. A GHCR package's visibility is its own setting
   after its first push; the console's, created while the repository was private, is changed there.
 - **Reports** go through GitHub private vulnerability reporting ([SECURITY.md](../../SECURITY.md)).
@@ -38,7 +42,7 @@ images lack), npm 12 refuses git dependencies unless told otherwise, and the ima
 
 ## Consequences
 
-- Anything pinned to `github:samchristensen/kerby-sdk#v…` stops resolving; install `@kerby/sdk` from npm. Versions restart
+- Anything pinned to `github:samchristensen/kerby-sdk#v…` stops resolving; install `@samchristensen/kerby-sdk` from npm. Versions restart
   on the registry at `0.1.0` (the git tags `v0.1.0` and `v0.1.1` went with the repository).
 - The whole history is public. It was scanned with gitleaks before the change: the findings were test fixtures and keys
   labelled development-only in old `compose.yaml` revisions. Nothing depends on the source being secret: tenant secrets are

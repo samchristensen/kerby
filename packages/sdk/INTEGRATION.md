@@ -1,7 +1,7 @@
 # Integrating a project with Kerby
 
 For an agent (or a person) adding Kerby to an application. Read it top to bottom once; every section after
-[Pick the pattern](#2-pick-the-pattern) is a recipe you can lift. The SDK is `@kerby/sdk`: a typed client plus every
+[Pick the pattern](#2-pick-the-pattern) is a recipe you can lift. The SDK is `@samchristensen/kerby-sdk`: a typed client plus every
 request and response contract of Kerby's tenant API, as [zod](https://zod.dev) schemas and the types inferred from them.
 
 ## 0. What Kerby is, in the terms the API uses
@@ -35,18 +35,18 @@ worker crashes, and keeping every transcript.
 2. **Install**:
 
    ```sh
-   npm install @kerby/sdk      # or: pnpm add @kerby/sdk
+   npm install @samchristensen/kerby-sdk      # or: pnpm add @samchristensen/kerby-sdk
    ```
 
    Pin the version your lockfile resolves. The version is the contract version: a new SDK version tracks the API it was
-   built from (`npm view @kerby/sdk versions` lists them). Node 22+ (global `fetch`, `AbortSignal.any`); it also runs in
+   built from (`npm view @samchristensen/kerby-sdk versions` lists them). Node 22+ (global `fetch`, `AbortSignal.any`); it also runs in
    Bun, Deno and edge runtimes. TypeScript consumers need `@types/node` or the DOM lib for `fetch` types.
 3. **Configuration**: read two environment variables in your application, never in the SDK:
    `KERBY_BASE_URL` and `KERBY_API_KEY`. Fail at startup when either is missing.
 4. **Create the client once** and reuse it:
 
    ```ts
-   import { Kerby } from "@kerby/sdk";
+   import { Kerby } from "@samchristensen/kerby-sdk";
 
    export const kerby = new Kerby({
      baseUrl: requireEnv("KERBY_BASE_URL"),
@@ -194,7 +194,7 @@ Receive it. Verify against the **raw** body string, before any JSON parsing, and
 acknowledging):
 
 ```ts
-import { verifyWebhook, WebhookVerificationError } from "@kerby/sdk";
+import { verifyWebhook, WebhookVerificationError } from "@samchristensen/kerby-sdk";
 
 app.post("/kerby/webhook", express.text({ type: "*/*" }), async (req, res) => {
   try {
@@ -292,7 +292,7 @@ Every SDK failure extends `KerbyError`:
 | `WebhookVerificationError` | `verifyWebhook`; `reason` is `missing_headers`, `bad_timestamp`, `timestamp_out_of_tolerance`, `bad_signature`, `bad_payload` |
 
 ```ts
-import { isKerbyApiError } from "@kerby/sdk";
+import { isKerbyApiError } from "@samchristensen/kerby-sdk";
 try {
   await kerby.conversations.post(id, text);
 } catch (error) {
@@ -346,13 +346,13 @@ the contracts (`ConversationSchema`, `PublicEventSchema`, ...) let you build fix
 
 ## 11. Using the contracts directly
 
-Everything is exported from `@kerby/sdk`: schemas (`PublicEventSchema`, `GetConversationResponseSchema`, ...), their types
+Everything is exported from `@samchristensen/kerby-sdk`: schemas (`PublicEventSchema`, `GetConversationResponseSchema`, ...), their types
 (`Conversation`, `PublicMessage`, `PublicEvent`, `Judgment`, ...) and constants (`SCOPES`, `EVENT_TYPES`). Inputs are
 typed with defaults optional (`CreateConversationInput`, `SubmitJudgmentInput`, `SearchInput`, ...). The `.d.ts` files in
-`node_modules/@kerby/sdk/lib/contracts/src/` carry the field-by-field documentation.
+`node_modules/@samchristensen/kerby-sdk/lib/contracts/src/` carry the field-by-field documentation.
 
 ```ts
-import { PublicEventSchema, type PublicEvent } from "@kerby/sdk";
+import { PublicEventSchema, type PublicEvent } from "@samchristensen/kerby-sdk";
 const event: PublicEvent = PublicEventSchema.parse(JSON.parse(storedJson));
 if (event.type === "turn.failed") console.log(event.data.reason); // narrowed by `type`
 ```

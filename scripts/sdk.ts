@@ -1,4 +1,4 @@
-// `make sdk-build` and `make sdk-publish`: build `@kerby/sdk` into packages/sdk/dist, and publish that to the npm
+// `make sdk-build` and `make sdk-publish`: build the SDK into packages/sdk/dist, and publish that to the npm
 // registry, where applications install it.
 //
 //   node scripts/sdk.ts build              compile, rewrite specifiers, write the publishable package.json
@@ -37,7 +37,7 @@ const ENTRIES: Record<string, string> = {
 };
 /** What the package holds besides lib/: the guide an agent reads first. */
 const DOCS = ["README.md", "INTEGRATION.md"];
-const NAME = "@kerby/sdk";
+const NAME = "@samchristensen/kerby-sdk";
 const REPO = "https://github.com/samchristensen/kerby";
 
 const run = (command: string, args: string[], cwd = root): string =>

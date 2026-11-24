@@ -1,13 +1,13 @@
 # AGENTS.md
 
-This package is the published `@kerby/sdk`, generated from the Kerby repository (https://github.com/samchristensen/kerby);
+This package is the published `@samchristensen/kerby-sdk`, generated from the Kerby repository (https://github.com/samchristensen/kerby);
 do not edit `lib/`.
 
 When asked to integrate a project with Kerby:
 
 1. Read `INTEGRATION.md` (next to this file) completely before writing code: it names the pattern to use for each need and
    the mistakes to avoid.
-2. Install the SDK in the target project (`npm install @kerby/sdk`, or `pnpm add @kerby/sdk`), then read the types you will
+2. Install the SDK in the target project (`npm install @samchristensen/kerby-sdk`, or `pnpm add` it), then read the types you will
    call in `lib/sdk/src/resources/*.d.ts` and the contracts in `lib/contracts/src/*.d.ts` (they carry the documentation).
 3. Read `KERBY_BASE_URL` and `KERBY_API_KEY` once at startup and fail when missing. Never put the key in client-side
    code or logs.

@@ -32,7 +32,8 @@ with the reason.
 - A relative import never leaves its workspace.
 - No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`). The one
   exception is the console's pages, which `next build` compiles when its image is built (ADR 0014).
-- `packages/sdk` is the one package that leaves the repository: applications install it from npm as `@kerby/sdk`.
+- `packages/sdk` (workspace `@kerby/sdk`) is the one package that leaves the repository: applications install it from
+  npm as `@samchristensen/kerby-sdk` (the `@kerby` scope on npm is another account's).
   `make sdk-build` compiles it with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish`
   on every merge to `main`, which publishes the next patch version to npm when the build differs from the latest
   ([ADR 0023](docs/adr/0023-sdk.md), [0025](docs/adr/0025-public-repository-sdk-on-npm.md)). Its `INTEGRATION.md` is the
