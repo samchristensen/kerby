@@ -39,6 +39,7 @@ second `KERBY_ROLES=worker` container may run the old image for a minute.
 | `HOST`, `PORT`                                                                      | kerby          | where the api listens (8080); `::` on Railway, whose private network is IPv6                                                         |
 | `TRUST_PROXY`                                                                       | kerby, console | `true` behind Railway's edge, so the failed sign-in and request limits count the client's address                                    |
 | `API_URL`, `API_PUBLIC_URL`, `PUBLIC_URL`                                           | console        | the api inside the network, the api's public address (shown in the quickstart), the console's own address                            |
+| `SECURE_COOKIES`                                                                    | console        | `false` where the console is served over plain http (default `true`: the session cookie is `Secure`)                                 |
 | `CONSOLE_PUBLIC_URL`                                                                | kerby          | the console's `PUBLIC_URL`: tool servers connected with OAuth redirect there (ADR 0022)                                              |
 | `ALERT_WEBHOOK_URL`                                                                 | kerby          | [Alerts](#alerts)                                                                                                                    |
 | `KERBY_ROLES`                                                                       | kerby          | `control,api,worker,dispatcher` by default; `worker` for an extra worker container. One container per install runs `control`.        |
@@ -89,8 +90,31 @@ volumes:
 ```
 
 The application calls `http://kerby:8080` with `KERBY_API_KEY` (`new Kerby({ apiKey, baseUrl })`,
-`packages/sdk/INTEGRATION.md`). Add the console like the repository's `compose.yaml` does, with `API_URL:
-http://kerby:8080`, if you want it.
+`packages/sdk/INTEGRATION.md`).
+
+The console is optional. Merge this into the file above: the admin it signs in as and its address on `kerby`, and the
+service from its image:
+
+```yaml
+services:
+  kerby:
+    environment:
+      KERBY_ADMIN_EMAIL: you@example.com
+      KERBY_ADMIN_PASSWORD: ${KERBY_ADMIN_PASSWORD}
+      CONSOLE_PUBLIC_URL: http://127.0.0.1:3000
+  console:
+    image: ghcr.io/samchristensen/kerby-console:main
+    restart: unless-stopped
+    environment:
+      KERBY_SECRET_KEY: ${KERBY_SECRET_KEY}
+      DATABASE_URL: postgres://postgres:change-me@kerby-postgres:5432/kerby
+      API_URL: http://kerby:8080
+      API_PUBLIC_URL: http://kerby:8080
+      PUBLIC_URL: http://127.0.0.1:3000
+      SECURE_COOKIES: "false" # plain http; behind TLS leave it unset
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: { kerby: { condition: service_healthy } }
+```
 
 ## Inside a Railway project
 

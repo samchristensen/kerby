@@ -108,3 +108,12 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
   down until it points at an install of its own (K6's proof). The repository secrets the deleted CI jobs read
   (`RAILWAY_TOKEN`, `GHCR_PULL_TOKEN`, `KERBY_CANARY_KEY`, variables `KERBY_API_URL`, `KERBY_CANARY_CONVERSATION_ID`) are
   unused now; the owner may delete them.
+- 2026-11-24 K6's proof, in part. `docs/deploy.md`'s Compose snippet (verbatim) plus the console service ran from a
+  scratch directory on prod images built from this tree and tagged as the GHCR names: healthy in 9 s, tenant and key
+  made, a second start made no tenant; an `app` container that installed `@kerby/sdk` v0.1.1 from the private repository
+  inside a Docker build (token as a build secret) ran `ask`, `streamReply` and a verified webhook to `http://app:3000`;
+  the admin signed in to the console in a browser. Not proven: the images are not on GHCR (`ghcr.io/samchristensen/kerby`
+  does not exist; the packages there are the old per-service ones, all private), so the pull, and the Railway recipe,
+  wait for a merge to `main`. Found: the images are amd64 only and the `kerby` image carries the console's dependencies
+  (both in tech-debt); the SDK lockfile records an SSH address, so CI and Docker builds need a key or token and `git`
+  (now in the SDK guide); npm 12 refuses the git dependency without `--allow-git=all` (same).
