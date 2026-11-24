@@ -322,11 +322,12 @@ describe("fan-out and delivery", () => {
     });
     const failing = await getSubscription(h.control.db, t.id, sub.id);
     expect(failing?.failingSince).not.toBeNull();
-    // The next attempt is 30 s out (DELIVERY_RETRY): bring it forward.
-    await t.db.query(
-      "update absurd.r_deliveries set available_at = now() where state in ('pending', 'sleeping')",
-    );
+    // The next attempt is 30 s out (DELIVERY_RETRY): bring it forward. The task is re-queued a moment after its attempt
+    // is logged, so do it on every look, not once: a single update can land while the task still runs and match nothing.
     const attempts = await eventually("the retry", async () => {
+      await t.db.query(
+        "update absurd.r_deliveries set available_at = now() where state in ('pending', 'sleeping')",
+      );
       const page = await listDeliveryAttempts(t.db, sub.id, { limit: 10 });
       return page.deliveries.length === 2 && page.deliveries;
     });
