@@ -126,3 +126,15 @@ second tenant, and the return to SaaS (a plan of its own, starting from `saas-po
   `0.1.0` (npm binds a trusted publisher only to a package that exists) and `npm trust github`; the merge; `kerby-console`
   made public on GHCR (its first push predates the public repository); then `samchristensen/kerby-sdk` and the
   `SDK_DEPLOY_KEY` secret deleted.
+- 2026-11-24 Shipped (ADR 0025). PR 24 merged. `@samchristensen/kerby-sdk` 0.1.0 was published by hand, then
+  `npm trust github` bound `ci.yml`; `0.1.1`, published by CI, carries signed provenance (`npm audit signatures`
+  verifies it), and a `main` run with an unchanged build reports "nothing to publish", so the byte comparison holds
+  between a Mac build and a Linux runner. The `kerby-sdk` repository and `SDK_DEPLOY_KEY` are deleted.
+  `ghcr.io/samchristensen/kerby` is public (it took the repository's visibility at its first push); `kerby-console` was
+  created while private and GHCR has no API to change that, so it stays private until its package settings are changed.
+  K6's proof, in part again: the `docs/deploy.md` snippet verbatim, an anonymous pull from GHCR, an app in plain
+  `node:26-slim` installing the SDK from npm with no git or token, then `ask`, `streamReply` and a verified webhook, and a
+  restart that made no second tenant. Found and fixed: on Apple Silicon the snippet failed with `no matching manifest for
+  linux/arm64/v8` (the images were amd64 only; `platform: linux/amd64` made it run), so CI builds both; a dispatcher
+  test raced (one `update ... available_at` could land while the task still ran) and blocked the `sdk` job, which needs
+  `test`. Not proven: the Railway recipe.
