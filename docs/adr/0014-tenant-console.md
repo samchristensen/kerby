@@ -115,6 +115,16 @@ the api with the person's session token, like the Studio: `/dashboard/tools` (se
 credential, enabling, effect, drift review, the integrations granted), an integration's tool grants, and a tool
 picker on a new chat and in a chat prompt's draft. A credential is never shown back.
 
+## Amendment: one install, one admin (2026-11-23)
+
+[ADR 0024](0024-self-hosted-single-tenant.md). An install has one tenant and one console account, the one config names
+(`KERBY_ADMIN_EMAIL`, `KERBY_ADMIN_PASSWORD`): control makes it at start, resets its password when config changes, and
+replaces the account when the email changes. Sign-up, the sign-up allowlist and the admin flag are gone (control
+migration `0010_no_signup.sql`), and with them control's sign-up route, `CONSOLE_TOKEN` and the console's control
+client; password hashing moved to `packages/control-plane`, which both use. The console takes `DATABASE_URL` and
+`KERBY_SECRET_KEY`, and derives the `kerby_console` role's password and the secrets public key from it. Everything else
+above (sessions, sign-in limits, integrations, keys, model keys, tools, chat) is unchanged.
+
 ## Consequences
 
 - Sign-up is by invitation (amendment above), not open. The per-address limit still bounds one address; there is no CAPTCHA,

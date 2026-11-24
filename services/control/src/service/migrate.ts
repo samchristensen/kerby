@@ -41,7 +41,7 @@ export async function migrateAllTenants(deps: ControlDeps): Promise<MigrationRun
   for (const tenantId of result.migrated) await setSchemaVersion(deps.control, tenantId, version);
   await audit(deps.control, {
     tenantId: null,
-    actor: "operator",
+    actor: "control",
     action: "tenants.migrate",
     detail: { migrated: result.migrated.length, failed: result.failed.length },
   });

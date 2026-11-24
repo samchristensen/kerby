@@ -1,8 +1,7 @@
-# The gate (plan 0001 M0, ADR 0011): every pull request and every push to main runs `make check` and `make test` and
-# builds the service images. A pull request also previews the Railway IaC change. A push to main publishes the images
-# to GHCR as `sha-<commit>`, applies `.railway/railway.ts` to production, creates any new secret and public domain, and
-# rolls the images out (control, then the rest). Railway builds nothing. Actions are pinned by commit SHA (versions live
-# once).
+# The gate (plan 0001 M0): every pull request and every push to main runs `make check` and `make test` and builds the two
+# images an install runs (ADR 0024): `kerby` (control, api, worker, dispatcher) and `kerby-console`. A push to main
+# publishes them to GHCR as `sha-<commit>` and `main`, which docs/deploy.md deploys. Actions are pinned by commit SHA
+# (versions live once).
 name: ci
 
 on:
@@ -16,9 +15,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  RAILWAY_CLI_VERSION: 5.62.1
 
 jobs:
   check:
@@ -56,7 +52,11 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [control, api, worker, dispatcher, console]
+        include:
+          - service: kerby
+            image: kerby
+          - service: console
+            image: kerby-console
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -74,102 +74,26 @@ jobs:
           platforms: linux/amd64
           push: ${{ github.event_name == 'push' }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/kerby-${{ matrix.service }}:sha-${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/kerby-${{ matrix.service }}:main
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:main
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  # What the IaC file would change in production, shown on the pull request's checks. Needs RAILWAY_TOKEN.
-  railway-plan:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-    steps:
-      - if: env.RAILWAY_TOKEN == ''
-        run: echo "::warning::RAILWAY_TOKEN is not set; no Railway plan. See docs/deploy.md (Releasing)."
-      # Every setup step is conditional: setup-node's pnpm cache post-step fails when nothing was installed.
-      - if: env.RAILWAY_TOKEN != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: env.RAILWAY_TOKEN != ''
-        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
-      - if: env.RAILWAY_TOKEN != ''
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - if: env.RAILWAY_TOKEN != ''
-        run: |
-          make setup
-          npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
-          railway config plan
-
-  # Apply the IaC file, then roll this commit's images out to production. One release at a time, never cancelled.
-  release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, test, images]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    environment: production
-    concurrency:
-      group: release-production
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      packages: write
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-    steps:
-      - if: env.RAILWAY_TOKEN == '' || env.GHCR_PULL_TOKEN == ''
-        run: echo "::warning::RAILWAY_TOKEN or GHCR_PULL_TOKEN is not set; images are published but not deployed. See docs/deploy.md (CI)."
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - if: env.RAILWAY_TOKEN != '' && env.GHCR_PULL_TOKEN != ''
-        name: Release to production
-        run: |
-          make setup
-          npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
-          # Additions and changes only: a deletion fails here and needs a person (docs/deploy.md).
-          railway config apply --yes
-          # A secret or public service the IaC file just added: created once, never replaced.
-          node scripts/railway.ts secrets production
-          node scripts/railway.ts domains production
-          node scripts/railway.ts registry production
-          node scripts/railway.ts deploy production "sha-${GITHUB_SHA}"
-
-  # Every merge to main publishes @kerby/sdk (ADR 0023) when its build differs from the last tag in the private SDK
-  # repository: patch numbers are assigned by the script, nobody bumps them. A deploy key with write access to that one
-  # repository (secret SDK_DEPLOY_KEY) is the only credential.
+  # Every merge to main publishes @samchristensen/kerby-sdk to npm (ADR 0025) when its build differs from the latest: patch
+  # numbers are assigned by the script, nobody bumps them. The credential is npm trusted publishing: the package names
+  # this repository and this workflow file as its publisher, and the job proves it with an OIDC token (`id-token`), so no
+  # npm token is stored anywhere. npm records the commit and workflow as the version's provenance.
   sdk:
     if: github.event_name == 'push'
     needs: [check, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      GIT_AUTHOR_NAME: kerby-ci
-      GIT_AUTHOR_EMAIL: kerby-ci@users.noreply.github.com
-      GIT_COMMITTER_NAME: kerby-ci
-      GIT_COMMITTER_EMAIL: kerby-ci@users.noreply.github.com
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -178,12 +102,6 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: make setup
-      - name: Publish the SDK
-        env:
-          SDK_DEPLOY_KEY: ${{ secrets.SDK_DEPLOY_KEY }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SDK_DEPLOY_KEY" > ~/.ssh/id_sdk
-          chmod 600 ~/.ssh/id_sdk
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_sdk -o IdentitiesOnly=yes" make sdk-publish
+      # Trusted publishing needs npm 11.5.1 or newer; this is the version `make sdk-publish` was proven with.
+      - run: npm install --global npm@12.1.0
+      - run: make sdk-publish

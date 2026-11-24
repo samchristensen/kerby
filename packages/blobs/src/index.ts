@@ -12,7 +12,6 @@ import { type BucketConfig, createBucket, createS3Client, tenantPrefix } from ".
 export {
   type Bucket,
   type BucketConfig,
-  copyObjects,
   createBucket,
   tenantPrefix,
 } from "./bucket.ts";

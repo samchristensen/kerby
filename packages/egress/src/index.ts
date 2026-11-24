@@ -98,9 +98,9 @@ export type EgressOptions = {
   /** Decoded bytes; default 16 MiB. */
   readonly maxResponseBytes?: number;
   /**
-   * Host names (exact, case-insensitive) whose addresses skip the range check: a local MCP server for the proof on the
-   * Compose stack. Development only; the services refuse it outside `KERBY_ENVIRONMENT=development` (ADR 0022). A
-   * redirect away from one is checked like any other hop.
+   * Host names (exact, case-insensitive) whose addresses skip the range check: the install's own services on its
+   * private network, or an MCP server on this machine (ADR 0010, amended by 0024). A redirect away from one is checked
+   * like any other hop.
    */
   readonly allowedHosts?: readonly string[];
 };

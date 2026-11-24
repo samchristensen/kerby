@@ -1,11 +1,12 @@
-// `make logs-query`: Kerby's JSON log lines, filtered, oldest first, one per line with the service that wrote it.
-// Locally it reads `docker compose logs` of the stack KERBY_PROJECT names; with `--env <name>` it reads `railway logs
-// --json` of that Railway environment (read only; run from a checkout linked with `railway link`). Railway keeps the
-// logs of a service's current deployment here; older deployments are in the dashboard.
+// `make logs-query`: Kerby's JSON log lines, filtered, oldest first, one per line with the service that wrote it. It reads
+// `docker compose logs` of the stack KERBY_PROJECT names. The kerby container's launcher tags each line with the
+// process that wrote it (`service`: control, api, worker, dispatcher); the console's lines are the console's.
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 
-const SERVICES = ["control", "api", "worker", "console"] as const;
+const SERVICES = ["control", "api", "worker", "dispatcher", "console"] as const;
+/** The Compose services whose output holds Kerby's lines. */
+const CONTAINERS = ["kerby", "console"] as const;
 const LEVELS = ["debug", "info", "warn", "error"] as const;
 type Level = (typeof LEVELS)[number];
 
@@ -31,10 +32,10 @@ export type LogFilter = {
 };
 
 /**
- * A line of output as a log line, or undefined when it is not one (a stack trace, a tool's own output). Railway's JSON
- * renames `msg` to `message` and adds `timestamp`; both shapes come out as Kerby's.
+ * A line of `container`'s output as a log line, or undefined when it is not one (a stack trace, a tool's own output).
+ * Its service is the `service` the launcher tagged it with, else the container's name.
  */
-export function parseLine(raw: string, service: string): LogLine | undefined {
+export function parseLine(raw: string, container: string): LogLine | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -42,22 +43,17 @@ export function parseLine(raw: string, service: string): LogLine | undefined {
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const { msg, message, at, timestamp, level, tenantId, ...rest } = parsed as Record<
-    string,
-    unknown
-  >;
-  const text = msg ?? message;
-  const time = at ?? timestamp;
-  if (typeof text !== "string" || typeof time !== "string" || typeof level !== "string") {
+  const { msg, at, level, tenantId, service, ...rest } = parsed as Record<string, unknown>;
+  if (typeof msg !== "string" || typeof at !== "string" || typeof level !== "string") {
     return undefined;
   }
-  if (Number.isNaN(Date.parse(time))) return undefined;
+  if (Number.isNaN(Date.parse(at))) return undefined;
   return {
-    at: time,
+    at,
     level,
-    msg: text,
+    msg,
     tenantId: typeof tenantId === "string" ? tenantId : null,
-    service,
+    service: typeof service === "string" ? service : container,
     ...rest,
   };
 }
@@ -78,14 +74,14 @@ function matches(line: LogLine, filter: LogFilter): boolean {
   return true;
 }
 
-/** The matching lines of `output` from `service`, oldest first. */
+/** The matching lines of each container's `output`, oldest first. */
 export function query(
-  outputs: { service: string; output: string }[],
+  outputs: { container: string; output: string }[],
   filter: LogFilter,
 ): LogLine[] {
   return outputs
-    .flatMap(({ service, output }) =>
-      output.split("\n").flatMap((raw) => parseLine(raw, service) ?? []),
+    .flatMap(({ container, output }) =>
+      output.split("\n").flatMap((raw) => parseLine(raw, container) ?? []),
     )
     .filter((line) => matches(line, filter))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
@@ -109,7 +105,7 @@ export function parseTime(value: string, now: Date): Date {
   return new Date(time);
 }
 
-export function parseFilter(args: string[], now: Date): { filter: LogFilter; env?: string } {
+export function parseFilter(args: string[], now: Date): LogFilter {
   const { values } = parseArgs({
     args,
     options: {
@@ -119,7 +115,6 @@ export function parseFilter(args: string[], now: Date): { filter: LogFilter; env
       service: { type: "string" },
       since: { type: "string" },
       until: { type: "string" },
-      env: { type: "string" },
     },
   });
   const level = values.level;
@@ -130,7 +125,7 @@ export function parseFilter(args: string[], now: Date): { filter: LogFilter; env
   if (service !== undefined && !SERVICES.some((s) => s === service)) {
     throw new Error(`service "${service}" is unknown. Fix: one of ${SERVICES.join(", ")}`);
   }
-  const filter: LogFilter = {
+  return {
     ...(values.tenant === undefined ? {} : { tenantId: values.tenant }),
     ...(level === undefined ? {} : { level: level as Level }),
     ...(values.msg === undefined ? {} : { msg: values.msg }),
@@ -138,46 +133,29 @@ export function parseFilter(args: string[], now: Date): { filter: LogFilter; env
     ...(values.since === undefined ? {} : { since: parseTime(values.since, now) }),
     ...(values.until === undefined ? {} : { until: parseTime(values.until, now) }),
   };
-  return { filter, ...(values.env === undefined ? {} : { env: values.env }) };
 }
 
-/** Each service's raw output for the window: Railway's JSON for `env`, else the local Compose stack's. */
-function read(filter: LogFilter, env: string | undefined): { service: string; output: string }[] {
-  const services = filter.service === undefined ? SERVICES : [filter.service];
+/** Each container's raw output for the window, from the local Compose stack. */
+function read(filter: LogFilter): { container: string; output: string }[] {
+  const containers = filter.service === "console" ? ["console"] : CONTAINERS;
   const window = [
     ...(filter.since ? ["--since", filter.since.toISOString()] : []),
     ...(filter.until ? ["--until", filter.until.toISOString()] : []),
   ];
-  const run = (args: string[]) =>
-    execFileSync(args[0] ?? "", args.slice(1), {
-      encoding: "utf8",
-      maxBuffer: 1 << 30,
-      stdio: ["ignore", "pipe", "inherit"],
-    });
-  return services.map((service) => ({
-    service,
-    output:
-      env === undefined
-        ? run(["docker", "compose", "logs", "--no-log-prefix", "--no-color", ...window, service])
-        : // Without a window `railway logs` streams forever: default to the last hour.
-          run([
-            "railway",
-            "logs",
-            "--json",
-            "--service",
-            service,
-            "--environment",
-            env,
-            ...(filter.since ? [] : ["--since", "1h"]),
-            ...window,
-          ]),
+  return containers.map((container) => ({
+    container,
+    output: execFileSync(
+      "docker",
+      ["compose", "logs", "--no-log-prefix", "--no-color", ...window, container],
+      { encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "inherit"] },
+    ),
   }));
 }
 
 if (import.meta.main) {
   try {
-    const { filter, env } = parseFilter(process.argv.slice(2), new Date());
-    for (const line of query(read(filter, env), filter)) console.log(JSON.stringify(line));
+    const filter = parseFilter(process.argv.slice(2), new Date());
+    for (const line of query(read(filter), filter)) console.log(JSON.stringify(line));
   } catch (error) {
     console.error(`logs-query: ${(error as Error).message}`);
     process.exit(1);

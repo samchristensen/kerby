@@ -1,3 +1,2 @@
-export * from "./console.ts";
-export * from "./operator.ts";
+export * from "./install.ts";
 export * from "./tenant.ts";

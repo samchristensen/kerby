@@ -50,6 +50,13 @@ export function parseApiKey(key: string): { id: string; secret: string } | undef
 
 export type CreatedKey = { key: ApiKeyRecord; secret: string };
 
+/** A new key: its public id, its secret, and the whole `kb_<id>_<secret>` a client presents. */
+export function newApiKey(): { id: string; secret: string; key: string } {
+  const id = randomBytes(6).toString("hex");
+  const secret = randomBytes(32).toString("base64url");
+  return { id, secret, key: `kb_${id}_${secret}` };
+}
+
 /**
  * Live (unrevoked) keys a tenant may hold: one per service, environment and CI job with room to spare. Every key is a
  * row and a credential the api may cache, so a tenant (any signed-in console person) must not mint them without end.
@@ -87,8 +94,7 @@ export async function createApiKey(
   );
   if (live.rowCount !== 1)
     throw new Error(`integration ${integrationId} is not a live integration of the tenant`);
-  const id = randomBytes(6).toString("hex");
-  const secret = randomBytes(32).toString("base64url");
+  const { id, secret, key } = newApiKey();
   const { rows } = await db.query<KeyRow>(
     `insert into api_keys (id, tenant_id, integration_id, label, key_hash)
      select $1, $2::uuid, $3::uuid, $4, $5
@@ -102,7 +108,7 @@ export async function createApiKey(
       `a tenant may hold at most ${MAX_API_KEYS_PER_TENANT} live API keys: revoke one it no longer uses, then create the new one`,
     );
   }
-  return { key: keyFromRow(row), secret: `kb_${id}_${secret}` };
+  return { key: keyFromRow(row), secret: key };
 }
 
 /** The tenant's keys, or one integration's, oldest first; revoked ones included. */
@@ -133,6 +139,65 @@ export async function revokeApiKey(
     [keyId, tenantId],
   );
   return rowCount === 1;
+}
+
+/** The label of the key control keeps equal to `KERBY_API_KEY` (ADR 0024). */
+const CONFIGURED_KEY_LABEL = "KERBY_API_KEY";
+
+/**
+ * Make `presented` a live key of the integration, and revoke the keys an earlier configuration made: config is where
+ * the configured key lives, so a key revoked elsewhere comes back at the next start. Throws when `presented` is not a
+ * key, or its id belongs to a different key.
+ */
+export async function ensureConfiguredApiKey(
+  db: ControlQueryable,
+  tenantId: string,
+  integrationId: string,
+  presented: string,
+): Promise<"created" | "kept" | "restored"> {
+  if ("transaction" in db)
+    return db.transaction((tx) => ensureConfiguredApiKey(tx, tenantId, integrationId, presented));
+  const parsed = parseApiKey(presented);
+  if (!parsed) {
+    throw new Error(
+      "KERBY_API_KEY is not a Kerby API key (kb_<12 hex>_<43 base64url>). Fix: make one with `make secrets-key`",
+    );
+  }
+  await db.query(
+    `update api_keys set revoked_at = now()
+      where tenant_id = $1 and label = $2 and id <> $3 and revoked_at is null`,
+    [tenantId, CONFIGURED_KEY_LABEL, parsed.id],
+  );
+  const { rows } = await db.query<{ tenant_id: string; key_hash: Buffer; revoked: boolean }>(
+    "select tenant_id, key_hash, revoked_at is not null as revoked from api_keys where id = $1 for update",
+    [parsed.id],
+  );
+  const row = rows[0];
+  if (!row) {
+    await db.query(
+      `insert into api_keys (id, tenant_id, integration_id, label, key_hash)
+       values ($1, $2, $3, $4, $5)`,
+      [parsed.id, tenantId, integrationId, CONFIGURED_KEY_LABEL, hash(parsed.secret)],
+    );
+    return "created";
+  }
+  const expected = hash(parsed.secret);
+  if (
+    row.tenant_id !== tenantId ||
+    row.key_hash.length !== expected.length ||
+    !timingSafeEqual(row.key_hash, expected)
+  ) {
+    throw new Error(
+      "KERBY_API_KEY's id belongs to another key. Fix: make a new one with `make secrets-key`",
+    );
+  }
+  // Revoked, or left on an integration since deleted: put it back on the live one.
+  const { rowCount } = await db.query(
+    `update api_keys set revoked_at = null, integration_id = $2
+      where id = $1 and (revoked_at is not null or integration_id <> $2)`,
+    [parsed.id, integrationId],
+  );
+  return rowCount === 1 ? "restored" : "kept";
 }
 
 export type Authenticated = { tenant: TenantRecord; keyId: string; integration: IntegrationRecord };

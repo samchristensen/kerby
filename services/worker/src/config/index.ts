@@ -5,7 +5,7 @@ import { z } from "zod";
 export const workerConfigSchema = z
   .object({
     controlDatabaseUrl: z.string().min(1),
-    /** Opens tenants' stored database passwords (ADR 0009): the same comma-separated key list control holds. */
+    /** Opens tenants' stored database passwords (ADR 0009): the launcher derives it from KERBY_SECRET_KEY. */
     tenantDbKeys: z.string().min(1),
     /** `sslmode` for tenant database URLs; omit for a Postgres on a private network or locally, which does not use TLS. */
     tenantDbSslmode: z.enum(["disable", "require", "verify-full"]).optional(),
@@ -42,8 +42,9 @@ export const workerConfigSchema = z
      */
     toolCallTimeoutMs: z.coerce.number().int().positive().default(60_000),
     /**
-     * Host names the egress guard lets through although they resolve to private addresses, comma separated: a local MCP
-     * server for the proof on the Compose stack (`make tools-e2e`). Development only; production refuses it.
+     * Host names the egress guard lets through although they resolve to private addresses, comma separated: the
+     * install's own MCP servers on its private network (`crm.railway.internal`, a Compose service name) or this machine
+     * (ADR 0010, amended by 0024). The api has the same setting.
      */
     egressAllowedHosts: z
       .string()
@@ -112,15 +113,7 @@ export const workerConfigSchema = z
   .refine((config) => !(config.kerbyFakeModel && config.kerbyEnvironment === "production"), {
     message: "KERBY_FAKE_MODEL is only allowed with KERBY_ENVIRONMENT=development",
     path: ["kerbyFakeModel"],
-  })
-  .refine(
-    (config) => config.egressAllowedHosts.length === 0 || config.kerbyEnvironment === "development",
-    {
-      message:
-        "EGRESS_ALLOWED_HOSTS is only allowed with KERBY_ENVIRONMENT=development: in production every tenant URL must be public",
-      path: ["egressAllowedHosts"],
-    },
-  );
+  });
 
 export type WorkerConfig = z.output<typeof workerConfigSchema>;
 

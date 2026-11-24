@@ -4,15 +4,18 @@ import { z } from "zod";
 const consoleConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
   port: z.coerce.number().int().min(0).default(3000),
-  /** The control database, as the limited `kerby_console` role control makes (migration 0005). */
-  controlDatabaseUrl: z.string().min(1),
-  /** Control's address on the private network, for sign-up: `http://control:8081` locally. */
-  controlUrl: z.url({ protocol: /^https?$/ }),
-  /** The token control accepts on its sign-up route, and nowhere else (control's `CONSOLE_TOKEN`). */
-  consoleToken: z.string().min(16),
-  /** Public key model keys are sealed to (base64): the api's `SECRETS_PUBLIC_KEY`. The console cannot open them. */
-  secretsPublicKey: z.string().min(1),
-  /** The tenant API's address on the private network, where the browser's chat goes: `http://api:8080` locally. */
+  /**
+   * Kerby's own Postgres, its control database: the `kerby` service's `DATABASE_URL` (the same value). Its role and
+   * password do not matter: the console connects as the limited `kerby_console` role, with the password
+   * `KERBY_SECRET_KEY` derives.
+   */
+  databaseUrl: z.string().min(1),
+  /**
+   * The install's one secret (32 bytes, base64): the `kerby` service's `KERBY_SECRET_KEY`. The console derives from it
+   * the `kerby_console` password and the public key model keys are sealed to; it cannot open them.
+   */
+  kerbySecretKey: z.string().min(1),
+  /** The tenant API's address on the private network, where the browser's chat goes: `http://kerby:8080` in Compose. */
   apiUrl: z.url({ protocol: /^https?$/ }),
   /** The tenant API's public address, shown in the quickstart. */
   apiPublicUrl: z.url({ protocol: /^https?$/ }),
@@ -34,8 +37,6 @@ const consoleConfigSchema = z.object({
   trustProxy: z.stringbool().default(false),
   /** Next.js development mode: compile on request and reload on change. The `dev` image target sets it. */
   devServer: z.stringbool().default(false),
-  /** Sign-ups one client address may make per hour: each provisions a database. */
-  signupsPerHour: z.coerce.number().int().positive().default(5),
   /** Failed sign-ins one client address may make per minute. */
   failedLoginsPerMinute: z.coerce.number().int().positive().default(10),
   /** Failed sign-ins against one email per hour, from every address together. */

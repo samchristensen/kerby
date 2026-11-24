@@ -536,16 +536,14 @@ describe("dispatcher config", () => {
       controlDatabaseUrl: env.CONTROL_DATABASE_URL,
       tenantDbKeys: env.TENANT_DB_KEYS,
       deliverySecretsPrivateKeys: env.DELIVERY_SECRETS_PRIVATE_KEYS,
-      kerbyEnvironment: env.KERBY_ENVIRONMENT,
       allowLocalDestinations: env.ALLOW_LOCAL_DESTINATIONS,
     });
 
-  it("refuses local destinations in production and allows them in development", () => {
-    expect(parse({ ...base, ALLOW_LOCAL_DESTINATIONS: "true" }).success).toBe(false);
-    expect(
-      parse({ ...base, ALLOW_LOCAL_DESTINATIONS: "true", KERBY_ENVIRONMENT: "development" })
-        .success,
-    ).toBe(true);
+  it("refuses local destinations unless the install allows them", () => {
+    expect(parse(base).data?.allowLocalDestinations).toBe(false);
+    expect(parse({ ...base, ALLOW_LOCAL_DESTINATIONS: "true" }).data?.allowLocalDestinations).toBe(
+      true,
+    );
   });
 
   it("requires the delivery secrets private key and caps 20 deliveries by default", () => {

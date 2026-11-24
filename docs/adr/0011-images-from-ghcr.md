@@ -1,6 +1,6 @@
 # 0011. CI builds the images; Railway runs them from GHCR
 
-- Status: proposed
+- Status: superseded by [0024](0024-self-hosted-single-tenant.md)
 - Date: 2026-11-22
 
 ## Context

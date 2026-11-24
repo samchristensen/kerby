@@ -1,15 +1,17 @@
-// `make sdk-build` and `make sdk-publish`: build `@kerby/sdk` into packages/sdk/dist, and publish that to its own
-// (private) GitHub repository, where customers' projects install it from a git tag.
+// `make sdk-build` and `make sdk-publish`: build the SDK into packages/sdk/dist, and publish that to the npm
+// registry, where applications install it.
 //
 //   node scripts/sdk.ts build              compile, rewrite specifiers, write the publishable package.json
-//   node scripts/sdk.ts publish [--dry-run] build, then commit dist and the docs to the SDK repo, tag v<version>, push
+//   node scripts/sdk.ts publish [--dry-run] build, and `npm publish` it as the next patch if it differs from the latest
 //
-// Why a separate repository: the monorepo has no build step and its packages are `workspace:*` (nothing in it installs
-// from git). The SDK repo holds only what a consumer runs: compiled JS and .d.ts of the SDK and of the contracts it
-// is made from (so types and schemas cannot drift from the API), plus the integration guide.
-import { execFileSync } from "node:child_process";
+// Why a build at all: the monorepo has no build step and its packages are `workspace:*` (nothing in it installs from a
+// registry). The published package holds only what a consumer runs: compiled JS and .d.ts of the SDK and of the contracts
+// it is made from (so types and schemas cannot drift from the API), plus the integration guide. CI runs `publish` on every
+// merge to main (ADR 0025) with npm trusted publishing: no token exists to leak, and npm records where each version was built.
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -25,7 +27,7 @@ import { parse } from "yaml";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sdkDir = join(root, "packages", "sdk");
 const dist = join(sdkDir, "dist");
-/** tsc's output: the package's code. The rest of dist/ is what the SDK repo's root holds beside it. */
+/** tsc's output: the package's code. The rest of dist/ is the docs and manifest that sit beside it in the package. */
 const lib = join(dist, "lib");
 /** Entry of each `@kerby/*` specifier the sources use, relative to lib. */
 const ENTRIES: Record<string, string> = {
@@ -33,9 +35,10 @@ const ENTRIES: Record<string, string> = {
   "@kerby/agent": "agent/src/index.js",
   "@kerby/judgment": "judgment/src/index.js",
 };
-/** What the SDK repo's root holds besides dist/: the guide an agent reads first. */
+/** What the package holds besides lib/: the guide an agent reads first. */
 const DOCS = ["README.md", "INTEGRATION.md"];
-const DEFAULT_REPO = "git@github.com:samchristensen/kerby-sdk.git";
+const NAME = "@samchristensen/kerby-sdk";
+const REPO = "https://github.com/samchristensen/kerby";
 
 const run = (command: string, args: string[], cwd = root): string =>
   execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
@@ -106,75 +109,107 @@ function build(version: string): void {
   );
   const entry = "./lib/sdk/src/index";
   const manifest = {
-    name: "@kerby/sdk",
+    name: NAME,
     version,
     description: "Typed client and contracts for the Kerby API",
+    license: "MIT",
     type: "module",
     sideEffects: false,
     engines: { node: ">=22" },
     exports: { ".": { types: `${entry}.d.ts`, default: `${entry}.js` } },
     types: `${entry}.d.ts`,
-    files: ["lib", ...DOCS, "AGENTS.md", "CLAUDE.md"],
+    files: ["lib", ...DOCS, "AGENTS.md", "CLAUDE.md", "LICENSE"],
     dependencies: { zod: `^${zod}` },
+    repository: { type: "git", url: `git+${REPO}.git`, directory: "packages/sdk" },
+    homepage: `${REPO}/tree/main/packages/sdk#readme`,
+    bugs: { url: `${REPO}/issues` },
+    publishConfig: { access: "public" },
   };
   writeFileSync(join(dist, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   for (const doc of DOCS) cpSync(join(sdkDir, doc), join(dist, doc));
+  cpSync(join(root, "LICENSE"), join(dist, "LICENSE"));
   cpSync(join(sdkDir, "publish"), dist, { recursive: true });
-  console.log(`built @kerby/sdk ${version} in ${relative(root, dist)}`);
+  console.log(`built ${NAME} ${version} in ${relative(root, dist)}`);
+}
+
+/** The patch numbers the registry holds on the `<minor>` line; none when the package was never published. */
+function publishedPatches(minor: string): number[] {
+  const result = spawnSync("npm", ["view", NAME, "versions", "--json"], { encoding: "utf8" });
+  if (result.status !== 0) {
+    if (result.stderr.includes("E404")) return [];
+    throw new Error(`npm view ${NAME} failed:\n${result.stderr}`);
+  }
+  const parsed: unknown = JSON.parse(result.stdout);
+  const versions = typeof parsed === "string" ? [parsed] : parsed;
+  if (!Array.isArray(versions) || !versions.every((v): v is string => typeof v === "string"))
+    throw new Error(`npm view ${NAME} versions: expected a list of version strings`);
+  return versions
+    .filter((v) => v.startsWith(`${minor}.`))
+    .map((v) => Number(v.slice(minor.length + 1)))
+    .filter(Number.isInteger);
+}
+
+/** `npm pack <spec>` unpacked under `into`: the files a consumer would get, by path. */
+function unpacked(spec: string, into: string): Map<string, Buffer> {
+  mkdirSync(into, { recursive: true });
+  run("npm", ["pack", spec, "--pack-destination", into]);
+  // `npm pack --json` changes shape between npm versions, so take the one tarball it wrote from the directory.
+  const tarballs = readdirSync(into).filter((name) => name.endsWith(".tgz"));
+  if (tarballs.length !== 1)
+    throw new Error(`npm pack ${spec} wrote ${tarballs.length} tarballs; expected one`);
+  run("tar", ["-xzf", join(into, tarballs[0] ?? ""), "-C", into]);
+  const contents = new Map<string, Buffer>();
+  for (const file of files(join(into, "package"))) {
+    contents.set(relative(join(into, "package"), file), readFileSync(file));
+  }
+  return contents;
+}
+
+/** Whether the package just built (in dist/) is byte for byte what the registry holds as `version`. */
+function sameAsPublished(version: string): boolean {
+  const work = mkdtempSync(join(tmpdir(), "kerby-sdk-"));
+  try {
+    const mine = unpacked(dist, join(work, "mine"));
+    const theirs = unpacked(`${NAME}@${version}`, join(work, "theirs"));
+    return (
+      mine.size === theirs.size &&
+      [...mine].every(([path, bytes]) => theirs.get(path)?.equals(bytes) === true)
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 function publish(dryRun: boolean): void {
   if (run("git", ["status", "--porcelain"]).trim() !== "")
     throw new Error(
-      "the working tree has uncommitted changes. Fix: commit them first; the SDK is published from a commit, and its message names the commit.",
+      "the working tree has uncommitted changes. Fix: commit them first; the SDK is published from a commit.",
     );
-  const commit = run("git", ["rev-parse", "--short", "HEAD"]).trim();
-  const repo = process.env.KERBY_SDK_REPO ?? DEFAULT_REPO;
   const minor = line();
+  // The patch number is the next free one on this line (0.1.0, 0.1.1, ...): nobody bumps it by hand.
+  const patches = publishedPatches(minor);
+  const latest = patches.length > 0 ? Math.max(...patches) : undefined;
 
-  const work = mkdtempSync(join(tmpdir(), "kerby-sdk-"));
-  try {
-    const checkout = join(work, "repo");
-    run("git", ["clone", repo, checkout]);
-    // The patch number is the next free one on this line (0.1.0, 0.1.1, ...): nobody bumps it by hand.
-    const patches = run("git", ["tag", "--list", `v${minor}.*`], checkout)
-      .split("\n")
-      .map((tag) => Number(tag.slice(`v${minor}.`.length)))
-      .filter(Number.isInteger);
-    const latest = patches.length > 0 ? Math.max(...patches) : undefined;
-
-    const stage = (version: string) => {
-      build(version);
-      // Replace the tree: a file deleted from dist/ must disappear from the repository.
-      for (const name of readdirSync(checkout)) {
-        if (name !== ".git") rmSync(join(checkout, name), { recursive: true, force: true });
-      }
-      cpSync(dist, checkout, { recursive: true });
-      run("git", ["add", "-A"], checkout);
-    };
+  let version = `${minor}.0`;
+  if (latest !== undefined) {
     // Build as the latest version: no difference means nothing changed since it, and nothing is published.
-    stage(`${minor}.${latest ?? 0}`);
-    if (latest !== undefined && run("git", ["status", "--porcelain"], checkout).trim() === "") {
-      console.log(
-        `@kerby/sdk ${minor}.${latest} is already exactly this build; nothing to publish`,
-      );
+    build(`${minor}.${latest}`);
+    if (sameAsPublished(`${minor}.${latest}`)) {
+      console.log(`${NAME} ${minor}.${latest} is already exactly this build; nothing to publish`);
       return;
     }
-    const version = `${minor}.${latest === undefined ? 0 : latest + 1}`;
-    stage(version);
-    const tag = `v${version}`;
-    run("git", ["commit", "-m", `@kerby/sdk ${version} from kerby ${commit}`], checkout);
-    run("git", ["tag", tag], checkout);
-    if (dryRun) {
-      console.log(`dry run: committed ${tag} in ${checkout}; not pushed`);
-      return;
-    }
-    run("git", ["push", "origin", "HEAD:refs/heads/main", `refs/tags/${tag}`], checkout);
-    console.log(`published ${tag} to ${repo}`);
-    console.log(`install: pnpm add github:samchristensen/kerby-sdk#${tag}`);
-  } finally {
-    if (!dryRun) rmSync(work, { recursive: true, force: true });
+    version = `${minor}.${latest + 1}`;
   }
+  build(version);
+  // Provenance is recorded only where npm can prove the build (a GitHub-hosted runner with trusted publishing).
+  const args = [
+    "publish",
+    dist,
+    ...(dryRun ? ["--dry-run"] : []),
+    ...(process.env.GITHUB_ACTIONS ? ["--provenance"] : []),
+  ];
+  console.log(run("npm", args));
+  console.log(`${dryRun ? "dry run: would publish" : "published"} ${NAME}@${version}`);
 }
 
 const [command, flag] = process.argv.slice(2);

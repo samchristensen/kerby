@@ -63,6 +63,19 @@ describe("checkDocs", () => {
     expect(p?.message).toContain("Fix:");
   });
 
+  it("leaves history alone: a finished plan and a superseded ADR, but not an ADR that is only amended", () => {
+    const stale = "Run `make deploy`, see [the script](../../scripts/gone.ts).\n";
+    const { root, docs } = tree({
+      "docs/plans/done/0001-old.md": stale,
+      "docs/adr/0002-old.md": `# 0002\n\n- Status: superseded by 0003\n\n${stale}`,
+      "docs/adr/0003-live.md": `# 0003\n\n- Status: accepted, amended by 0004\n\n${stale}`,
+    });
+    expect(checkDocs(root, docs, RULES).map((p) => `${p.kind}:${p.file}`)).toEqual([
+      "link:docs/adr/0003-live.md",
+      "make:docs/adr/0003-live.md",
+    ]);
+  });
+
   it("ignores external links, pure anchors, inline code, and fenced code", () => {
     const doc = [
       "[site](https://example.com/x.md) [plain](http://x) [mail](mailto:a@b.c) [top](#guide)",

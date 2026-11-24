@@ -61,3 +61,11 @@ responses would tie up a worker or its memory.
   like any hop. The worker and the api (OAuth discovery and code exchange, ADR 0022) take them from `EGRESS_ALLOWED_HOSTS`
   and refuse to start with any unless `KERBY_ENVIRONMENT=development`, so production has none. On the api they are also
   the hosts from which OAuth accepts plain http.
+
+## Amendment: an install's own hosts (2026-11-23)
+
+[ADR 0024](0024-self-hosted-single-tenant.md): an install's tenant is its owner, whose tools and webhook receivers often
+live on the same private network (`*.railway.internal`, a Compose service name). `EGRESS_ALLOWED_HOSTS` (api and worker)
+and `ALLOW_LOCAL_DESTINATIONS` (api and dispatcher) are accepted in production too; `KERBY_ENVIRONMENT=development` no
+longer gates them. Unset, the guard is as above; set, only the named hosts skip the range check. A return to many
+tenants makes them operator-only again.

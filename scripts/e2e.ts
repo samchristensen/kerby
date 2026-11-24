@@ -1,16 +1,22 @@
-// End to end against the real Compose stack (plan 0002, T12): two workers, the scripted fake model, a conversation
-// streamed over SSE, then `docker kill` of the worker that holds the turn while it is waiting for the model after a
-// tool ran. The turn must finish on the other worker, the tool must have run exactly once, and the transcript must
+// End to end against the real Compose stack (plan 0002, T12): the kerby container without its worker plus two worker
+// containers (ADR 0024), the scripted fake model, a conversation streamed over SSE, then `docker kill` of the worker
+// container that holds the turn while it is waiting for the model after a tool ran. The turn must finish on the other worker, the tool must have run exactly once, and the transcript must
 // have every message exactly once, in order. Run with `make e2e`.
 import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { stackApiKey } from "./stack.ts";
 
 const BASE = `http://127.0.0.1:${process.env.KERBY_API_PORT ?? "8080"}`;
 const KEEP = process.env.KERBY_E2E_KEEP === "1";
 
 const run = (cmd: string, args: string[]): string =>
-  execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
-const compose = (...args: string[]) => run("docker", ["compose", ...args]);
+  execFileSync(cmd, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    // The kerby container runs everything but the worker, so killing a worker never takes the api down.
+    env: { ...process.env, KERBY_ROLES: "control,api,dispatcher" },
+  }).trim();
+const compose = (...args: string[]) => run("docker", ["compose", "--profile", "workers", ...args]);
 const psql = (database: string, sql: string) =>
   compose("exec", "-T", "postgres", "psql", "-U", "postgres", "-d", database, "-tAc", sql);
 
@@ -36,7 +42,7 @@ async function until<T>(
 async function main(): Promise<void> {
   console.log("bringing the stack up with two workers");
   compose("up", "-d", "--build", "--wait", "--scale", "worker=2");
-  const key = run("./scripts/provision-default.sh", []);
+  const key = stackApiKey();
   const call = async (method: string, path: string, body?: unknown) => {
     const response = await fetch(`${BASE}${path}`, {
       method,
@@ -91,22 +97,22 @@ async function main(): Promise<void> {
     "posted a message that asks for the echo tool, then a 12 s wait for the model",
   );
 
-  const database = psql(
-    "kerby_control",
-    "select db_name from tenants where name = 'default' and status = 'active'",
-  );
-  const toolRan = await until(
-    "the tool to run",
-    () => psql(database, "select executions from tool_executions") === "1",
-  );
+  const database = psql("kerby_control", "select db_name from tenants where status = 'active'");
+  // Every query names this conversation, so a stack kept from an earlier run (KERBY_E2E_KEEP=1) answers the same.
+  const executions = `select executions from tool_executions where conversation_id = '${conversationId}'`;
+  const turn = `absurd.t_turns where params->>'conversationId' = '${conversationId}'`;
+  const toolRan = await until("the tool to run", () => psql(database, executions) === "1");
   check(toolRan, "the tool ran once");
 
   // Who holds the turn? Absurd records the claiming worker as `<hostname>:<pid>`; a container's hostname is its id.
   const holder = await until(
     "a worker to hold the turn",
     () =>
-      psql(database, "select claimed_by from absurd.r_turns where state = 'running' limit 1") ||
-      undefined,
+      psql(
+        database,
+        `select r.claimed_by from absurd.r_turns r join absurd.t_turns t on t.task_id = r.task_id
+          where t.params->>'conversationId' = '${conversationId}' and r.state = 'running' limit 1`,
+      ) || undefined,
   );
   const workers = compose("ps", "-q", "worker").split("\n");
   const victim = workers.find((id) => holder.startsWith(id.slice(0, 12)));
@@ -136,15 +142,16 @@ async function main(): Promise<void> {
     done[3]?.message.content[0]?.text?.startsWith("Tool said: survive") === true,
     "the final answer reflects the tool result",
   );
+  check(psql(database, executions) === "1", "the tool still ran exactly once");
   check(
-    psql(database, "select executions from tool_executions") === "1",
-    "the tool still ran exactly once",
-  );
-  check(
-    Number(psql(database, "select attempts from absurd.t_turns")) >= 2,
+    Number(psql(database, `select attempts from ${turn}`)) >= 2,
     "the turn was retried after the kill",
   );
-  check(psql(database, "select count(*) from messages") === "4", "the index holds four messages");
+  check(
+    psql(database, `select count(*) from messages where conversation_id = '${conversationId}'`) ===
+      "4",
+    "the index holds four messages",
+  );
   await sleep(500);
   check(
     seen.some((e) => e.id === "4" && e.type === "message_end"),
@@ -167,7 +174,7 @@ try {
 } catch (error) {
   failed = true;
   console.error(error instanceof Error ? error.message : error);
-  console.error(compose("logs", "--tail", "40", "worker", "api", "control"));
+  console.error(compose("logs", "--tail", "40", "worker", "kerby"));
 } finally {
   if (!KEEP) compose("down", "--volumes", "--remove-orphans", "--rmi", "local");
 }

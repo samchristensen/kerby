@@ -18,7 +18,7 @@ const context = (tenantId: string) => `kerby-tenant-db:${tenantId}`;
  * Open a tenant's sealed password from `tenant_db_credentials`. A ciphertext from another tenant's row, or sealed with
  * a key `box` does not hold, fails with the fix.
  */
-export function openTenantDbPassword(box: SecretBox, tenantId: string, sealed: Uint8Array): string {
+function openTenantDbPassword(box: SecretBox, tenantId: string, sealed: Uint8Array): string {
   try {
     return box.open(sealed, context(tenantId));
   } catch (error) {

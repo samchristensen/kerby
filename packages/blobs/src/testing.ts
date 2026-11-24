@@ -27,10 +27,3 @@ export async function createTestBlobs(): Promise<Blobs> {
 export async function createTestBucket(): Promise<Bucket> {
   return createBucket(await sharedConfig());
 }
-
-/** A new, empty bucket on the test RustFS (an export or backup bucket). */
-export async function createEmptyTestBucket(): Promise<Bucket> {
-  const bucket = createBucket(testBucketConfig(`kt-${randomBytes(6).toString("hex")}`));
-  await bucket.ensureBucket();
-  return bucket;
-}

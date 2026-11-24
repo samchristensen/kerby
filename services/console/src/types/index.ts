@@ -25,18 +25,8 @@ import type {
 import type { ControlDb } from "@kerby/db";
 import type { Sealer } from "@kerby/secrets";
 
-/** Control's sign-up route (`POST /v1/console/signups`), the console's only call to another service. */
-export type SignupClient = (request: {
-  name: string;
-  email: string;
-  passwordHash: string;
-}) => Promise<
-  | { ok: true; tenantId: string; userId: string; secret: string }
-  | { ok: false; code: "name_taken" | "email_taken" | "not_invited" }
->;
-
 /**
- * The tenant API on the private network: the console's second call to another service. `token` is the signed-in
+ * The tenant API on the private network: the console's one call to another service. `token` is the signed-in
  * person's session token, sent as the bearer credential; the api verifies it and takes the tenant from it, so a chat
  * can only ever reach the tenant the person belongs to. Resolves with the api's response, whatever its status.
  */
@@ -57,7 +47,6 @@ export type ConsoleDeps = {
   control: ControlDb;
   /** Seals model keys to the platform public key; it cannot open them (ADR 0008). */
   sealer: Sealer;
-  signups: SignupClient;
   api: ApiClient;
   settings: {
     /** Providers whose models run chats: the harness adapter's list, injected by the composition root. */
@@ -69,8 +58,6 @@ export type ConsoleDeps = {
     sessionTtlMs: number;
     /** log2 of scrypt's N for new password hashes (`PASSWORD_COST`); tests use a cheap one. */
     passwordCost: number;
-    /** Sign-ups one client address may make per hour. */
-    signupsPerHour: number;
     /** Failed sign-ins one client address may make per minute. */
     failedLoginsPerMinute: number;
     /** Failed sign-ins against one email per hour, from every address together. */
@@ -86,8 +73,6 @@ export type Session = {
   email: string;
   tenantId: string;
   tenantName: string;
-  /** The platform owner's flag (set by the operator, never by the console): may edit who can sign up. */
-  isAdmin: boolean;
 };
 
 /** Form fields as the browser sent them (`Object.fromEntries(formData)`); the service parses them. */
@@ -134,9 +119,6 @@ export type EventTypeOptions = {
   all: EventTypeOption;
   families: { family: string; wildcard: EventTypeOption; types: EventTypeOption[] }[];
 };
-/** One address on the sign-up allowlist. */
-export type AllowedEmailView = { email: string; addedAt: string; signedUp: boolean };
-
 export type ProviderView = {
   /** As a model id spells it: `anthropic` in `anthropic/<model>`. */
   id: string;
@@ -226,21 +208,10 @@ export type SearchSettingsView = SearchSettings & {
  * method that touches tenant data takes the `Session` that `session` returned: the tenant id comes from nowhere else.
  */
 export type ConsoleService = {
-  /** Provision a tenant and its first person, then sign them in. `apiKey` is the tenant's first API key, shown once. */
-  signUp(form: FormInput, client: string): Promise<(SignedIn & { apiKey: string }) | FormFailure>;
   logIn(form: FormInput, client: string): Promise<SignedIn | FormFailure>;
   logOut(token: string): Promise<void>;
   /** The session for a cookie's token; undefined when it is unknown, expired, or its tenant is not active. */
   session(token: string): Promise<Session | undefined>;
-  /** The allowlist, oldest first. Admins only. */
-  signupAllowlist(session: Session): Promise<AllowedEmailView[]>;
-  /** Allow the emails in `form.emails` (separated by whitespace, commas or semicolons) to sign up. Admins only. */
-  allowSignups(
-    session: Session,
-    form: FormInput,
-  ): Promise<{ ok: true; added: number } | FormFailure>;
-  /** Stop allowing `email`; an account it already made stays. False when it was not on the list. Admins only. */
-  disallowSignup(session: Session, email: string): Promise<boolean>;
   overview(session: Session): Promise<Overview>;
 
   // Integrations (ADR 0020) and their keys, in the control database; audited as `user:<id>`. The pages cannot import

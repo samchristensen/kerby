@@ -1,17 +1,19 @@
 # Architecture
 
-Kerby is an agent runtime sold as a service. Customers (tenants) call it over HTTP; it runs their agents durably,
-calls the tools they register, and keeps every transcript. Postgres is the only service it needs (plus S3-compatible
-storage for bytes). Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
+Kerby is a self-hosted agent runtime: one install per project, run beside it in Docker Compose or inside its Railway
+project, serving one tenant, its owner ([ADR 0024](docs/adr/0024-self-hosted-single-tenant.md)). Applications call it
+over HTTP; it runs their agents durably, calls the tools they register, and keeps every transcript. Postgres is the only
+service it needs (plus S3-compatible storage for bytes). It keeps the tenancy boundary of the multi-tenant service it
+started as, so selling it as one later is a plan, not a rewrite. Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0007](docs/adr/0007-railway-hosting.md), [0013](docs/adr/0013-exports-and-bucket-backup.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md), [0021](docs/adr/0021-chat-search.md), [0022](docs/adr/0022-tools.md), [0023](docs/adr/0023-sdk.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md), [0021](docs/adr/0021-chat-search.md), [0022](docs/adr/0022-tools.md), [0023](docs/adr/0023-sdk.md), [0024](docs/adr/0024-self-hosted-single-tenant.md), [0025](docs/adr/0025-public-repository-sdk-on-npm.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
 packages/   libraries, imported as @kerby/<dir>
-services/   deployables: api (tenants' code calls it), worker (runs turns), dispatcher (pushes events to subscriptions),
-           control (operators run it), console (tenants' people sign up, manage integrations and tools, and chat in
-           it); they own no tables
+services/   deployables: api (applications call it), worker (runs turns), dispatcher (pushes events to subscriptions),
+           control (prepares the databases and the install's tenant), kerby (the launcher: runs those four in one
+           container), console (the owner manages integrations and tools, and chats in it); they own no tables
 docs/       what an agent must know that the code does not say
 ```
 
@@ -30,10 +32,13 @@ with the reason.
 - A relative import never leaves its workspace.
 - No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`). The one
   exception is the console's pages, which `next build` compiles when its image is built (ADR 0014).
-- `packages/sdk` is the one package that leaves the repository: customers install it. `make sdk-build` compiles it
-  with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish` on every merge to `main`, which pushes the result to a private
-  repository as a tag ([ADR 0023](docs/adr/0023-sdk.md)). Its `INTEGRATION.md` is the guide an agent follows to integrate
-  an application; a change to a tenant-facing contract or route is a change to the SDK and that guide, and `make sdk-e2e` shows it.
+- `packages/sdk` (workspace `@kerby/sdk`) is the one package that leaves the repository: applications install it from
+  npm as `@samchristensen/kerby-sdk` (the `@kerby` scope on npm is another account's).
+  `make sdk-build` compiles it with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish`
+  on every merge to `main`, which publishes the next patch version to npm when the build differs from the latest
+  ([ADR 0023](docs/adr/0023-sdk.md), [0025](docs/adr/0025-public-repository-sdk-on-npm.md)). Its `INTEGRATION.md` is the
+  guide an agent follows to integrate an application; a change to a tenant-facing contract or route is a change to the SDK
+  and that guide, and `make sdk-e2e` shows it.
 
 ## Layers
 
@@ -88,11 +93,13 @@ and configs) and dispatcher wire them.
 
 ## Tenancy
 
-A tenant is an untrusted customer. Isolation is structural: a database per tenant, a key prefix per tenant.
+An install has exactly one tenant ([ADR 0024](docs/adr/0024-self-hosted-single-tenant.md)), but the code keeps the
+boundary a multi-tenant service needs, so a SaaS return is a plan and not a rewrite: isolation is structural, a database
+per tenant and a key prefix per tenant, and a tenant is treated as untrusted.
 
 | Plane   | Database                                             | Holds                                                                                                                                                                                                                                                                                                                                                                                           | Migrations                                                                              |
 | ------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Control | one, operator-owned                                  | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets` (model keys, tool credentials), sealed `tenant_db_credentials`, `usage`, audit, `tenant_wakeups` (when each tenant's queue is due), the console's `console_users` and `console_sessions`                                              | `packages/control-plane/migrations/control/`                                            |
+| Control | one per install                                      | `tenants` (status, plan, limits, region, locators), `integrations`, `api_keys`, event `subscriptions` (signing secret sealed), encrypted `tenant_secrets` (model keys, tool credentials), sealed `tenant_db_credentials`, `usage`, audit, `tenant_wakeups` (when each tenant's queue is due), the console's `console_users` and `console_sessions`                                              | `packages/control-plane/migrations/control/`                                            |
 | Tenant  | one per tenant, on a cluster the control plane names | conversations, messages, trace segments, blob index, prompts (`prompts`, `prompt_versions`, `prompt_labels`), the event log (`events`, `subscription_cursors`, `delivery_attempts`), the chat search index (`search_chunks`, `search_progress`, `search_settings`; pgvector), tools (`tool_servers`, `tools`, `integration_tools`, `conversation_tools`, `tool_oauth_flows`), the Absurd schema | `packages/{durable,blobs,conversations,prompts,events,search,tools}/migrations/tenant/` |
 
 - Every `.sql` migration lives in a `migrations/control/` or `migrations/tenant/` directory of the package that owns the tables (ADR 0006). A control table has `tenant_id` or `-- global: <reason>`
@@ -110,8 +117,7 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   keyed by the integration's id). Tool-server and grant routes need `admin`; `GET /v1/tools` needs `conversations`.
 - `AgentRuntime` never sees a tenant, user, or conversation id; Kerby's closures carry them.
 - Object keys start with `t/<tenantId>/`; `packages/blobs` takes a tenant context on every call from api and worker
-  (`Blobs`). Only `control` uses its raw-key `Bucket`: tenant prefixes (export, deletion), the export bucket and the
-  nightly backup copy ([ADR 0013](docs/adr/0013-exports-and-bucket-backup.md)).
+  (`Blobs`). Only `control` uses its raw-key `Bucket`: it creates the bucket and deletes a tenant's prefix.
 - Tenants bring their own model keys ([ADR 0008](docs/adr/0008-byok-sealed-secrets.md)), for chat and judgment providers alike; Kerby holds no provider key. A key is
   sealed by `packages/secrets` to a public key the api and the console hold, stored in the control plane's `tenant_secrets`, and
   opened only by a worker (the private key) inside the run that uses it. A tool server's credential takes the same path
@@ -119,32 +125,31 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   tenant id, never message content or secrets; the worker scrubs the key from provider errors. _review_
 - No tenant code runs in Kerby's processes. Tools are remote MCP servers. Every call to a URL a tenant supplied goes
   through `createEgressFetch` from `packages/egress` ([ADR 0010](docs/adr/0010-egress-guard.md)): public addresses
-  only, connected to the address it checked, redirects re-checked, time and size limits. A development stack may name
-  hosts the guard lets through anyway (`EGRESS_ALLOWED_HOSTS`, refused unless `KERBY_ENVIRONMENT=development`). _review_
-- Lifecycle is an operator command in `services/control`: provision, suspend, export, delete, rotate the database password.
-  Provisioning copies the template database (migrated at startup) and creates a role that owns that database and may
-  connect to no other tenant database, with a random password of its own ([ADR 0009](docs/adr/0009-tenant-database-credentials.md)):
-  stored in `tenant_db_credentials` sealed by `packages/secrets` under `TENANT_DB_KEYS` (tenant id as authenticated data),
-  which control, api and worker hold. `TenantPools` resolves a tenant's URL from it and its pools look the password up
-  again at every login, so a rotation needs no restart. At startup control gives a password to every tenant lacking one, re-seals those under an older key,
-  and closes the maintenance databases (`postgres`, `template1`) and the template to everyone but its admin role, as it
-  does the control database: a tenant role can open its own database and nothing else.
-  Deleting drops the database and role, deletes the object prefix and purges integrations, keys and the console's people and sessions;
-  the row stays with status `deleted`. Exporting uploads a `pg_dump` and the object listing to the export bucket and
-  returns presigned URLs; exports are kept 30 days. Nightly, control copies new objects to the backup bucket and drops
-  deleted tenants' copies (ADR 0013).
-- Self-serve sign-up ([ADR 0014](docs/adr/0014-tenant-console.md)): the console hashes the password and calls control's
-  `POST /v1/console/signups` with `CONSOLE_TOKEN` (which opens that route only); control refuses an email that is not on
-  `signup_allowlist` (403 `not_invited`), otherwise provisions as above and stores
-  the person (`console_users`, one account per email). A console session is a random token in an HttpOnly, Secure cookie,
-  kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects as
-  `kerby_console`: integrations and their API keys (never the hashes), model keys, people and sessions, appending to the audit log as
-  `user:<id>`. Before sign-in it bounds work per client address (sign-ups an hour, failed sign-ins a minute) and per
-  account (failed sign-ins an hour), per process like the api's limits; sign-ins to one account take turns and an
-  address checks four at once, each looking at the limits when its turn comes, so a concurrent burst cannot outrun them.
-  A tenant holds at most 50 live API keys (`MAX_API_KEYS_PER_TENANT`; 409 `api_key_limit` from control, a message in
-  the console); rotating a key at the cap works.
-- Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/operator.ts), set at provisioning);
+  only, connected to the address it checked, redirects re-checked, time and size limits. An install may name its own
+  private hosts the guard lets through anyway (`EGRESS_ALLOWED_HOSTS`), and let webhooks reach private addresses
+  (`ALLOW_LOCAL_DESTINATIONS`): the tenant is the owner (ADR 0024). _review_
+- The install's tenant is control's to keep (ADR 0024). At every start control migrates the control database, the
+  template and every tenant database, then makes the tenant if there is none (`KERBY_TENANT_NAME`), refuses to start if
+  there are two, and removes one a start left half made. Provisioning copies the template database and creates a role
+  that owns that database and may connect to no other tenant database, with a random password of its own
+  ([ADR 0009](docs/adr/0009-tenant-database-credentials.md)): stored in `tenant_db_credentials` sealed by
+  `packages/secrets` under `TENANT_DB_KEYS` (tenant id as authenticated data), which control, api, worker and dispatcher
+  hold. `TenantPools` resolves a tenant's URL from it and its pools look the password up again at every login. At
+  startup control also gives a password to every tenant lacking one, re-seals those under an older key, and closes the
+  maintenance databases (`postgres`, `template1`) and the template to everyone but its admin role, as it does the control
+  database: a tenant role can open its own database and nothing else.
+- Config is the source of the tenant's first credentials. `KERBY_API_KEY` is kept live on the `default` integration with
+  every scope (label `KERBY_API_KEY`; the one configured before it is revoked). `KERBY_ADMIN_EMAIL` and
+  `KERBY_ADMIN_PASSWORD` are the console's one account (`console_users`), hashed by `hashPassword` in
+  `packages/control-plane`; a changed password replaces the hash, a changed email replaces the account and its sessions.
+  There is no sign-up. A console session is a random token in an HttpOnly cookie (Secure unless `SECURE_COOKIES=false`),
+  kept as its SHA-256 (`console_sessions`, 7 days); it stops at once when the tenant is not active. The console connects
+  as `kerby_console`: integrations and their API keys (never the hashes), model keys, people and sessions, appending to
+  the audit log as `user:<id>`. Before sign-in it bounds failed sign-ins per client address (a minute) and per account
+  (an hour), per process; sign-ins to one account take turns and an address checks four at once, each looking at the
+  limits when its turn comes, so a concurrent burst cannot outrun them. A tenant holds at most 50 live API keys
+  (`MAX_API_KEYS_PER_TENANT`, a message in the console); rotating a key at the cap works.
+- Limits live in the tenant row (`limits`, [`LimitsSchema`](packages/contracts/src/install.ts), empty unless set by SQL);
   an absent key takes the service's default. `requestsPerMinute` (api `DEFAULT_REQUESTS_PER_MINUTE`, 600) is a token
   bucket per tenant **per api process**, so it is approximate: N processes allow up to N times it; past it a request is
   429 `rate_limited` with `Retry-After`. `storageBytes` (api `DEFAULT_STORAGE_BYTES`, 1 GiB) is checked against
@@ -157,8 +162,8 @@ A tenant is an untrusted customer. Isolation is structural: a database per tenan
   up, so a concurrent burst of bad keys gets at most three lookups past the limit while many good keys at once only
   wait; a credential the cache answers, or one already being looked up for another request, needs no lookup. The cache keeps at most 10,000
   credentials (`MAX_CACHED_CREDENTIALS`), least recently used first, each for `AUTH_CACHE_SECONDS`. The
-  address is the socket peer, or with `TRUST_PROXY=true` (Railway, whose edge sets `X-Forwarded-For` with the client
-  first) the left-most `X-Forwarded-For` entry. The numbers are defaults until pricing (plan 0001, M9).
+  address is the socket peer, or with `TRUST_PROXY=true` (behind Railway's edge, which sets `X-Forwarded-For` with the
+  client first) the left-most `X-Forwarded-For` entry.
 
 ## Durability: the turn lifecycle
 
@@ -322,60 +327,64 @@ cleanup may delete those. Checkpoint values stay small JSON (references, not bod
 
 ## Local stack
 
-`make up` runs [compose.yaml](compose.yaml): Postgres (pgvector's Postgres 18 image; Railway's ships pgvector too), RustFS, `control`, `api`, `worker`, `dispatcher`, `console`, built from each service's
-`Dockerfile` (`dev` and `prod` targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each: enforced, rule `docker`),
-then provisions a `default` tenant through the operator API and prints its key. The same images run hosted.
+`make up` runs [compose.yaml](compose.yaml): Postgres (pgvector's Postgres 18 image; Railway's ships pgvector too),
+RustFS, `kerby` and `console`, built from `services/kerby/Dockerfile` and `services/console/Dockerfile` (`dev` and `prod`
+targets, `node:<.node-version>-slim`, run as `node`, a `HEALTHCHECK` each). Every service ships in an image: its own,
+or the launcher's, which installs it (`--filter @kerby/<dir>...`) and starts it (enforced, rule `docker`). `make up`
+prints the configured API key and the console's admin. The same images run hosted ([docs/deploy.md](docs/deploy.md)).
 
+- The launcher (`services/kerby`, ADR 0024) reads `KERBY_SECRET_KEY` and `DATABASE_URL`, derives every key with
+  `deriveInstanceKeys` (`packages/secrets`), and starts each process of `KERBY_ROLES` as a child with its own variables
+  (`processSpecs`): control first, the rest once control answers its health. It tags each child's JSON lines with
+  `service`, and when any child exits it stops the others and exits nonzero, so Docker or Railway restarts the whole
+  container. Control's port (8081) and the health ports of worker (8082) and dispatcher (8083) stay inside the container;
+  the image's `HEALTHCHECK` (`node services/kerby/src/index.ts health`) asks each of them.
 - Two published ports: the API on `127.0.0.1:${KERBY_API_PORT:-8080}` and the console on
-  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign up there for a workspace of your own). Control, worker and dispatcher are
-  reached only inside the network (`make up` provisions through `docker compose exec`).
+  `127.0.0.1:${KERBY_CONSOLE_PORT:-3000}` (sign in as `KERBY_ADMIN_EMAIL`).
 - The project name is `kerby-stack` (override with `KERBY_PROJECT` for a second checkout), so volumes and containers of
   two worktrees never meet. `make down` keeps data; `make down-v` removes containers, volumes and built images.
   `make worktree NAME=<name>` makes a checkout under `worktrees/<name>` with its own project and port pair in `.env`,
   which the Makefile exports to its targets (the scripts read `KERBY_API_PORT` and `KERBY_PROJECT`).
 - The worker runs the scripted fake model (`KERBY_ENVIRONMENT=development`, `KERBY_FAKE_MODEL=1`) and serves
-  `kerby/echo` to conversations that name it (`ENABLE_ECHO_TOOL` on api and worker); the
-  worker refuses `KERBY_FAKE_MODEL` outside development. For a real model, bring a key like a tenant does: start with
+  `kerby/echo` to conversations that name it (`ENABLE_ECHO_TOOL`); the worker refuses `KERBY_FAKE_MODEL` outside
+  development. For a real model, bring a key: start with
   `KERBY_FAKE_MODEL=0 KERBY_KEYLESS_PROVIDERS= KERBY_DEFAULT_MODEL=<provider>/<model> make up`, then
-  `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the tenant's API key. Compose carries a development secrets
-  key pair; `make secrets-key` makes a real one. It carries a development delivery key pair too (the api seals
-  subscription secrets, the dispatcher opens them), and api and dispatcher run with `ALLOW_LOCAL_DESTINATIONS=true`
-  (development only), so a webhook may point at `http://host.docker.internal:<port>/`. The worker's and the api's egress
-  guards let `host.docker.internal` through (`EGRESS_ALLOWED_HOSTS`, development only), so an MCP server on this machine
-  can be registered as a tool server (with OAuth too: `startOAuthFixture` from `@kerby/mcp/testing`, `urlHost:
-  "host.docker.internal"`, `browserHost: "127.0.0.1"`; sign in to the console at `127.0.0.1`, not `localhost`, so the
-  callback carries the session cookie).
-- Scale workers with `docker compose up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
+  `PUT /v1/model-keys/<provider>` with `{"apiKey": "..."}` using the API key, or add it in the console. Compose carries a
+  development `KERBY_SECRET_KEY`; `make secrets-key` makes a real one. The stack runs with `ALLOW_LOCAL_DESTINATIONS=true`,
+  so a webhook may point at `http://host.docker.internal:<port>/`, and lets `host.docker.internal` past the egress guard
+  (`EGRESS_ALLOWED_HOSTS`), so an MCP server on this machine can be registered as a tool server (with OAuth too:
+  `startOAuthFixture` from `@kerby/mcp/testing`, `urlHost: "host.docker.internal"`, `browserHost: "127.0.0.1"`; sign in
+  to the console at `127.0.0.1`, not `localhost`, so the callback carries the session cookie).
+- More workers: the `worker` service (profile `workers`) is the same image with `KERBY_ROLES=worker`:
+  `docker compose --profile workers up -d --scale worker=2`; any worker takes any turn. The local worker's lease is 10 s
   (`CLAIM_TIMEOUT_SECONDS`), so a killed worker's turn moves in seconds.
-- `make multitenant` (scripts/multitenant.ts) is the proof of isolation on the real stack: two tenants, cross-tenant attempts
-  on conversations, streams, database roles, tasks, object prefixes and keys, suspension within the auth cache TTL
-  (`AUTH_CACHE_SECONDS`, 3 s locally, 30 s by default), then a load run (`KERBY_LOAD_TENANTS`, default 200) with a
-  stream-saturation phase: a second api process, both filled to their stream cap, peak connections per process and role.
-- `make e2e` (scripts/e2e.ts) is the proof on the real stack: two workers, an SSE stream, `docker kill` of the worker
-  holding a turn mid-flight, then checks that the turn finished elsewhere, the tool ran once and every message exists once.
+- `make e2e` (scripts/e2e.ts) is the proof on the real stack: `kerby` without its worker (`KERBY_ROLES`) and two worker
+  containers, an SSE stream, `docker kill` of the worker container holding a turn mid-flight, then checks that the turn
+  finished elsewhere, the tool ran once and every message exists once.
 - `make tools-e2e` (scripts/tools-e2e.ts) is the proof of tools (ADR 0022) on the real stack: the MCP test fixture on this
   machine registered and listed through the egress guard, a tool granted to an integration without `admin` and called by its
   conversation, an ungranted tool refused, a changed definition kept from the model until an admin accepts it.
 - `make sdk-e2e` (scripts/sdk-e2e.ts) is the proof of `@kerby/sdk` (ADR 0023) on the real stack: every resource called over
   HTTP, a streamed turn, a tool server and a signed webhook verified by the SDK's own `verifyWebhook`.
-- `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e`, `make tools-e2e` and
-  `make multitenant` are the real-stack runs. There is no tracing: logs are the record until a profile needs more.
+- `make test` runs on disposable containers (scripts/test-containers.ts), not this stack; `make e2e`, `make tools-e2e`
+  and `make sdk-e2e` are the real-stack runs. Isolation between tenants is proven there too (two tenants provisioned
+  in `services/control` and api tests), since the boundary stays. There is no tracing: logs are the record until a
+  profile needs more.
 - Every process writes JSON lines (`@kerby/observability`: `at`, `level`, `msg`, `tenantId`, scalar fields, never
-  content). `make logs-query` filters them: `TENANT=<id>`, `LEVEL=warn` (that level and worse), `MSG=<substring>`,
-  `SERVICE=api`, `SINCE=30m`/`UNTIL=` (a duration back from now or ISO 8601); it reads this stack's `docker compose logs`
-  (honoring `KERBY_PROJECT`), or Railway's with `ENV=<environment>`. A failure an operator must hear about is an
+  content; the launcher adds `service`). `make logs-query` filters them: `TENANT=<id>`, `LEVEL=warn` (that level and
+  worse), `MSG=<substring>`, `SERVICE=api`, `SINCE=30m`/`UNTIL=` (a duration back from now or ISO 8601); it reads this
+  stack's `docker compose logs` (honoring `KERBY_PROJECT`). A failure the owner must hear about is an
   `alert(kind, fields)`: an error line with `alert: <kind>`, also posted to `ALERT_WEBHOOK_URL` when set
   (`KERBY_ALERT_WEBHOOK_URL` here) and debounced per kind; see docs/deploy.md#alerts.
 
 ## Hosting
 
-Railway, described by Infrastructure as Code in `.railway/railway.ts` (`make railway-plan`, `make railway-setup`) and rolled out by `scripts/railway.ts` (`make deploy`): one project, a `production` environment (any other name is an
-ephemeral copy), and per environment a `Postgres` service, a bucket (plus `control`'s export and backup buckets), and `control`, `api`, `worker`, `dispatcher` and `console` running the images CI builds from
-the Dockerfiles Compose runs and pushes to GHCR; a merge to `main` releases: [ADR 0007](docs/adr/0007-railway-hosting.md),
-[ADR 0011](docs/adr/0011-images-from-ghcr.md), runbook in [docs/deploy.md](docs/deploy.md). Only `api` and `console` are public; services reach
-Postgres and each other over Railway's private network (the console reaches control's sign-up route and the api there), and the bucket through
-its S3 endpoint and keys. The secrets private key is a variable on `worker` only; the api and the console get the public half.
-The delivery secrets private key is a variable on `dispatcher` only; the api gets its public half.
+An install is hosted where its project is ([docs/deploy.md](docs/deploy.md), ADR 0024): beside it in Compose, or in its
+Railway project as a Postgres of Kerby's own, one bucket, `kerby` and optionally `console`. CI (`.github/workflows/ci.yml`)
+builds both images on every pull request and pushes them to GHCR as `ghcr.io/<owner>/kerby` and `kerby-console`
+(`main`, `sha-<commit>`) on every merge to `main`; nothing deploys itself. Services reach Postgres and each other over
+the project's private network. All the keys an install uses derive from `KERBY_SECRET_KEY`, which `kerby` and the
+console hold; the processes inside `kerby` still each get only the half of a key pair they use.
 
 ## Dependencies
 

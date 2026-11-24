@@ -33,3 +33,11 @@ environment variable.
 - Pricing model and billing provider (plan 0001, M9).
 - Hosted deployment target and where its config lives (outside this repo).
 - End-user identity for a customer with none of its own: out of scope until one asks.
+
+## Amendment: self-hosted first (2026-11-23)
+
+[ADR 0024](0024-self-hosted-single-tenant.md): before Kerby is sold, it runs as one install per project of the owner's,
+serving one tenant, the owner. Everything above that is about the boundary stays (tenants untrusted, isolation
+structural, tools remote, the egress guard); what is about running a service for many customers (provisioning by an
+operator, sign-up, exports, a hosted deployment of Kerby's own) is parked at the git tag `saas-poc` until a plan brings
+it back.

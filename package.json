@@ -6,13 +6,11 @@
   "devDependencies": {
     "@biomejs/biome": "catalog:",
     "@kerby/control-plane": "workspace:*",
-    "@kerby/db": "workspace:*",
     "@kerby/mcp": "workspace:*",
     "@kerby/sdk": "workspace:*",
     "@kerby/secrets": "workspace:*",
     "@types/node": "catalog:",
     "knip": "catalog:",
-    "railway": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "yaml": "catalog:"

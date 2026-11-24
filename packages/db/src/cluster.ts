@@ -1,8 +1,6 @@
 // Provisioning primitives on a Postgres cluster (ADR 0004): a database per tenant, copied from a template and
 // owned by a role that can reach only that database. Identifiers are validated and quoted here, once.
-import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { childProcessEnv } from "@kerby/config";
 import { createControlDb } from "./handles.ts";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -18,8 +16,8 @@ function identifier(name: string, what: string): string {
 
 /**
  * Connections one tenant's role may hold across every process. Measured (docs/deploy.md#postgres): 3 per api process
- * (its pool of 2 and the shared listener, however many streams), 2 per worker process, 3 from control (pool and
- * `pg_dump`). 20 covers 3 api plus 4 workers, or 4 api plus 2; raise it before running more. The cluster's
+ * (its pool of 2 and the shared listener, however many streams), 2 per worker process, 2 from control (its pool). 20
+ * covers 3 api plus 4 workers, or 4 api plus 2; raise it before running more. The cluster's
  * `max_connections` is shared by all tenants: this keeps one tenant from using it up.
  */
 export const TENANT_ROLE_CONNECTION_LIMIT = 20;
@@ -204,30 +202,4 @@ export function createClusterAdmin(url: string): ClusterAdmin {
     },
     close: () => db.close(),
   };
-}
-
-/** `pg_dump --format=custom` of the database at `url` into `file`. Rejects with pg_dump's stderr on failure. */
-export function dumpDatabase(url: string, file: string, pgDump = "pg_dump"): Promise<void> {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  // The password travels in PGPASSWORD, not argv, where any local user could read it from the process list.
-  const target = new URL(url);
-  const password = decodeURIComponent(target.password);
-  target.password = "";
-  const child = spawn(
-    pgDump,
-    ["--format=custom", "--no-owner", "--file", file, "--dbname", target.toString()],
-    {
-      stdio: ["ignore", "ignore", "pipe"],
-      env: childProcessEnv({ PGPASSWORD: password }),
-    },
-  );
-  let stderr = "";
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderr += chunk.toString();
-  });
-  child.on("error", reject);
-  child.on("close", (code) =>
-    code === 0 ? resolve() : reject(new Error(`pg_dump exited with ${code}: ${stderr.trim()}`)),
-  );
-  return promise;
 }

@@ -1,5 +1,7 @@
-# The whole stack on one machine: the same images as a hosted deployment, started with `make up`.
-# Local values only: the tokens and secrets below are for development and must never be used elsewhere.
+# A whole install on one machine (ADR 0024): Postgres, RustFS, the `kerby` container (control, api, worker and
+# dispatcher) and the console, started with `make up`. Local values only: the secrets below are for development and
+# must never be used elsewhere; `make secrets-key` makes real ones. docs/deploy.md has the same stack for another
+# project, from the published images.
 name: ${KERBY_PROJECT:-kerby-stack}
 
 # Kerby's own processes need no Linux capability and never gain privilege.
@@ -7,24 +9,55 @@ x-hardened: &hardened
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
 
-x-tenant-env: &tenant-env
-  CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
-  # Seals each tenant database role's random password in the control database (ADR 0009). A development key.
-  TENANT_DB_KEYS: ${KERBY_TENANT_DB_KEYS:-Ga5JSSydS48D60HoBOzAmEPJeUKLm3s44q+oguVov0M=}
+# What both Kerby containers need: the one secret every key derives from, and Kerby's own Postgres as its superuser.
+x-install: &install
+  KERBY_SECRET_KEY: ${KERBY_SECRET_KEY:-s2Sou9gACEONnF3MysTkMMsCswtx8uft+/jI9VhsgCE=}
+  DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
+
+# Everything the kerby containers read besides the install: their settings for this development stack.
+x-kerby-env: &kerby-env
+  <<: *install
+  # Control keeps the install's one tenant, this key (every scope) and this console account at every start.
+  KERBY_API_KEY: ${KERBY_API_KEY:-kb_bf2ae0b02ed6_clrzu-oCqKlUr7NoXI9DWzK5gLqRDyU7uqfv4TENU3w}
+  KERBY_ADMIN_EMAIL: ${KERBY_ADMIN_EMAIL:-admin@example.com}
+  KERBY_ADMIN_PASSWORD: ${KERBY_ADMIN_PASSWORD:-local-dev-password}
   S3_ENDPOINT: http://rustfs:9000
   S3_BUCKET: kerby
   S3_ACCESS_KEY_ID: devkey
   S3_SECRET_ACCESS_KEY: devsecret123
-  # Where alerts are posted (docs/deploy.md#alerts); empty, alerts are log lines only. A listener on this machine is
-  # http://host.docker.internal:<port>/.
+  # Where alerts are posted (docs/deploy.md#alerts); empty, alerts are log lines only. A listener on this machine
+  # is http://host.docker.internal:<port>/.
   ALERT_WEBHOOK_URL: ${KERBY_ALERT_WEBHOOK_URL:-}
+  # Development only: the scripted model answers (a real one: see ARCHITECTURE.md#local-stack). Production refuses it.
+  KERBY_ENVIRONMENT: development
+  KERBY_FAKE_MODEL: ${KERBY_FAKE_MODEL:-1}
+  DEFAULT_MODEL: ${KERBY_DEFAULT_MODEL:-fake/fake-1}
+  KEYLESS_PROVIDERS: ${KERBY_KEYLESS_PROVIDERS:-fake}
+  # Conversations may name the built-in `kerby/echo` tool.
+  ENABLE_ECHO_TOOL: "1"
+  # Judgments (ADR 0015) call TypeSafe and OpenCode with the tenant's own key; point these at stand-ins to exercise them offline.
+  TYPESAFE_BASE_URL: ${KERBY_TYPESAFE_BASE_URL:-https://api.typesafe.ai}
+  OPENCODE_SYSTEMONE_BASE_URL: ${KERBY_OPENCODE_SYSTEMONE_BASE_URL:-https://opencode.ai/inference/systemone}
+  # Short, so revocation shows within seconds and a killed worker's turn moves in seconds (defaults 30 s and 2 min).
+  AUTH_CACHE_SECONDS: "3"
+  SWEEP_INTERVAL_SECONDS: "3"
+  CLAIM_TIMEOUT_SECONDS: "10"
+  # Clients reach the api directly here, so X-Forwarded-For is not trusted (TRUST_PROXY is on behind Railway's edge).
+  TRUST_PROXY: "false"
+  # Kerby's OAuth redirect URI and Client ID Metadata Document live on the console (ADR 0022), at its PUBLIC_URL.
+  # Plain http here, so authorization servers get a dynamically registered client.
+  CONSOLE_PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
+  # The install's own services, which the egress guard would otherwise refuse (ADR 0010, amended by 0024): an MCP
+  # server or webhook receiver on this machine, and 127.0.0.1, where the browser opens a test server's authorize
+  # endpoint (`startOAuthFixture({ urlHost: "host.docker.internal", browserHost: "127.0.0.1" })`). Webhooks may be
+  # plain http and private.
+  EGRESS_ALLOWED_HOSTS: host.docker.internal,127.0.0.1
+  ALLOW_LOCAL_DESTINATIONS: "true"
 
 services:
   postgres:
-    # Postgres 18 with pgvector (ADR 0021), as hosted: Railway's `postgres-ssl:18` ships the extension too.
+    # Postgres 18 with pgvector (ADR 0021), as on Railway, whose `postgres-ssl:18` ships the extension too.
     image: pgvector/pgvector:0.8.7-pg18-trixie
-    # The same limit as hosted Postgres (docs/deploy.md#postgres), so `make multitenant` measures against it.
-    command: ["-c", "max_connections=550"]
     environment:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: kerby_control
@@ -51,127 +84,40 @@ services:
       timeout: 3s
       retries: 20
 
-  control:
+  # Control, api, worker and dispatcher in one container, started by the launcher (services/kerby). `make e2e` runs it
+  # without the worker (KERBY_ROLES) and adds two `worker` containers, so it can kill one mid-turn.
+  kerby:
     <<: *hardened
-    build:
+    build: &kerby-build
       context: .
-      dockerfile: services/control/Dockerfile
+      dockerfile: services/kerby/Dockerfile
       target: ${KERBY_IMAGE_TARGET:-prod}
     environment:
-      <<: *tenant-env
-      OPERATOR_TOKEN: ${KERBY_OPERATOR_TOKEN:-local-dev-operator-token-0123456789}
-      # Opens self-serve sign-up (POST /v1/console/signups) and nothing else; the console holds the same value.
-      CONSOLE_TOKEN: ${KERBY_CONSOLE_TOKEN:-local-dev-console-token-0123456789}
-      CLUSTER_ADMIN_URL: postgres://postgres:dev@postgres:5432/postgres
-      CLUSTER_HOST: postgres
-      CLUSTER_PORT: "5432"
-      PORT: "8081"
-      # Exports and the backup copy are buckets of their own, created by control at start. In production each has its
-      # own keys, which only control holds; locally they share RustFS's.
-      EXPORT_S3_ENDPOINT: http://rustfs:9000
-      EXPORT_S3_BUCKET: kerby-exports
-      EXPORT_S3_ACCESS_KEY_ID: devkey
-      EXPORT_S3_SECRET_ACCESS_KEY: devsecret123
-      BACKUP_S3_ENDPOINT: http://rustfs:9000
-      BACKUP_S3_BUCKET: kerby-backup
-      BACKUP_S3_ACCESS_KEY_ID: devkey
-      BACKUP_S3_SECRET_ACCESS_KEY: devsecret123
+      <<: *kerby-env
+      KERBY_ROLES: ${KERBY_ROLES:-control,api,worker,dispatcher}
+    extra_hosts: &host-gateway # Docker Desktop resolves it by itself; Linux needs the gateway named.
+      - "host.docker.internal:host-gateway"
+    ports:
+      # The api, on loopback. Control, worker and dispatcher answer only inside the container.
+      - "127.0.0.1:${KERBY_API_PORT:-8080}:8080"
     depends_on:
       postgres: { condition: service_healthy }
       rustfs: { condition: service_healthy }
 
-  api:
-    <<: *hardened
-    build:
-      context: .
-      dockerfile: services/api/Dockerfile
-      target: ${KERBY_IMAGE_TARGET:-prod}
-    environment:
-      <<: *tenant-env
-      # The default model for a conversation that names none. Tenants bring their own key per provider
-      # (PUT /v1/model-keys/<provider>); `fake` needs none and only exists with KERBY_FAKE_MODEL=1 on the worker.
-      DEFAULT_MODEL: ${KERBY_DEFAULT_MODEL:-fake/fake-1}
-      KEYLESS_PROVIDERS: ${KERBY_KEYLESS_PROVIDERS:-fake}
-      # `kerby/echo` may be named by conversations (development); the worker below offers it likewise.
-      ENABLE_ECHO_TOOL: "1"
-      # A development key pair (the private half is on the worker below): never use it anywhere real.
-      SECRETS_PUBLIC_KEY: "y4c7+AJM8aN76nrweWjLR0gShtooDI7uI0ay8mTDHR0="
-      # Short, so suspension and key revocation show within seconds locally (the default is 30).
-      AUTH_CACHE_SECONDS: "3"
-      # Clients reach the api directly here, so X-Forwarded-For is not trusted (TRUST_PROXY is on only on Railway).
-      TRUST_PROXY: "false"
-      PORT: "8080"
-      # Kerby's OAuth redirect URI and Client ID Metadata Document live on the console (ADR 0022); the console below has
-      # the same address as PUBLIC_URL. Plain http here, so authorization servers get a dynamically registered client.
-      CONSOLE_PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
-      # Seals subscriptions' signing secrets to the dispatcher's development key pair (the private half is below).
-      DELIVERY_SECRETS_PUBLIC_KEY: "mf8gEAsa6cy+Ow2gG9CTu5e/1IGoegYQSSOz5vfEkB0="
-      # Development only: webhook subscriptions may point at http and private addresses (a receiver on this machine).
-      KERBY_ENVIRONMENT: development
-      ALLOW_LOCAL_DESTINATIONS: "true"
-      # Development only (ADR 0022), like the worker's: OAuth discovery and the code exchange may reach a test MCP server
-      # and its authorization server on this machine, over plain http; 127.0.0.1 is where the browser opens a test
-      # server's authorize endpoint (`startOAuthFixture({ urlHost: "host.docker.internal", browserHost: "127.0.0.1" })`).
-      # Every other tenant URL must still be public.
-      EGRESS_ALLOWED_HOSTS: host.docker.internal,127.0.0.1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      # The only published port: the tenant-facing API, on loopback. There is no shared proxy locally.
-      - "127.0.0.1:${KERBY_API_PORT:-8080}:8080"
-    depends_on:
-      control: { condition: service_healthy }
-
+  # More workers: the same image running only the worker (profile `workers`, `docker compose --profile workers up
+  # --scale worker=2`). Any worker takes any turn.
   worker:
     <<: *hardened
-    build:
-      context: .
-      dockerfile: services/worker/Dockerfile
-      target: ${KERBY_IMAGE_TARGET:-prod}
+    profiles: [workers]
+    build: *kerby-build
     environment:
-      <<: *tenant-env
-      # Development only: the scripted model answers, and the built-in echo tool exists. Production refuses both.
-      KERBY_ENVIRONMENT: development
-      KERBY_FAKE_MODEL: ${KERBY_FAKE_MODEL:-1}
-      ENABLE_ECHO_TOOL: "1"
-      SWEEP_INTERVAL_SECONDS: "3"
-      # Short, so a killed worker's turn moves to another worker in seconds (the default is two minutes).
-      CLAIM_TIMEOUT_SECONDS: "10"
-      SECRETS_PRIVATE_KEYS: "oLJooOTi5uJQL4lbxdJoXNIFChaniiOI87/7rlz341o="
-      # Judgments (ADR 0015) call TypeSafe and OpenCode with the tenant's own key; point these at stand-ins to exercise them offline.
-      TYPESAFE_BASE_URL: ${KERBY_TYPESAFE_BASE_URL:-https://api.typesafe.ai}
-      OPENCODE_SYSTEMONE_BASE_URL: ${KERBY_OPENCODE_SYSTEMONE_BASE_URL:-https://opencode.ai/inference/systemone}
-      # Development only (ADR 0022): the egress guard lets this host through although it is private, so a test MCP server
-      # on this machine can answer (`make tools-e2e`). Every other tenant URL must still be public.
-      EGRESS_ALLOWED_HOSTS: host.docker.internal
-    extra_hosts:
-      # Docker Desktop resolves it by itself; Linux needs the gateway named.
-      - "host.docker.internal:host-gateway"
+      <<: *kerby-env
+      KERBY_ROLES: worker
+    extra_hosts: *host-gateway
     depends_on:
-      control: { condition: service_healthy }
+      kerby: { condition: service_healthy }
 
-  # Pushes tenants' events to their subscriptions (ADR 0019). No published port: it only calls out.
-  dispatcher:
-    <<: *hardened
-    build:
-      context: .
-      dockerfile: services/dispatcher/Dockerfile
-      target: ${KERBY_IMAGE_TARGET:-prod}
-    environment:
-      <<: *tenant-env
-      # Development only: deliver to http and private addresses, so a receiver on this machine (or
-      # http://host.docker.internal:<port>/) works. Production refuses it.
-      KERBY_ENVIRONMENT: development
-      ALLOW_LOCAL_DESTINATIONS: "true"
-      SWEEP_INTERVAL_SECONDS: "3"
-      CLAIM_TIMEOUT_SECONDS: "10"
-      # A development key pair (the public half is on the api above): never use it anywhere real.
-      DELIVERY_SECRETS_PRIVATE_KEYS: "AKF+0EGRGw0BZcEEWEst38zHg303ne+y56QH16TSBm0="
-    depends_on:
-      control: { condition: service_healthy }
-
-  # The tenant console (ADR 0014): sign-up, sign-in, API keys and model keys. Locally it connects to the control database
-  # as the admin, like api and worker; hosted it is the limited `kerby_console` role.
+  # The console (ADR 0014): sign in as KERBY_ADMIN_EMAIL; integrations and keys, model keys, tools, prompts and chat.
   console:
     <<: *hardened
     build:
@@ -179,26 +125,21 @@ services:
       dockerfile: services/console/Dockerfile
       target: ${KERBY_IMAGE_TARGET:-prod}
     environment:
-      CONTROL_DATABASE_URL: postgres://postgres:dev@postgres:5432/kerby_control
-      CONTROL_URL: http://control:8081
-      CONSOLE_TOKEN: ${KERBY_CONSOLE_TOKEN:-local-dev-console-token-0123456789}
-      # The api's development public key (above): model keys stored here are sealed to it.
-      SECRETS_PUBLIC_KEY: "y4c7+AJM8aN76nrweWjLR0gShtooDI7uI0ay8mTDHR0="
-      # Chat goes through the api, over the private network; the quickstart shows the published address.
-      API_URL: http://api:8080
+      <<: *install
+      # Chat goes through the api, inside the network; the quickstart shows the published address.
+      API_URL: http://kerby:8080
       API_PUBLIC_URL: http://127.0.0.1:${KERBY_API_PORT:-8080}
       # Its own published address: Kerby's OAuth Client ID Metadata Document is served under it, and the api's
       # CONSOLE_PUBLIC_URL is the same value.
       PUBLIC_URL: http://127.0.0.1:${KERBY_CONSOLE_PORT:-3000}
-      # Served over plain HTTP here, so the session cookie cannot be Secure; hosted it is.
+      # Served over plain HTTP here, so the session cookie cannot be Secure; behind TLS it is.
       SECURE_COOKIES: "false"
       TRUST_PROXY: "false"
       PORT: "3000"
     ports:
       - "127.0.0.1:${KERBY_CONSOLE_PORT:-3000}:3000"
     depends_on:
-      control: { condition: service_healthy }
-      api: { condition: service_healthy }
+      kerby: { condition: service_healthy }
 
 volumes:
   pgdata:

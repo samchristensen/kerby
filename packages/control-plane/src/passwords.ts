@@ -1,6 +1,7 @@
-// Passwords are hashed here and nowhere else: scrypt (Node's crypto, no dependency) with OWASP's parameters, a random
-// salt per password, and the parameters stored in the hash so a later cost change still verifies old hashes. The hash
-// format is `scrypt$<log2 N>$<r>$<p>$<salt>$<key>`, base64 (packages/contracts checks its shape at control).
+// Console passwords are hashed here and nowhere else (the console checks them, control sets the configured admin's):
+// scrypt (Node's crypto, no dependency) with OWASP's parameters, a random salt per password, and the parameters stored
+// in the hash so a later cost change still verifies old hashes. The hash format is
+// `scrypt$<log2 N>$<r>$<p>$<salt>$<key>`, base64.
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 /** log2 of scrypt's N for new hashes: 17 (128 MiB, about 0.2 s here) per OWASP. Tests pass a lower one. */

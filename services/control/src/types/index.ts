@@ -2,20 +2,12 @@ import type { Bucket } from "@kerby/blobs";
 import type { ClusterAdmin, ControlDb, TenantPools } from "@kerby/db";
 import type { SecretBox } from "@kerby/secrets";
 
-/** Everything the operator commands need, built once in `src/index.ts` and passed down. */
+/** Everything control's work needs, built once in `src/index.ts` and passed down. */
 export type ControlDeps = {
   control: ControlDb;
   cluster: ClusterAdmin;
-  buckets: {
-    /** Every tenant's objects under `t/<tenantId>/`. */
-    primary: Bucket;
-    /** Tenant exports, `<tenantId>/<stamp>.dump` and `.objects.json`; only control holds its keys. */
-    exports: Bucket;
-    /** A copy of the primary's `t/`, in another region. */
-    backup: Bucket;
-  };
-  /** The clock: exports are stamped and expire by it. Tests inject one. */
-  now: () => Date;
+  /** The bucket holding every tenant's objects under `t/<tenantId>/`. */
+  bucket: Bucket;
   /** Opens tenant databases as their own roles (used to migrate them). */
   pools: TenantPools;
   /** Seals and opens tenant database passwords (TENANT_DB_KEYS, ADR 0009). */
@@ -25,32 +17,5 @@ export type ControlDeps = {
     clusterPort: number;
     tenantDbSslmode?: "disable" | "require" | "verify-full" | undefined;
     templateDatabase: string;
-    pgDumpPath: string;
   };
 };
-
-export class NotFoundError extends Error {
-  override name = "NotFoundError";
-}
-
-/** A request that conflicts with the state of things; `code` is the error code the response carries. */
-export class ConflictError extends Error {
-  override name = "ConflictError";
-  readonly code: string;
-
-  constructor(message: string, code = "conflict") {
-    super(message);
-    this.code = code;
-  }
-}
-
-/** A request this deployment does not allow; `code` is the error code the response carries. */
-export class ForbiddenError extends Error {
-  override name = "ForbiddenError";
-  readonly code: string;
-
-  constructor(message: string, code = "forbidden") {
-    super(message);
-    this.code = code;
-  }
-}

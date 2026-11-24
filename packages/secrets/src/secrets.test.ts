@@ -3,7 +3,9 @@ import {
   createOpener,
   createSealer,
   createSecretBox,
+  deriveInstanceKeys,
   generateBoxKey,
+  generateInstanceSecret,
   generateSecretsKeyPair,
   publicKeyOf,
   SecretsError,
@@ -119,6 +121,45 @@ describe("secret box", () => {
     try {
       createSecretBox(["c2hvcnQ="]);
     } catch (error) {
+      expect(String(error)).not.toContain("c2hvcnQ=");
+    }
+  });
+});
+
+describe("instance keys", () => {
+  it("derive the same keys from the same master, so a restart opens what the last run sealed", () => {
+    // Pinned: a change to the derivation strands every model key, credential and role password an install holds.
+    const master = Buffer.alloc(32, 7).toString("base64");
+    const keys = deriveInstanceKeys(master);
+    expect(deriveInstanceKeys(master)).toEqual(keys);
+    expect(keys.secrets.publicKey).toBe("D5lKGxEOy4vuaIg4h7C+w4MPuWy796JeKzGgrbK8ig0=");
+  });
+
+  it("give each use its own working key", () => {
+    const keys = deriveInstanceKeys(generateInstanceSecret());
+    const values = [
+      keys.tenantDbKey,
+      keys.secrets.privateKey,
+      keys.delivery.privateKey,
+      keys.appDatabasePassword,
+      keys.consoleDatabasePassword,
+    ];
+    expect(new Set(values).size).toBe(values.length);
+    for (const pair of [keys.secrets, keys.delivery]) {
+      const sealed = createSealer(pair.publicKey).seal("sk", ctx);
+      expect(createOpener([pair.privateKey]).open(sealed, ctx)).toBe("sk");
+    }
+    const box = createSecretBox([keys.tenantDbKey]);
+    expect(box.open(box.seal("pw", "owner"), "owner")).toBe("pw");
+    expect(keys.appDatabasePassword).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("refuse a master that is not 32 bytes, without echoing it", () => {
+    expect(() => deriveInstanceKeys("c2hvcnQ=")).toThrow(SecretsError);
+    try {
+      deriveInstanceKeys("c2hvcnQ=");
+    } catch (error) {
+      expect(String(error)).toMatch(/KERBY_SECRET_KEY must be 32 bytes/);
       expect(String(error)).not.toContain("c2hvcnQ=");
     }
   });

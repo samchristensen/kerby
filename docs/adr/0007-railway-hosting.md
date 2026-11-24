@@ -1,6 +1,6 @@
 # 0007. Hosting: Railway (Postgres, a bucket, three services)
 
-- Status: proposed
+- Status: superseded by [0024](0024-self-hosted-single-tenant.md)
 - Date: 2026-11-22
 
 ## Context

@@ -295,16 +295,26 @@ describe("checkArchitecture", () => {
   });
 
   describe("docker", () => {
-    it("rejects a service without a Dockerfile, and one without a HEALTHCHECK", () => {
+    it("rejects a service in no image, and an image without a HEALTHCHECK", () => {
       const missing = tree({ "services/api/Dockerfile": null });
       const [first] = checkArchitecture(missing);
       expect(first?.rule).toBe("docker");
-      expect(first?.message).toContain("HEALTHCHECK");
+      expect(first?.message).toContain("is in no image");
 
       const unhealthy = tree({
         "services/api/Dockerfile": "FROM node\n# HEALTHCHECK in a comment only\n",
       });
       expect(rules(unhealthy)).toEqual(["docker:services/api/Dockerfile"]);
+    });
+
+    it("accepts a service another image installs and runs", () => {
+      const launched = tree({
+        "services/api/Dockerfile": null,
+        "services/kerby/package.json": JSON.stringify({ name: "@kerby/kerby" }),
+        "services/kerby/Dockerfile":
+          "FROM node\nRUN pnpm install --filter @kerby/kerby... --filter @kerby/api...\nHEALTHCHECK CMD true\n",
+      });
+      expect(checkArchitecture(launched)).toEqual([]);
     });
 
     it("does not ask packages for one", () => {

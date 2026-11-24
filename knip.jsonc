@@ -5,8 +5,8 @@
   "includeEntryExports": true,
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.ts", ".railway/railway.ts", "vitest.config.ts"],
-      "project": ["scripts/**/*.ts", ".railway/**/*.ts", "*.ts"],
+      "entry": ["scripts/*.ts", "vitest.config.ts"],
+      "project": ["scripts/**/*.ts", "*.ts"],
       // The Makefile runs it (`pnpm exec biome`); knip reads package.json scripts, not the Makefile.
       "ignoreDependencies": ["@biomejs/biome"]
     },
@@ -27,11 +27,10 @@
       "project": ["src/**/*.ts"]
     }
   },
-  // Default exports read by tools, not imported: the Railway CLI and vitest. Neither file exports anything else.
+  // A default export read by a tool, not imported: vitest's config. It exports nothing else.
   // A single export kept for another reason carries a `@public` JSDoc tag (knip skips it) that says why.
   // The SDK's entry is the public surface customers import (ADR 0023): no workspace imports most of it.
   "ignoreIssues": {
-    ".railway/railway.ts": ["exports"],
     "vitest.config.ts": ["exports"],
     "packages/sdk/src/index.ts": ["exports", "types"]
   }

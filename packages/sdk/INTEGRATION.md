@@ -1,7 +1,7 @@
 # Integrating a project with Kerby
 
 For an agent (or a person) adding Kerby to an application. Read it top to bottom once; every section after
-[Pick the pattern](#2-pick-the-pattern) is a recipe you can lift. The SDK is `@kerby/sdk`: a typed client plus every
+[Pick the pattern](#2-pick-the-pattern) is a recipe you can lift. The SDK is `@samchristensen/kerby-sdk`: a typed client plus every
 request and response contract of Kerby's tenant API, as [zod](https://zod.dev) schemas and the types inferred from them.
 
 ## 0. What Kerby is, in the terms the API uses
@@ -24,26 +24,29 @@ worker crashes, and keeping every transcript.
 
 ## 1. Set up
 
-1. **Get a base URL and an API key.**
-   - Hosted: the API's public address (the console's quickstart shows it). In the console create an **integration** with
-     only the scopes your application needs (a chat backend needs `conversations`, plus `events` if it polls events), then
-     copy the key it shows once.
+1. **Get a base URL and an API key.** Kerby runs as an install beside your project
+   ([docs/deploy.md](https://github.com/samchristensen/kerby/blob/main/docs/deploy.md) in the Kerby repository):
+   - In Compose: `http://kerby:8080`; on Railway: `http://kerby.railway.internal:8080`. The install's `KERBY_API_KEY`
+     has every scope (on Railway, reference it: `${{kerby.KERBY_API_KEY}}`). For a narrower key, create an
+     **integration** in the console with only the scopes your application needs (a chat backend needs
+     `conversations`, plus `events` if it polls events), then copy the key it shows once.
    - Local stack (in the Kerby repo): `make up` prints `http://127.0.0.1:8080` and a key. It runs a scripted fake model, so
      no provider key is needed (see [Test without a model](#10-test-without-a-model)).
-2. **Install** (the repository is private; use an account with access, over SSH or a token):
+2. **Install**:
 
    ```sh
-   pnpm add github:samchristensen/kerby-sdk#v0.1.0     # or npm install / yarn add the same specifier
+   npm install @samchristensen/kerby-sdk      # or: pnpm add @samchristensen/kerby-sdk
    ```
 
-   Pin a tag. The tag is the contract version: a new SDK version tracks the API it was built from. Node 22+ (global `fetch`);
-   it also runs in Bun, Deno and edge runtimes. TypeScript consumers need `@types/node` or the DOM lib for `fetch` types.
+   Pin the version your lockfile resolves. The version is the contract version: a new SDK version tracks the API it was
+   built from (`npm view @samchristensen/kerby-sdk versions` lists them). Node 22+ (global `fetch`, `AbortSignal.any`); it also runs in
+   Bun, Deno and edge runtimes. TypeScript consumers need `@types/node` or the DOM lib for `fetch` types.
 3. **Configuration**: read two environment variables in your application, never in the SDK:
    `KERBY_BASE_URL` and `KERBY_API_KEY`. Fail at startup when either is missing.
 4. **Create the client once** and reuse it:
 
    ```ts
-   import { Kerby } from "@kerby/sdk";
+   import { Kerby } from "@samchristensen/kerby-sdk";
 
    export const kerby = new Kerby({
      baseUrl: requireEnv("KERBY_BASE_URL"),
@@ -191,7 +194,7 @@ Receive it. Verify against the **raw** body string, before any JSON parsing, and
 acknowledging):
 
 ```ts
-import { verifyWebhook, WebhookVerificationError } from "@kerby/sdk";
+import { verifyWebhook, WebhookVerificationError } from "@samchristensen/kerby-sdk";
 
 app.post("/kerby/webhook", express.text({ type: "*/*" }), async (req, res) => {
   try {
@@ -289,7 +292,7 @@ Every SDK failure extends `KerbyError`:
 | `WebhookVerificationError` | `verifyWebhook`; `reason` is `missing_headers`, `bad_timestamp`, `timestamp_out_of_tolerance`, `bad_signature`, `bad_payload` |
 
 ```ts
-import { isKerbyApiError } from "@kerby/sdk";
+import { isKerbyApiError } from "@samchristensen/kerby-sdk";
 try {
   await kerby.conversations.post(id, text);
 } catch (error) {
@@ -323,7 +326,7 @@ A caller's own `AbortSignal` abort rejects with the signal's reason, not a Kerby
 | 413    | `conversation_full`, `storage_quota_exceeded`, `too_large`                                                             | 2000 messages / 64 MiB per conversation; the tenant's storage; body too big. Start a new conversation / free space |
 | 429    | `rate_limited`                                                                                                         | Over the request or open-stream limit; honor `retryAfterSeconds`                                                   |
 
-**Limits worth designing around** (defaults; each tenant's are set by the operator): 600 requests a minute per tenant,
+**Limits worth designing around** (defaults; an install may change them in its tenant row): 600 requests a minute per tenant,
 approximate across API processes; a message up to 1 million characters; 100 messages per page by default (500 at
 most), 30 conversations per page (100); open streams per tenant are capped, so close streams you do not need and prefer
 webhooks for background work; events are kept 30 days.
@@ -343,13 +346,13 @@ the contracts (`ConversationSchema`, `PublicEventSchema`, ...) let you build fix
 
 ## 11. Using the contracts directly
 
-Everything is exported from `@kerby/sdk`: schemas (`PublicEventSchema`, `GetConversationResponseSchema`, ...), their types
+Everything is exported from `@samchristensen/kerby-sdk`: schemas (`PublicEventSchema`, `GetConversationResponseSchema`, ...), their types
 (`Conversation`, `PublicMessage`, `PublicEvent`, `Judgment`, ...) and constants (`SCOPES`, `EVENT_TYPES`). Inputs are
 typed with defaults optional (`CreateConversationInput`, `SubmitJudgmentInput`, `SearchInput`, ...). The `.d.ts` files in
-`node_modules/@kerby/sdk/lib/contracts/src/` carry the field-by-field documentation.
+`node_modules/@samchristensen/kerby-sdk/lib/contracts/src/` carry the field-by-field documentation.
 
 ```ts
-import { PublicEventSchema, type PublicEvent } from "@kerby/sdk";
+import { PublicEventSchema, type PublicEvent } from "@samchristensen/kerby-sdk";
 const event: PublicEvent = PublicEventSchema.parse(JSON.parse(storedJson));
 if (event.type === "turn.failed") console.log(event.data.reason); // narrowed by `type`
 ```
