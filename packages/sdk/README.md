@@ -44,6 +44,6 @@ for await (const event of kerby.conversations.streamReply(chat.id, "And again, s
 ## Versions
 
 Each version is the SDK built from one commit of the [Kerby repository](https://github.com/samchristensen/kerby): its
-contracts are that commit's, and npm's provenance names the commit. Pin a version. The package is generated: change the
-SDK in the repository (`packages/sdk`, `packages/contracts`); every merge to `main` publishes a new patch version when the
-build changed.
+contracts are that commit's. Pin a version. The package is generated: change the SDK in the repository (`packages/sdk`,
+`packages/contracts`); every merge to `main` that changes the build publishes a new patch version from CI, with npm
+provenance naming the commit (`npm audit signatures` checks it; `0.1.0`, published by hand to create the package, has none).
