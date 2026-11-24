@@ -15,9 +15,38 @@ tenant if there is none, and keeps the configured API key and console admin as c
 once it is ready. Upgrading is pulling a newer image and restarting: code tolerates the schema one release back, so a
 second `KERBY_ROLES=worker` container may run the old image for a minute.
 
+## Deploying with an agent
+
+Give the agent these two URLs. They are raw Markdown (no page to render) and stable; `main` is the newest merge, so put a
+tag or commit in its place to pin the docs to the version you run:
+
+- this guide: <https://raw.githubusercontent.com/samchristensen/kerby/main/docs/deploy.md>
+- the application that will call Kerby:
+  <https://raw.githubusercontent.com/samchristensen/kerby/main/packages/sdk/INTEGRATION.md> (the npm package
+  `@samchristensen/kerby-sdk` ships the same file)
+
+An agent should settle three things with you, then follow the sections below in order:
+
+1. **Where it runs**: Compose beside your project, or a Railway project.
+2. **A model provider.** Kerby holds no model key. `DEFAULT_MODEL` is `<provider>/<model>`; the provider's key goes in with
+   `PUT /v1/model-keys/<provider>` or in the console. Until it does, creating a conversation fails with
+   `no model key for provider "<provider>"`.
+3. **The console**: optional; it needs an admin email and password.
+
+It is done when `GET /healthz` on the api answers `{"ok":true}`, `GET /v1/conversations` with the API key answers 200 (a
+wrong key, 401), and the application's SDK call completes a turn (the checklist ending INTEGRATION.md).
+
 ## Secrets and settings
 
-`make secrets-key` prints the two values to generate:
+The two values to generate: `make secrets-key` (in a clone of this repository) prints them, and without a clone `openssl`
+makes the same:
+
+```sh
+echo "KERBY_SECRET_KEY=$(openssl rand -base64 32)"
+echo "KERBY_API_KEY=kb_$(openssl rand -hex 6)_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+```
+
+What they are:
 
 - **`KERBY_SECRET_KEY`** (32 bytes, base64): every other key derives from it (the sealed model keys and tool credentials,
   the tenant database password's seal, the webhook signing secrets' seal, the limited roles' passwords). Keep a copy
@@ -42,7 +71,7 @@ second `KERBY_ROLES=worker` container may run the old image for a minute.
 | `SECURE_COOKIES`                                                                    | console        | `false` where the console is served over plain http (default `true`: the session cookie is `Secure`)                                 |
 | `CONSOLE_PUBLIC_URL`                                                                | kerby          | the console's `PUBLIC_URL`: tool servers connected with OAuth redirect there (ADR 0022)                                              |
 | `ALERT_WEBHOOK_URL`                                                                 | kerby          | [Alerts](#alerts)                                                                                                                    |
-| `KERBY_ROLES`                                                                       | kerby          | `control,api,worker,dispatcher` by default; `worker` for an extra worker container. One container per install runs `control`.        |
+| `KERBY_ROLES`                                                                       | kerby          | a subset of `control,api,worker,dispatcher` (default all), [one per container](#running-the-roles-separately); one `control` only.   |
 
 Every other setting a service reads (`ARCHITECTURE.md`, each `services/*/src/config`) may be set on `kerby` too; the
 launcher passes the environment through and overrides only what it derives. Files under `KERBY_SECRETS_DIR` (or
@@ -50,8 +79,8 @@ launcher passes the environment through and overrides only what it derives. File
 
 ## Beside a project, with Compose
 
-The repository's `compose.yaml` is the development stack (`make up`). In another project, add Kerby from the images
-(log in to GHCR first if the packages are private: `docker login ghcr.io` with a token holding `read:packages`):
+The repository's `compose.yaml` is the development stack (`make up`). In another project, add Kerby from the images (a pull
+that is denied means the package is private: `docker login ghcr.io` with a token holding `read:packages`):
 
 ```yaml
 services:
@@ -89,8 +118,8 @@ volumes:
   kerby-s3data:
 ```
 
-The application calls `http://kerby:8080` with `KERBY_API_KEY` (`new Kerby({ apiKey, baseUrl })`,
-`packages/sdk/INTEGRATION.md`).
+The application installs the SDK (`npm install @samchristensen/kerby-sdk`) and calls `http://kerby:8080` with
+`KERBY_API_KEY` (`new Kerby({ apiKey, baseUrl })`; its guide is `packages/sdk/INTEGRATION.md`).
 
 The console is optional. Merge this into the file above: the admin it signs in as and its address on `kerby`, and the
 service from its image:
@@ -115,6 +144,57 @@ services:
     ports: ["127.0.0.1:3000:3000"]
     depends_on: { kerby: { condition: service_healthy } }
 ```
+
+## Running the roles separately
+
+The `kerby` image starts any non-empty subset of its four processes, picked by `KERBY_ROLES` (`control`, `api`, `worker`,
+`dispatcher`; all four by default). One role per container lets each scale on its own. These services replace `kerby` in
+the first snippet (control alone reads `KERBY_API_KEY`); the application then calls `http://api:8080`:
+
+```yaml
+x-kerby: &kerby
+  image: ghcr.io/samchristensen/kerby:main
+  restart: unless-stopped # required, see below
+  depends_on:
+    kerby-postgres: { condition: service_healthy }
+    kerby-s3: { condition: service_started }
+x-env: &env
+  KERBY_SECRET_KEY: ${KERBY_SECRET_KEY}
+  DATABASE_URL: postgres://postgres:change-me@kerby-postgres:5432/kerby
+  S3_ENDPOINT: http://kerby-s3:9000
+  S3_BUCKET: kerby
+  S3_ACCESS_KEY_ID: kerby
+  S3_SECRET_ACCESS_KEY: change-me-too
+  DEFAULT_MODEL: anthropic/claude-sonnet-4-5
+  EGRESS_ALLOWED_HOSTS: app
+  ALLOW_LOCAL_DESTINATIONS: "true"
+services:
+  control:
+    {
+      <<: *kerby,
+      environment: { <<: *env, KERBY_ROLES: control, KERBY_API_KEY: "${KERBY_API_KEY}" },
+    }
+  api: { <<: *kerby, environment: { <<: *env, KERBY_ROLES: api } }
+  worker: { <<: *kerby, environment: { <<: *env, KERBY_ROLES: worker } }
+  dispatcher: { <<: *kerby, environment: { <<: *env, KERBY_ROLES: dispatcher } }
+```
+
+Scale it with `docker compose up -d --scale worker=3 --scale api=2 --scale dispatcher=2`. This layout ran from the
+published image (1 control, 2 api, 3 and then 9 workers, 2 dispatchers; a turn and a signed webhook went through it). What
+to know:
+
+- **Exactly one `control`.** It migrates the databases and makes the tenant and the limited database roles (`kerby_app`)
+  the other roles connect as.
+- **A restart policy is required.** Only a container that runs control waits for it. A role that starts first fails with
+  `password authentication failed for user "kerby_app"`, exits, and is up after its restart (observed: the dispatcher,
+  once). `restart: unless-stopped` does it here; Railway's restart on failure does it there.
+- **Only the api has a port.** Control's, the worker's and the dispatcher's health endpoints answer inside their own
+  containers, which the image's `HEALTHCHECK` asks; a platform's HTTP healthcheck path belongs on the api alone.
+- **The ceiling is Postgres connections, not processes.** The tenant's database role may hold 20, a constant, and tenant
+  connections open on demand: on one tenant, 3 of 20 with 9 idle workers, and 12 right after a turn with 2 api, 3 workers
+  and 2 dispatchers up. By the budget under [Postgres](#postgres) the role runs out at roughly ten busy processes (not
+  tested at the limit); making the limit a setting is [tech debt](plans/tech-debt.md).
+- **Api replicas count separately:** request and failed-sign-in limits are per process ([tech debt](plans/tech-debt.md)).
 
 ## Inside a Railway project
 
@@ -161,7 +241,9 @@ Add to the application's project (the dashboard, or `railway add`):
 
    and on `kerby`: `KERBY_ADMIN_EMAIL`, `KERBY_ADMIN_PASSWORD`, `CONSOLE_PUBLIC_URL=https://${{console.RAILWAY_PUBLIC_DOMAIN}}`.
 
-More workers: a second service from the same image with `KERBY_ROLES=worker` and the same variables.
+More workers, or any role alone: another service from the same image with `KERBY_ROLES=worker` (or `api`, `dispatcher`)
+and the same variables; see [Running the roles separately](#running-the-roles-separately). Only the api has a port, so give
+only it a healthcheck path.
 
 ## Your own private services
 
@@ -176,8 +258,9 @@ still checked.
 - **Connection budget.** With one tenant, a `kerby` container holds at most about 50 connections: the api 13 (the
   tenant's pool of 2, one `LISTEN`, a control pool of 10), the worker 13 (pool, control pool, `LISTEN`), control 15 (pool,
   control pool, cluster admin pool, one while provisioning) and the dispatcher 8; the console 5; an extra worker container
-  13. Postgres's default `max_connections` (100) is enough. The tenant's role may hold 20 at once
-  (`TENANT_ROLE_CONNECTION_LIMIT`): a `kerby` container uses 9 of them, each extra worker container 2.
+  13. Postgres's default `max_connections` (100) is enough. The tenant's role may hold 20 at once: a constant in
+  `packages/db/src/cluster.ts`, not a setting, which control sets again at every start. A `kerby` container uses 9 of them,
+  each extra worker container 2.
 - **`NOTIFY` is sent outside writing transactions.** Postgres commits every transaction that sent a `NOTIFY` under one
   lock for the whole cluster, held through the commit's WAL flush, so a `NOTIFY` inside a write makes every write flush
   one at a time (measured: 9.2k against 20k inserts a second). A stored message is announced after its commit
@@ -224,5 +307,8 @@ on Railway, the service's log view filters the same fields (`@service:worker`, `
 - Do not point `DATABASE_URL` at your application's Postgres: control changes who may connect to its databases.
 - Do not lose `KERBY_SECRET_KEY`, or change it on an install with data: everything sealed with the old one stops opening.
 - Do not run two containers with `control` in `KERBY_ROLES` against one install.
+- Do not run a role in its own container without a restart policy: one that starts before control has made the `kerby_app`
+  role exits, and only a restart brings it up.
+- Do not count on api replicas sharing their request limits: each process counts its own.
 - Do not push a new image's first tag to GHCR by hand: the package is then created without a link to the repository,
   and CI's pushes to it are refused (`denied: permission_denied`). Let CI's `images` job create it.

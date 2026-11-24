@@ -41,7 +41,18 @@ The SDK is typed end to end (every request and response is a zod schema). Its gu
 ## Run it for real
 
 [docs/deploy.md](docs/deploy.md) is the install guide: the two images CI publishes (`ghcr.io/samchristensen/kerby` and
-`kerby-console`), a Compose snippet for another project, the Railway recipe, every setting, backups and alerts.
+`kerby-console`, for amd64 and arm64), a Compose snippet for another project, one container per role to scale each on its
+own, the Railway recipe, every setting, backups and alerts.
+
+## Have an agent do it
+
+Give an agent these URLs (raw Markdown; `main` is the newest merge, so put a tag or commit in its place to pin them):
+
+- deploy: <https://raw.githubusercontent.com/samchristensen/kerby/main/docs/deploy.md>
+- wire an application up: <https://raw.githubusercontent.com/samchristensen/kerby/main/packages/sdk/INTEGRATION.md>
+
+For example: _"Deploy Kerby beside this project with Docker Compose, following the deploy URL exactly, then integrate it
+into the app following the integration URL. Ask me which model provider to use and for its key."_
 
 ## Where to read
 

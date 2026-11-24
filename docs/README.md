@@ -9,7 +9,7 @@ The repository is the only memory an agent has: a decision, plan, or convention 
 | [principles.md](principles.md)                                   | Before writing code.                                                                                             |
 | [adr/](adr)                                                      | Before deciding structure, dependencies, infrastructure, tenancy.                                                |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md)                         | Adding or moving anything.                                                                                       |
-| [deploy.md](deploy.md)                                           | Running an install: Compose beside a project, Railway, secrets, backups, alerts.                                 |
+| [deploy.md](deploy.md)                                           | Running an install: Compose, Railway, separate roles, secrets, backups, alerts; the URL to give an agent.        |
 | [../packages/sdk/INTEGRATION.md](../packages/sdk/INTEGRATION.md) | Integrating an application with Kerby (also published with the SDK); changing a tenant-facing route or contract. |
 | [research/](research)                                            | Positioning, pricing, or scoping a feature against the market: dated research.                                   |
 
