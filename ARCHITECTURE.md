@@ -6,7 +6,7 @@ over HTTP; it runs their agents durably, calls the tools they register, and keep
 service it needs (plus S3-compatible storage for bytes). It keeps the tenancy boundary of the multi-tenant service it
 started as, so selling it as one later is a plan, not a rewrite. Why: ADRs [0001](docs/adr/0001-platform-and-tenancy.md),
 [0002](docs/adr/0002-postgres-absurd-s3.md), [0003](docs/adr/0003-harness-agnostic-runtime.md),
-[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md), [0021](docs/adr/0021-chat-search.md), [0022](docs/adr/0022-tools.md), [0023](docs/adr/0023-sdk.md), [0024](docs/adr/0024-self-hosted-single-tenant.md).
+[0004](docs/adr/0004-database-per-tenant.md), [0005](docs/adr/0005-dependencies.md) (dependency list), [0006](docs/adr/0006-schema-lives-in-packages.md), [0014](docs/adr/0014-tenant-console.md), [0015](docs/adr/0015-judgment-port.md), [0016](docs/adr/0016-guardrails.md), [0017](docs/adr/0017-prompts.md), [0018](docs/adr/0018-trace.md), [0019](docs/adr/0019-events-and-delivery.md), [0020](docs/adr/0020-integrations-and-scopes.md), [0021](docs/adr/0021-chat-search.md), [0022](docs/adr/0022-tools.md), [0023](docs/adr/0023-sdk.md), [0024](docs/adr/0024-self-hosted-single-tenant.md), [0025](docs/adr/0025-public-repository-sdk-on-npm.md).
 
 ```
 scripts/    occasional tooling and repo checks; not product
@@ -32,10 +32,12 @@ with the reason.
 - A relative import never leaves its workspace.
 - No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`). The one
   exception is the console's pages, which `next build` compiles when its image is built (ADR 0014).
-- `packages/sdk` is the one package that leaves the repository: applications install it. `make sdk-build` compiles it
-  with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish` on every merge to `main`, which pushes the result to a private
-  repository as a tag ([ADR 0023](docs/adr/0023-sdk.md)). Its `INTEGRATION.md` is the guide an agent follows to integrate
-  an application; a change to a tenant-facing contract or route is a change to the SDK and that guide, and `make sdk-e2e` shows it.
+- `packages/sdk` is the one package that leaves the repository: applications install it from npm as `@kerby/sdk`.
+  `make sdk-build` compiles it with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish`
+  on every merge to `main`, which publishes the next patch version to npm when the build differs from the latest
+  ([ADR 0023](docs/adr/0023-sdk.md), [0025](docs/adr/0025-public-repository-sdk-on-npm.md)). Its `INTEGRATION.md` is the
+  guide an agent follows to integrate an application; a change to a tenant-facing contract or route is a change to the SDK
+  and that guide, and `make sdk-e2e` shows it.
 
 ## Layers
 

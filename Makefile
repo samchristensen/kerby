@@ -88,7 +88,7 @@ sdk-e2e: ## @kerby/sdk against the running local stack (make up first): every re
 sdk-build: ## Build @kerby/sdk into packages/sdk/dist (compiled code, contracts, guide), as published
 	node scripts/sdk.ts build
 
-sdk-publish: ## Publish @kerby/sdk to its private GitHub repo as the next v<major>.<minor>.<n> if the build changed (CI does this on main; DRY=1 pushes nothing)
+sdk-publish: ## Publish @kerby/sdk to npm as the next <major>.<minor>.<n> if the build differs from the latest (CI does this on main; DRY=1 publishes nothing)
 	node scripts/sdk.ts publish $(if $(DRY),--dry-run)
 
 secrets-key: ## Make an install's secrets: KERBY_SECRET_KEY (every other key derives from it) and a KERBY_API_KEY

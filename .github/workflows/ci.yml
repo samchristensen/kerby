@@ -1,6 +1,6 @@
 # The gate (plan 0001 M0): every pull request and every push to main runs `make check` and `make test` and builds the two
 # images an install runs (ADR 0024): `kerby` (control, api, worker, dispatcher) and `kerby-console`. A push to main
-# publishes them to GHCR as `sha-<commit>` and `main`, which docs/self-host.md deploys. Actions are pinned by commit SHA
+# publishes them to GHCR as `sha-<commit>` and `main`, which docs/deploy.md deploys. Actions are pinned by commit SHA
 # (versions live once).
 name: ci
 
@@ -82,19 +82,18 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  # Every merge to main publishes @kerby/sdk (ADR 0023) when its build differs from the last tag in the private SDK
-  # repository: patch numbers are assigned by the script, nobody bumps them. A deploy key with write access to that one
-  # repository (secret SDK_DEPLOY_KEY) is the only credential.
+  # Every merge to main publishes @kerby/sdk to npm (ADR 0025) when its build differs from the latest version there: patch
+  # numbers are assigned by the script, nobody bumps them. The credential is npm trusted publishing: the package names
+  # this repository and this workflow file as its publisher, and the job proves it with an OIDC token (`id-token`), so no
+  # npm token is stored anywhere. npm records the commit and workflow as the version's provenance.
   sdk:
     if: github.event_name == 'push'
     needs: [check, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      GIT_AUTHOR_NAME: kerby-ci
-      GIT_AUTHOR_EMAIL: kerby-ci@users.noreply.github.com
-      GIT_COMMITTER_NAME: kerby-ci
-      GIT_COMMITTER_EMAIL: kerby-ci@users.noreply.github.com
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -103,12 +102,6 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: make setup
-      - name: Publish the SDK
-        env:
-          SDK_DEPLOY_KEY: ${{ secrets.SDK_DEPLOY_KEY }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SDK_DEPLOY_KEY" > ~/.ssh/id_sdk
-          chmod 600 ~/.ssh/id_sdk
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_sdk -o IdentitiesOnly=yes" make sdk-publish
+      # Trusted publishing needs npm 11.5.1 or newer; this is the version `make sdk-publish` was proven with.
+      - run: npm install --global npm@12.1.0
+      - run: make sdk-publish

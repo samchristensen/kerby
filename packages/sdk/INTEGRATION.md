@@ -24,22 +24,23 @@ worker crashes, and keeping every transcript.
 
 ## 1. Set up
 
-1. **Get a base URL and an API key.** Kerby runs as an install beside your project (the Kerby repository's
-   `docs/deploy.md`):
+1. **Get a base URL and an API key.** Kerby runs as an install beside your project
+   ([docs/deploy.md](https://github.com/samchristensen/kerby/blob/main/docs/deploy.md) in the Kerby repository):
    - In Compose: `http://kerby:8080`; on Railway: `http://kerby.railway.internal:8080`. The install's `KERBY_API_KEY`
      has every scope (on Railway, reference it: `${{kerby.KERBY_API_KEY}}`). For a narrower key, create an
      **integration** in the console with only the scopes your application needs (a chat backend needs
      `conversations`, plus `events` if it polls events), then copy the key it shows once.
    - Local stack (in the Kerby repo): `make up` prints `http://127.0.0.1:8080` and a key. It runs a scripted fake model, so
      no provider key is needed (see [Test without a model](#10-test-without-a-model)).
-2. **Install** (the repository is private; use an account with access, over SSH or a token):
+2. **Install**:
 
    ```sh
-   pnpm add github:samchristensen/kerby-sdk#v0.1.0     # or npm install / yarn add the same specifier
+   npm install @kerby/sdk      # or: pnpm add @kerby/sdk
    ```
 
-   Pin a tag. The tag is the contract version: a new SDK version tracks the API it was built from. Node 22+ (global `fetch`);
-   it also runs in Bun, Deno and edge runtimes. TypeScript consumers need `@types/node` or the DOM lib for `fetch` types.
+   Pin the version your lockfile resolves. The version is the contract version: a new SDK version tracks the API it was
+   built from (`npm view @kerby/sdk versions` lists them). Node 22+ (global `fetch`, `AbortSignal.any`); it also runs in
+   Bun, Deno and edge runtimes. TypeScript consumers need `@types/node` or the DOM lib for `fetch` types.
 3. **Configuration**: read two environment variables in your application, never in the SDK:
    `KERBY_BASE_URL` and `KERBY_API_KEY`. Fail at startup when either is missing.
 4. **Create the client once** and reuse it:
