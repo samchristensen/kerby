@@ -46,5 +46,5 @@ for await (const event of kerby.conversations.streamReply(chat.id, "And again, s
 ## Versions
 
 A tag `vX.Y.Z` is the SDK built from one commit of the Kerby repository: its contracts are that commit's. Pin a tag.
-This repository is generated: change the SDK in the Kerby repository (`packages/sdk`, `packages/contracts`) and publish
-with `make sdk-publish`; edits made here are overwritten.
+This repository is generated: change the SDK in the Kerby repository (`packages/sdk`, `packages/contracts`); every merge
+to `main` publishes a new tag when the build changed. Edits made here are overwritten.

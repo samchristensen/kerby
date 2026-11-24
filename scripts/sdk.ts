@@ -61,7 +61,16 @@ function stringAt(document: unknown, ...path: string[]): string {
   return value;
 }
 
-function build(): { version: string } {
+/** The release line from packages/sdk/package.json: its `version` is `<major>.<minor>.0` and patches are numbered by `publish`. */
+function line(): string {
+  const [major, minor] = stringAt(
+    JSON.parse(readFileSync(join(sdkDir, "package.json"), "utf8")),
+    "version",
+  ).split(".");
+  return `${major}.${minor}`;
+}
+
+function build(version: string): void {
   rmSync(dist, { recursive: true, force: true });
   run("pnpm", ["exec", "tsc", "-p", join(sdkDir, "tsconfig.build.json")]);
 
@@ -89,10 +98,7 @@ function build(): { version: string } {
       `the SDK imports a @kerby package the build does not carry:\n  ${unresolved.join("\n  ")}\nFix: add it to ENTRIES in scripts/sdk.ts and to paths in packages/sdk/tsconfig.build.json.`,
     );
 
-  const version = stringAt(
-    JSON.parse(readFileSync(join(sdkDir, "package.json"), "utf8")),
-    "version",
-  );
+  // `version` is `<major>.<minor>.<patch>`; see `line()` and `publish`.
   const zod = stringAt(
     parse(readFileSync(join(root, "pnpm-workspace.yaml"), "utf8")),
     "catalog",
@@ -115,7 +121,6 @@ function build(): { version: string } {
   for (const doc of DOCS) cpSync(join(sdkDir, doc), join(dist, doc));
   cpSync(join(sdkDir, "publish"), dist, { recursive: true });
   console.log(`built @kerby/sdk ${version} in ${relative(root, dist)}`);
-  return { version };
 }
 
 function publish(dryRun: boolean): void {
@@ -124,28 +129,40 @@ function publish(dryRun: boolean): void {
       "the working tree has uncommitted changes. Fix: commit them first; the SDK is published from a commit, and its message names the commit.",
     );
   const commit = run("git", ["rev-parse", "--short", "HEAD"]).trim();
-  const { version } = build();
-  const tag = `v${version}`;
   const repo = process.env.KERBY_SDK_REPO ?? DEFAULT_REPO;
+  const minor = line();
 
   const work = mkdtempSync(join(tmpdir(), "kerby-sdk-"));
   try {
     const checkout = join(work, "repo");
     run("git", ["clone", repo, checkout]);
-    // Replace the tree: a file deleted from dist/ must disappear from the repository.
-    for (const name of readdirSync(checkout)) {
-      if (name !== ".git") rmSync(join(checkout, name), { recursive: true, force: true });
-    }
-    cpSync(dist, checkout, { recursive: true });
-    run("git", ["add", "-A"], checkout);
-    if (run("git", ["status", "--porcelain"], checkout).trim() === "") {
-      console.log("the SDK repository already has exactly this build; nothing to publish");
+    // The patch number is the next free one on this line (0.1.0, 0.1.1, ...): nobody bumps it by hand.
+    const patches = run("git", ["tag", "--list", `v${minor}.*`], checkout)
+      .split("\n")
+      .map((tag) => Number(tag.slice(`v${minor}.`.length)))
+      .filter(Number.isInteger);
+    const latest = patches.length > 0 ? Math.max(...patches) : undefined;
+
+    const stage = (version: string) => {
+      build(version);
+      // Replace the tree: a file deleted from dist/ must disappear from the repository.
+      for (const name of readdirSync(checkout)) {
+        if (name !== ".git") rmSync(join(checkout, name), { recursive: true, force: true });
+      }
+      cpSync(dist, checkout, { recursive: true });
+      run("git", ["add", "-A"], checkout);
+    };
+    // Build as the latest version: no difference means nothing changed since it, and nothing is published.
+    stage(`${minor}.${latest ?? 0}`);
+    if (latest !== undefined && run("git", ["status", "--porcelain"], checkout).trim() === "") {
+      console.log(
+        `@kerby/sdk ${minor}.${latest} is already exactly this build; nothing to publish`,
+      );
       return;
     }
-    if (run("git", ["tag", "--list", tag], checkout).trim() !== "")
-      throw new Error(
-        `${tag} is already published with different contents. Fix: raise "version" in packages/sdk/package.json (consumers pin a tag, so a tag never moves).`,
-      );
+    const version = `${minor}.${latest === undefined ? 0 : latest + 1}`;
+    stage(version);
+    const tag = `v${version}`;
     run("git", ["commit", "-m", `@kerby/sdk ${version} from kerby ${commit}`], checkout);
     run("git", ["tag", tag], checkout);
     if (dryRun) {
@@ -161,7 +178,7 @@ function publish(dryRun: boolean): void {
 }
 
 const [command, flag] = process.argv.slice(2);
-if (command === "build") build();
+if (command === "build") build(`${line()}.0`);
 else if (command === "publish") publish(flag === "--dry-run");
 else {
   console.error("usage: node scripts/sdk.ts build | publish [--dry-run]");

@@ -31,7 +31,7 @@ with the reason.
 - No build step: `exports` points at `src/index.ts` and Node runs TypeScript directly (`erasableSyntaxOnly`). The one
   exception is the console's pages, which `next build` compiles when its image is built (ADR 0014).
 - `packages/sdk` is the one package that leaves the repository: customers install it. `make sdk-build` compiles it
-  with the contract files it re-exports (`@kerby/contracts/tenant`) and `make sdk-publish` pushes the result to a private
+  with the contract files it re-exports (`@kerby/contracts/tenant`); CI runs `make sdk-publish` on every merge to `main`, which pushes the result to a private
   repository as a tag ([ADR 0023](docs/adr/0023-sdk.md)). Its `INTEGRATION.md` is the guide an agent follows to integrate
   an application; a change to a tenant-facing contract or route is a change to the SDK and that guide, and `make sdk-e2e` shows it.
 

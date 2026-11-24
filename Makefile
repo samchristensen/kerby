@@ -91,7 +91,7 @@ sdk-e2e: ## @kerby/sdk against the running local stack (make up first): every re
 sdk-build: ## Build @kerby/sdk into packages/sdk/dist (compiled code, contracts, guide), as published
 	node scripts/sdk.ts build
 
-sdk-publish: ## Publish @kerby/sdk to its private GitHub repo as tag v<version> (DRY=1 commits locally, pushes nothing)
+sdk-publish: ## Publish @kerby/sdk to its private GitHub repo as the next v<major>.<minor>.<n> if the build changed (CI does this on main; DRY=1 pushes nothing)
 	node scripts/sdk.ts publish $(if $(DRY),--dry-run)
 
 multitenant: ## Cross-tenant attempts, suspension within the cache TTL, a 200-tenant load run (KERBY_LOAD_TENANTS=n) and stream saturation on two api processes
