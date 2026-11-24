@@ -152,8 +152,12 @@ function publishedPatches(minor: string): number[] {
 /** `npm pack <spec>` unpacked under `into`: the files a consumer would get, by path. */
 function unpacked(spec: string, into: string): Map<string, Buffer> {
   mkdirSync(into, { recursive: true });
-  const packed = run("npm", ["pack", spec, "--json", "--pack-destination", into]);
-  run("tar", ["-xzf", join(into, stringAt(JSON.parse(packed), "0", "filename")), "-C", into]);
+  run("npm", ["pack", spec, "--pack-destination", into]);
+  // `npm pack --json` changes shape between npm versions, so take the one tarball it wrote from the directory.
+  const tarballs = readdirSync(into).filter((name) => name.endsWith(".tgz"));
+  if (tarballs.length !== 1)
+    throw new Error(`npm pack ${spec} wrote ${tarballs.length} tarballs; expected one`);
+  run("tar", ["-xzf", join(into, tarballs[0] ?? ""), "-C", into]);
   const contents = new Map<string, Buffer>();
   for (const file of files(join(into, "package"))) {
     contents.set(relative(join(into, "package"), file), readFileSync(file));
